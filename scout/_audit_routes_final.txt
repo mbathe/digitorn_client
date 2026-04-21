@@ -1,0 +1,330 @@
+================================================================================
+Backend routes + client call audit
+================================================================================
+
+Backend: 213 unique routes
+
+Client: 221 distinct /api/* paths referenced
+
+================================================================================
+UNWIRED ROUTES  (38 / 213 total)
+================================================================================
+
+── admin.py  (20 unwired) ──
+  GET    /api/admin/{app_id}/approvals  [L297]
+  POST   /api/admin/{app_id}/approve  [L313]
+  POST   /api/admin/{app_id}/disable  [L178]
+  POST   /api/admin/{app_id}/enable  [L227]
+  GET    /api/admin/{app_id}/mcp/pending-oauth  [L1124]
+  POST   /api/admin/{app_id}/mcp/{server_id}/oauth-token  [L1175]
+  DELETE /api/admin/{app_id}/mcp/{server_id}/oauth-token  [L1241]
+  GET    /api/admin/{app_id}/oauth/authorize  [L985]
+  GET    /api/admin/{app_id}/oauth/callback  [L1036]
+  GET    /api/admin/{app_id}/quota  [L358]
+  PUT    /api/admin/{app_id}/quota  [L366]
+  DELETE /api/admin/{app_id}/quota  [L378]
+  GET    /api/admin/{app_id}/quota/user/{user_id}  [L388]
+  PUT    /api/admin/{app_id}/quota/user/{user_id}  [L398]
+  DELETE /api/admin/{app_id}/quota/user/{user_id}  [L413]
+  POST   /api/admin/{app_id}/reload  [L434]
+  GET    /api/admin/{app_id}/required-secrets  [L618]
+  GET    /api/admin/{app_id}/secrets  [L502]
+  PUT    /api/admin/{app_id}/secrets/{key}  [L832]
+  DELETE /api/admin/{app_id}/secrets/{key}  [L964]
+
+── apps.py  (14 unwired) ──
+  GET    /api/apps/{app_id}/mcp/pending-oauth  [L9487]
+  POST   /api/apps/{app_id}/mcp/{server_id}/oauth-token  [L9538]
+  DELETE /api/apps/{app_id}/mcp/{server_id}/oauth-token  [L9604]
+  GET    /api/apps/{app_id}/oauth/authorize  [L9348]
+  GET    /api/apps/{app_id}/oauth/callback  [L9399]
+  GET    /api/apps/{app_id}/quota  [L8721]
+  PUT    /api/apps/{app_id}/quota  [L8729]
+  DELETE /api/apps/{app_id}/quota  [L8741]
+  GET    /api/apps/{app_id}/quota/user/{user_id}  [L8751]
+  PUT    /api/apps/{app_id}/quota/user/{user_id}  [L8761]
+  DELETE /api/apps/{app_id}/quota/user/{user_id}  [L8776]
+  GET    /api/apps/{app_id}/secrets  [L8865]
+  PUT    /api/apps/{app_id}/secrets/{key}  [L9195]
+  DELETE /api/apps/{app_id}/secrets/{key}  [L9327]
+
+── preview_widgets.py  (2 unwired) ──
+  GET    /api/apps/{app_id}/widgets/data/{binding}/stream  [L730]
+  GET    /api/apps/{app_id}/widgets/upload/{user_id}/{sid}/{file_id}/{filename}  [L699]
+
+── sessions.py  (1 unwired) ──
+  GET    /api/apps/{app_id}/sessions/{session_id}/images/{image_id}  [L468]
+
+── workspace.py  (1 unwired) ──
+  GET    /api/apps/{app_id}/sessions/{session_id}/workspace/files/{file_path:path}/history  [L501]
+
+================================================================================
+WIRED ROUTES  (175) — already called by the client
+================================================================================
+  DELETE /api/admin
+  DELETE /api/admin/credentials
+  DELETE /api/apps
+  DELETE /api/apps/{}/background-sessions
+  DELETE /api/apps/{}/background-sessions/{}/payload
+  DELETE /api/apps/{}/background-tasks
+  DELETE /api/apps/{}/sessions
+  DELETE /api/apps/{}/watchers
+  DELETE /api/builder/drafts
+  DELETE /api/credentials
+  DELETE /api/mcp/servers
+  DELETE /api/users/me/devices
+  DELETE /api/users/me/inbox
+  DELETE /auth/sessions
+  GET    /api/admin/credentials
+  GET    /api/apps
+  GET    /api/apps/{}/activations
+  GET    /api/apps/{}/activations/stats
+  GET    /api/apps/{}/approvals
+  GET    /api/apps/{}/artifacts/{}/download
+  GET    /api/apps/{}/assets
+  GET    /api/apps/{}/background-sessions
+  GET    /api/apps/{}/background-sessions/{}/payload
+  GET    /api/apps/{}/background-tasks
+  GET    /api/apps/{}/channels/health
+  GET    /api/apps/{}/credentials/schema
+  GET    /api/apps/{}/deploy-status
+  GET    /api/apps/{}/diagnostics
+  GET    /api/apps/{}/errors
+  GET    /api/apps/{}/files
+  GET    /api/apps/{}/icon
+  GET    /api/apps/{}/index
+  GET    /api/apps/{}/notifications/active
+  GET    /api/apps/{}/payload-schema
+  GET    /api/apps/{}/preview
+  GET    /api/apps/{}/preview-server/logs
+  GET    /api/apps/{}/preview-server/status
+  GET    /api/apps/{}/required-secrets
+  GET    /api/apps/{}/sessions
+  GET    /api/apps/{}/sessions/search
+  GET    /api/apps/{}/sessions/{}/export
+  GET    /api/apps/{}/sessions/{}/history
+  GET    /api/apps/{}/sessions/{}/memory
+  GET    /api/apps/{}/sessions/{}/preview
+  GET    /api/apps/{}/sessions/{}/queue
+  GET    /api/apps/{}/sessions/{}/tasks
+  GET    /api/apps/{}/sessions/{}/workspace
+  GET    /api/apps/{}/sessions/{}/workspace/code-snapshot
+  GET    /api/apps/{}/sessions/{}/workspace/export
+  GET    /api/apps/{}/sessions/{}/workspace/files
+  GET    /api/apps/{}/sessions/{}/workspace/preview-snapshot
+  GET    /api/apps/{}/status
+  GET    /api/apps/{}/tools
+  GET    /api/apps/{}/tools/categories
+  GET    /api/apps/{}/tools/search
+  GET    /api/apps/{}/triggers
+  GET    /api/apps/{}/ui-config
+  GET    /api/apps/{}/watchers
+  GET    /api/apps/{}/widgets
+  GET    /api/apps/{}/widgets/data
+  GET    /api/apps/{}/widgets/validate
+  GET    /api/builder/drafts
+  GET    /api/config/browse
+  GET    /api/credentials
+  GET    /api/credentials-grants
+  GET    /api/credentials/providers
+  GET    /api/credentials/{}/grants
+  GET    /api/discovery/modules
+  GET    /api/discovery/templates
+  GET    /api/discovery/triggers
+  GET    /api/discovery/triggers/configured
+  GET    /api/mcp/catalog
+  GET    /api/mcp/pool
+  GET    /api/mcp/pool/health
+  GET    /api/mcp/search
+  GET    /api/mcp/servers
+  GET    /api/modules
+  GET    /api/modules/{}/health
+  GET    /api/packages
+  GET    /api/packages/{}/assets
+  GET    /api/packages/{}/check-update
+  GET    /api/packages/{}/icon
+  GET    /api/transcribe/health
+  GET    /api/ui/tool_display_defaults
+  GET    /api/users/me/approvals
+  GET    /api/users/me/avatar
+  GET    /api/users/me/credentials
+  GET    /api/users/me/devices
+  GET    /api/users/me/inbox
+  GET    /api/users/me/inbox/unread_count
+  GET    /api/users/me/notification-prefs
+  GET    /api/users/me/profile
+  GET    /api/users/me/quotas
+  GET    /api/users/me/sessions
+  GET    /api/users/me/usage
+  GET    /auth/me
+  GET    /auth/sessions
+  GET    /auth/sessions/{}/history
+  HEAD   /api/apps/{}/artifacts/{}/download
+  PATCH  /api/builder/drafts
+  POST   /api/admin/credentials
+  POST   /api/apps/deploy
+  POST   /api/apps/deploy/upload
+  POST   /api/apps/validate
+  POST   /api/apps/{}/approve
+  POST   /api/apps/{}/background-sessions
+  POST   /api/apps/{}/background-sessions/{}/pause
+  POST   /api/apps/{}/background-sessions/{}/resume
+  POST   /api/apps/{}/background-tasks
+  POST   /api/apps/{}/background-tasks/{}/wait
+  POST   /api/apps/{}/disable
+  POST   /api/apps/{}/enable
+  POST   /api/apps/{}/interact
+  POST   /api/apps/{}/notifications
+  POST   /api/apps/{}/pipeline
+  POST   /api/apps/{}/preview-server/restart
+  POST   /api/apps/{}/reload
+  POST   /api/apps/{}/run
+  POST   /api/apps/{}/sessions
+  POST   /api/apps/{}/sessions/{}/abort
+  POST   /api/apps/{}/sessions/{}/compact
+  POST   /api/apps/{}/sessions/{}/fork
+  POST   /api/apps/{}/sessions/{}/messages
+  POST   /api/apps/{}/sessions/{}/resume
+  POST   /api/apps/{}/sessions/{}/tasks/{}/cancel
+  POST   /api/apps/{}/sessions/{}/undo
+  POST   /api/apps/{}/sessions/{}/workspace/commit
+  POST   /api/apps/{}/sessions/{}/workspace/files/approve
+  POST   /api/apps/{}/sessions/{}/workspace/files/approve-hunks
+  POST   /api/apps/{}/sessions/{}/workspace/files/reject
+  POST   /api/apps/{}/sessions/{}/workspace/files/reject-hunks
+  POST   /api/apps/{}/sessions/{}/workspace/fork
+  POST   /api/apps/{}/sessions/{}/workspace/git-status
+  POST   /api/apps/{}/sessions/{}/workspace/import
+  POST   /api/apps/{}/tools/{}/execute
+  POST   /api/apps/{}/triggers/{}/fire
+  POST   /api/apps/{}/triggers/{}/test
+  POST   /api/apps/{}/watchers
+  POST   /api/apps/{}/watchers/{}/pause
+  POST   /api/apps/{}/watchers/{}/resume
+  POST   /api/apps/{}/widgets/action
+  POST   /api/apps/{}/widgets/upload
+  POST   /api/builder/drafts
+  POST   /api/builder/drafts/{}/deploy
+  POST   /api/credentials
+  POST   /api/credentials/{}/grant
+  POST   /api/credentials/{}/grants
+  POST   /api/discovery/compile
+  POST   /api/discovery/generate-package-manifest
+  POST   /api/discovery/prompt-preview
+  POST   /api/mcp/pool/{}/connect
+  POST   /api/mcp/pool/{}/disconnect
+  POST   /api/mcp/servers
+  POST   /api/mcp/servers/{}/test
+  POST   /api/modules/{}/execute
+  POST   /api/packages/install
+  POST   /api/packages/{}/uninstall
+  POST   /api/packages/{}/upgrade
+  POST   /api/transcribe
+  POST   /api/users/me/avatar
+  POST   /api/users/me/devices
+  POST   /api/users/me/inbox/read_all
+  POST   /api/users/me/inbox/{}/read
+  POST   /api/users/me/password
+  POST   /auth/login
+  POST   /auth/logout
+  POST   /auth/refresh
+  POST   /auth/register
+  POST   /auth/sessions/{}/fork
+  PUT    /api/apps/{}/background-sessions/{}/payload
+  PUT    /api/apps/{}/sessions/{}/workspace/files
+  PUT    /api/credentials
+  PUT    /api/mcp/servers/{}/config
+  PUT    /api/users/me/notification-prefs
+  PUT    /api/users/me/profile
+
+================================================================================
+STRAY CLIENT PATHS  (77) — referenced but no backend match (possible typo or templated at runtime)
+================================================================================
+  /api/admin/*   in admin_service.dart
+  /api/admin/audit   in admin_service.dart
+  /api/admin/audit   in admin_audit_section.dart
+  /api/admin/audit is deployed.   in admin_overview_section.dart
+  /api/admin/quotas   in quotas_service.dart
+  /api/admin/quotas   in admin_console_page.dart
+  /api/admin/quotas   in quotas_admin_page.dart
+  /api/admin/sessions   in admin_service.dart
+  /api/admin/stats   in admin_service.dart
+  /api/admin/stats yet. The other admin sections still work — they each fetch their own data.   in admin_overview_section.dart
+  /api/admin/users   in admin_service.dart
+  /api/admin/users/{}/sessions   in admin_service.dart
+  /api/admin/{}/...   in app_admin_service.dart
+  /api/admin/{}/…   in app_admin_service.dart
+  /api/apps/{}${url.startsWith(   in data_runtime.dart
+  /api/apps/{}${urlRaw.startsWith(   in input.dart
+  /api/apps/{}/...   in app_admin_service.dart
+  /api/apps/{}/activations/{}/events   in background_app_service.dart
+  /api/apps/{}/background-sessions/{}   in automation_service.dart
+  /api/apps/{}/background-sessions/{}/payload/files   in automation_service.dart
+  /api/apps/{}/manifest   in api_client.dart
+  /api/apps/{}/sessions/{}/lsp/cancel   in api_client.dart
+  /api/apps/{}/sessions/{}/lsp/request   in api_client.dart
+  /api/apps/{}/sessions/{}/lsp/request   in lsp_service.dart
+  /api/apps/{}/sessions/{}/queue/clear   in session_service.dart
+  /api/apps/{}/sessions/{}/workbench/open   in workspace_service.dart
+  /api/apps/{}/some/path   in service.dart
+  /api/apps/{}/widgets*   in service.dart
+  /api/apps/{}/…   in app_admin_service.dart
+  /api/auth.test   in credential_probe.dart
+  /api/credentials    in credentials_v2_service.dart
+  /api/credentials*   in credentials_v2_service.dart
+  /api/credentials/oauth/start   in credentials_v2_service.dart
+  /api/credentials/oauth/status   in credentials_v2_service.dart
+  /api/credentials/oauth/{}/start   in credentials_v2_service.dart
+  /api/credentials/oauth/{}/status   in credentials_v2_service.dart
+  /api/credentials/test   in credentials_v2_service.dart
+  /api/credentials/{}/grant    in credentials_v2_service.dart
+  /api/credentials/{}/test   in credentials_v2_service.dart
+  /api/health   in daemon_step.dart
+  /api/mcp/catalog/search   in mcp_service.dart
+  /api/mcp/catalogue   in mcp_service.dart
+  /api/mcp/catalogue   in mcp_catalogue.dart
+  /api/mcp/catalogue yet — these are highlights from the modelcontextprotocol reference repo. Install actions wire up the moment the daemon ships the routes.   in mcp_store_page.dart
+  /api/mcp/oauth/callback   in mcp_service.dart
+  /api/mcp/oauth/start   in mcp_service.dart
+  /api/mcp/oauth/start   in mcp_oauth_dialog.dart
+  /api/mcp/oauth/status   in mcp_service.dart
+  /api/mcp/servers/{}/start   in mcp_service.dart
+  /api/mcp/servers/{}/status   in mcp_service.dart
+  /api/mcp/servers/{}/stop   in mcp_service.dart
+  /api/mcp/servers/{}/tools   in mcp_service.dart
+  /api/metrics/apps   in app_health.dart
+  /api/modules/{}/enable   in modules_service.dart
+  /api/packages*   in package_service.dart
+  /api/packages/available   in package_service.dart
+  /api/packages/available   in featured_catalogue.dart
+  /api/packages/check-updates   in package_service.dart
+  /api/transcribe endpoint (see    in voice_input_service.dart
+  /api/users   in admin_service.dart
+  /api/users/me/avatar/alice.png   in auth_service.dart
+  /api/users/me/credentials/{}   in credential_service.dart
+  /api/users/me/credentials/{}/{}/mcp/start   in credential_service.dart
+  /api/users/me/credentials/{}/{}/mcp/status   in credential_service.dart
+  /api/users/me/credentials/{}/{}/mcp/stop   in credential_service.dart
+  /api/users/me/credentials/{}/{}/oauth/refresh   in credential_service.dart
+  /api/users/me/credentials/{}/{}/oauth/start   in credential_service.dart
+  /api/users/me/credentials/{}/{}/oauth/status   in credential_service.dart
+  /api/users/me/inbox ← HTTP    in activity_inbox_service.dart
+  /api/v4   in mcp_catalogue.dart
+  /api/{}/{}/approvals   in app_admin_service.dart
+  /api/{}/{}/approve   in app_admin_service.dart
+  /api/{}/{}/mcp   in app_admin_service.dart
+  /api/{}/{}/mcp/pending-oauth   in app_admin_service.dart
+  /api/{}/{}/oauth/authorize   in app_admin_service.dart
+  /api/{}/{}/quota   in app_admin_service.dart
+  /api/{}/{}/quota/user   in app_admin_service.dart
+  /api/{}/{}/required-secrets   in app_admin_service.dart
+  /api/{}/{}/secrets   in app_admin_service.dart
+  /auth/admin/users   in admin_service.dart
+  /auth/login_page.dart   in main.dart
+  /auth/me error:    in auth_service.dart
+  /auth/me ← {}    in auth_service.dart
+  /auth/users   in admin_service.dart
+
+================================================================================
+SUMMARY — backend 213  wired 175  unwired 38
+================================================================================

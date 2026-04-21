@@ -28,7 +28,10 @@ void main() {
       ));
       msg.appendText('After tool');
       expect(msg.timeline.length, 3); // text + tool + text
-      expect(msg.text, 'Before toolAfter tool');
+      // Text blocks separated by a non-text block (tool call) keep their
+      // paragraph separation when flattened — otherwise copy/paste glues
+      // sentences together (e.g. "Before toolAfter tool").
+      expect(msg.text, 'Before tool\n\nAfter tool');
     });
 
     test('thinking text is separate from main text', () {

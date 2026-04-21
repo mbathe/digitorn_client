@@ -1,0 +1,132 @@
+"""Credentials extra keys."""
+import json
+
+packs = {
+    "en": {
+        "delete_title_of": "Delete {name}?",
+        "delete_body_long": "This will remove the credential and revoke every app that uses it. Apps will ask for it again on their next run.",
+        "load_failed": "Failed to load credentials",
+        "subtitle_long": "Stored once in your profile, granted to apps individually. Apps will ask you for missing ones the first time they need them.",
+        "system": "System",
+        "add_short": "Add",
+        "no_credentials_hint_long": "They'll be added automatically the first time an app needs one, or you can add them manually with the button above.",
+        "system_label": "SYSTEM",
+        "actions": "Actions",
+        "grants": "Grants",
+        "pick_provider": "Pick a provider",
+        "new_credential_of": "New {provider} credential",
+        "search_providers": "Search providers…",
+        "oauth_hint": "OAuth credentials are created when an app first asks for them. Open any app that uses {name} and click Connect when prompted.",
+        "label": "Label",
+        "create": "Create",
+        "edit_credential_of": "Edit credential · {provider}",
+        "update_fields_hint": "Update fields (leave blank to keep existing)"
+    },
+    "fr": {
+        "delete_title_of": "Supprimer {name} ?",
+        "delete_body_long": "Cela supprimera l'identifiant et révoquera toutes les applications qui l'utilisent. Les applications le redemanderont lors de leur prochaine exécution.",
+        "load_failed": "Échec du chargement des identifiants",
+        "subtitle_long": "Stockés une fois dans votre profil, accordés aux applications individuellement. Les applications vous demanderont ceux qui manquent la première fois qu'elles en auront besoin.",
+        "system": "Système",
+        "add_short": "Ajouter",
+        "no_credentials_hint_long": "Ils seront ajoutés automatiquement la première fois qu'une application en aura besoin, ou vous pouvez les ajouter manuellement avec le bouton ci-dessus.",
+        "system_label": "SYSTÈME",
+        "actions": "Actions",
+        "grants": "Accès",
+        "pick_provider": "Choisir un fournisseur",
+        "new_credential_of": "Nouvel identifiant {provider}",
+        "search_providers": "Rechercher des fournisseurs…",
+        "oauth_hint": "Les identifiants OAuth sont créés quand une application les demande pour la première fois. Ouvrez n'importe quelle app qui utilise {name} et cliquez sur Connecter quand demandé.",
+        "label": "Étiquette",
+        "create": "Créer",
+        "edit_credential_of": "Modifier l'identifiant · {provider}",
+        "update_fields_hint": "Mettre à jour les champs (laisser vide pour conserver)"
+    },
+    "es": {
+        "delete_title_of": "¿Eliminar {name}?",
+        "delete_body_long": "Esto eliminará la credencial y revocará cada app que la use. Las apps la volverán a pedir en su próxima ejecución.",
+        "load_failed": "Error al cargar credenciales",
+        "subtitle_long": "Almacenadas una vez en tu perfil, otorgadas a las apps individualmente. Las apps te pedirán las que falten la primera vez que las necesiten.",
+        "system": "Sistema",
+        "add_short": "Añadir",
+        "no_credentials_hint_long": "Se añadirán automáticamente la primera vez que una app necesite una, o puedes añadirlas manualmente con el botón de arriba.",
+        "system_label": "SISTEMA",
+        "actions": "Acciones",
+        "grants": "Permisos",
+        "pick_provider": "Elige un proveedor",
+        "new_credential_of": "Nueva credencial {provider}",
+        "search_providers": "Buscar proveedores…",
+        "oauth_hint": "Las credenciales OAuth se crean cuando una app las pide por primera vez. Abre cualquier app que use {name} y haz clic en Conectar cuando se te pida.",
+        "label": "Etiqueta",
+        "create": "Crear",
+        "edit_credential_of": "Editar credencial · {provider}",
+        "update_fields_hint": "Actualizar campos (dejar vacío para conservar)"
+    },
+    "de": {
+        "delete_title_of": "{name} löschen?",
+        "delete_body_long": "Dies entfernt die Anmeldedaten und widerruft jede App, die sie nutzt. Apps fragen beim nächsten Start erneut danach.",
+        "load_failed": "Laden der Anmeldedaten fehlgeschlagen",
+        "subtitle_long": "Einmal in deinem Profil gespeichert, Apps einzeln gewährt. Apps fragen nach fehlenden beim ersten Bedarf.",
+        "system": "System",
+        "add_short": "Hinzufügen",
+        "no_credentials_hint_long": "Sie werden automatisch hinzugefügt, sobald eine App sie braucht, oder du fügst sie manuell über die Schaltfläche oben hinzu.",
+        "system_label": "SYSTEM",
+        "actions": "Aktionen",
+        "grants": "Zugriffe",
+        "pick_provider": "Anbieter wählen",
+        "new_credential_of": "Neue {provider}-Anmeldedaten",
+        "search_providers": "Anbieter suchen…",
+        "oauth_hint": "OAuth-Anmeldedaten werden erstellt, wenn eine App sie zuerst anfordert. Öffne eine App, die {name} nutzt, und klicke auf Verbinden, wenn gefragt.",
+        "label": "Bezeichnung",
+        "create": "Erstellen",
+        "edit_credential_of": "Anmeldedaten bearbeiten · {provider}",
+        "update_fields_hint": "Felder aktualisieren (leer lassen, um zu behalten)"
+    },
+    "pt": {
+        "delete_title_of": "Excluir {name}?",
+        "delete_body_long": "Isto removerá a credencial e revogará cada app que a use. As apps a pedirão novamente na próxima execução.",
+        "load_failed": "Falha ao carregar credenciais",
+        "subtitle_long": "Armazenadas uma vez no seu perfil, concedidas às apps individualmente. As apps pedirão as faltantes na primeira vez que precisarem.",
+        "system": "Sistema",
+        "add_short": "Adicionar",
+        "no_credentials_hint_long": "Serão adicionadas automaticamente na primeira vez que uma app precisar, ou você pode adicioná-las manualmente com o botão acima.",
+        "system_label": "SISTEMA",
+        "actions": "Ações",
+        "grants": "Concessões",
+        "pick_provider": "Escolher um provedor",
+        "new_credential_of": "Nova credencial {provider}",
+        "search_providers": "Buscar provedores…",
+        "oauth_hint": "Credenciais OAuth são criadas quando uma app as pede pela primeira vez. Abra qualquer app que use {name} e clique em Conectar quando solicitado.",
+        "label": "Rótulo",
+        "create": "Criar",
+        "edit_credential_of": "Editar credencial · {provider}",
+        "update_fields_hint": "Atualizar campos (deixe em branco para manter)"
+    },
+    "it": {
+        "delete_title_of": "Eliminare {name}?",
+        "delete_body_long": "Rimuoverà la credenziale e revocherà ogni app che la usa. Le app la richiederanno di nuovo alla prossima esecuzione.",
+        "load_failed": "Caricamento credenziali non riuscito",
+        "subtitle_long": "Memorizzate una volta nel tuo profilo, concesse alle app individualmente. Le app chiederanno quelle mancanti alla prima necessità.",
+        "system": "Sistema",
+        "add_short": "Aggiungi",
+        "no_credentials_hint_long": "Verranno aggiunte automaticamente la prima volta che un'app ne avrà bisogno, oppure puoi aggiungerle manualmente con il pulsante sopra.",
+        "system_label": "SISTEMA",
+        "actions": "Azioni",
+        "grants": "Permessi",
+        "pick_provider": "Scegli un provider",
+        "new_credential_of": "Nuova credenziale {provider}",
+        "search_providers": "Cerca provider…",
+        "oauth_hint": "Le credenziali OAuth vengono create quando un'app le richiede per la prima volta. Apri qualsiasi app che usa {name} e clicca su Connetti quando richiesto.",
+        "label": "Etichetta",
+        "create": "Crea",
+        "edit_credential_of": "Modifica credenziale · {provider}",
+        "update_fields_hint": "Aggiorna i campi (lascia vuoto per mantenere)"
+    }
+}
+
+for lang, extras in packs.items():
+    path = f'assets/translations/{lang}.json'
+    d = json.load(open(path, 'r', encoding='utf-8'))
+    d.setdefault('credentials', {}).update(extras)
+    json.dump(d, open(path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+    print(lang, 'ok')

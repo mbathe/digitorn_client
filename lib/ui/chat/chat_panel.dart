@@ -1,49 +1,140 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
-import 'package:shimmer/shimmer.dart';
-import 'package:flutter_spinkit/flutter_spinkit.dart';
 import '../../models/chat_message.dart';
+import '../../models/app_manifest.dart';
 import '../../models/app_summary.dart';
+import '../../models/queue_entry.dart';
 import '../../services/api_client.dart';
+import '../../services/queue_service.dart';
 import '../../services/session_service.dart';
+import '../../services/session_prefs_service.dart';
+import '../../services/recent_attachments_service.dart';
+import '../../services/background_service.dart';
+import '../../services/socket_service.dart';
+import '../../services/auth_service.dart';
+import '../../services/voice_input_service.dart';
+import '../../services/workspace_snapshot_service.dart';
+import '../../widgets_v1/models.dart' as widgets_models;
+import '../../widgets_v1/service.dart' as widgets_service;
 import '../../services/workspace_service.dart';
+import '../../services/database_service.dart';
 import '../../models/workspace_state.dart';
 import '../../models/session_metrics.dart';
 import '../../main.dart';
 import 'chat_bubbles.dart';
-import '../command_palette.dart';
+import 'chat_panel_logic.dart' as logic;
+import 'recording_overlay.dart';
+import '../../models/credential_v2.dart';
+import '../credentials/credential_gate.dart';
+import '../credentials_v2/credential_picker_dialog.dart';
 import 'context_modal.dart';
+import 'smart_paste.dart';
+import 'snippets_picker.dart';
 import 'tools_modal.dart';
 import 'tasks_modal.dart';
 import 'slash_commands.dart';
-import 'checkpoint_rail.dart';
 import '../../services/notification_service.dart';
+import '../../services/preview_store.dart';
+import '../../services/workspace_module.dart';
 import 'package:desktop_drop/desktop_drop.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../theme/app_theme.dart';
+import 'artifacts/artifact_detector.dart';
+import 'artifacts/artifact_panel.dart';
+import 'artifacts/artifact_service.dart';
+import 'widgets/chat_empty_state.dart';
+import '../workspace/workspace_picker.dart';
+import 'chat_attach_bridge.dart';
+import 'chat_export_bridge.dart';
+import 'attach/attach_menu.dart';
+import 'attach/attachments_bar.dart' as attach_bar;
+import 'attach/attachment_helpers.dart' as attach_helpers;
 
 // ─── Color tokens ────────────────────────────────────────────────────────────
 // All colors now come from context.colors (AppColors theme extension).
 
+class DaemonError {
+  final String error;
+  final String code;
+  final String category;
+  final bool retry;
+  final String? detail;
+
+  const DaemonError({
+    required this.error,
+    this.code = 'internal_error',
+    this.category = 'internal',
+    this.retry = true,
+    this.detail,
+  });
+
+  factory DaemonError.fromJson(Map<String, dynamic> j) => DaemonError(
+    error: j['error'] as String? ?? 'Unknown error',
+    code: j['code'] as String? ?? 'internal_error',
+    category: j['category'] as String? ?? 'internal',
+    retry: j['retry'] as bool? ?? true,
+    detail: j['detail'] as String?,
+  );
+}
+
 class ApprovalRequest {
   final String id;
+  final String agentId;
   final String toolName;
   final Map<String, dynamic> params;
   final String riskLevel;
   final String description;
+  final double createdAt;
+
   ApprovalRequest({
     required this.id,
+    this.agentId = '',
     required this.toolName,
     required this.params,
     this.riskLevel = 'medium',
     this.description = '',
+    double? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now().millisecondsSinceEpoch / 1000;
+
+  bool get isAskUser => toolName == 'ask_user';
+  String get question =>
+      isAskUser ? (params['question'] as String? ?? description) : description;
+  String? get content => isAskUser ? params['content'] as String? : null;
+  bool get hasLongContent => content != null && content!.length > 100;
+
+  // ── Enhanced ask_user mode detection ──────────────────────────────────
+  List<String>? get choices =>
+      isAskUser ? (params['choices'] as List?)?.cast<String>() : null;
+  bool get allowMultiple => params['allow_multiple'] as bool? ?? false;
+  List<Map<String, dynamic>>? get formFields =>
+      isAskUser ? (params['form'] as List?)?.cast<Map<String, dynamic>>() : null;
+  bool get isSimpleQuestion =>
+      isAskUser && choices == null && formFields == null && content == null;
+  bool get isChoices => choices != null && choices!.isNotEmpty;
+  bool get isForm => formFields != null && formFields!.isNotEmpty;
+  bool get isContentReview =>
+      isAskUser && content != null && content!.isNotEmpty && !isChoices && !isForm;
+}
+
+/// Buffered copy of a `user_message` event received with
+/// `pending: true` and no matching optimistic bubble. Held in
+/// [_ChatPanelState._queuedUserMessages] until the daemon actually
+/// starts the turn (`message_started` for the same correlation_id)
+/// at which point we create the chat bubble. Keeping this off the
+/// [ChatMessage] model means the chat timeline is never polluted
+/// with pending-queue entries.
+class _QueuedUserMessage {
+  final String content;
+  final String? clientMessageId;
+  const _QueuedUserMessage({
+    required this.content,
+    required this.clientMessageId,
   });
 }
 
@@ -62,112 +153,504 @@ class _ChatPanelState extends State<ChatPanel> {
   final Map<String, GlobalKey> _messageKeys = {};
   final List<ApprovalRequest> _pendingApprovals = [];
 
-  StreamSubscription? _sseSub;
+  StreamSubscription? _eventSub;
   StreamSubscription? _sessionChangeSub;
+  StreamSubscription? _widgetChatSub;
+  StreamSubscription? _widgetEventSub;
   ChatMessage? _currentMsg;
   bool _isSending = false;
   bool _hadTokens = false; // Track if any tokens were streamed this turn
+  Timer? _responseTimeout;
+  DaemonError? _activeError;
+  String _lastUserText = '';
+  int _credentialRetryCount = 0;
+  String _credentialRetryKey = '';
+  bool _showContextPanel = false;
+  bool _showToolsPanel = false;
+  bool _showTasksPanel = false;
+  bool _showSnippetsPanel = false;
   bool _showScrollDown = false;
-  List<String> _suggestions = [];
   List<SlashCommand> _slashCommands = []; // Slash command menu
+  final List<({String name, String path, bool isImage})> _attachments = [];
 
-  // Token counters
-  int _inTokens = 0;
-  int _outTokens = 0;
-  int _contextMax = 200000;
+  /// True while the user is dragging a file over the chat panel.
+  /// Drives the "Drop to attach" overlay rendered on top of the
+  /// composer & messages.
+  bool _isDragOver = false;
+
+  /// Snapshot of the composer text taken the moment voice recording
+  /// starts. If recording / transcription fails, we roll the
+  /// composer back to this value so leaked partial transcripts don't
+  /// stick around waiting to be sent.
+  String? _preDictateText;
+  VoiceState _lastVoiceState = VoiceState.idle;
+
+  // Local token counters removed — context display uses ContextState only.
 
   // Daemon status phase (e.g. 'planning', 'executing', 'done')
   String _statusPhase = '';
-  // SSE heartbeat — true while streaming, used for alive indicator
-  bool _heartbeat = false;
+  // Heartbeat indicator removed together with the old spinner bar.
 
   // Track current session to detect switches
   String? _currentSessionId;
 
+  /// When non-null the next Send will overwrite the referenced tail
+  /// queue entry via `queue_mode=replace_last` rather than enqueuing
+  /// a fresh one. Set by the Edit action in [_QueuePanel].
+  QueueEntry? _pendingReplaceLast;
+
+  /// Highest `seq` we've seen on a persisted event in this session.
+  /// Agent bubbles created from ephemeral streams (tokens) seed
+  /// their provisional seq from this value so they sit right after
+  /// the preceding daemon event; once the matching `message_started`
+  /// or `token` arrives we pin them to the canonical seq.
+  int _lastPersistedSeq = 0;
+
+  /// Last envelope `ts` we observed, captured at the top of
+  /// [_onEvent]. Bubbles spawned from ephemeral streams (like the
+  /// first token that triggers an assistant bubble) read this so
+  /// the bubble's displayed timestamp reflects the daemon's clock,
+  /// not the client's. Cleared on session switch.
+  DateTime? _lastEventTs;
+
+  /// Set of `seq` values already applied to the chat. Mandated by
+  /// the event-spec §0 ("dedup par seq") — Socket.IO can redeliver
+  /// the same event on reconnect and the replay path can also
+  /// re-feed historical events that already landed live. Every
+  /// `_onEvent` entry point checks this set first and skips
+  /// duplicates.
+  final Set<int> _appliedSeqs = <int>{};
+
+  /// User-message events received with `pending: true` that have
+  /// no matching optimistic bubble in the chat. Per the product
+  /// contract, queued messages must NOT appear in the chat
+  /// timeline until the daemon actually starts executing them —
+  /// they live only in the queue panel until then. We buffer the
+  /// user_message payload here, keyed by correlation_id, and flush
+  /// it into a chat bubble when the matching `message_started`
+  /// fires. The chat bubble's sortKey then pins to the
+  /// `message_started` seq so the message slots into the chat at
+  /// the moment the daemon injected it into the conversation.
+  final Map<String, _QueuedUserMessage> _queuedUserMessages = {};
+
+  /// In-memory cache of messages per session id. Populated when
+  /// switching away, restored when switching back. Guarantees the
+  /// user never sees an empty chat after a round-trip, even if the
+  /// daemon's history endpoint is empty/slow/broken.
+  ///
+  /// Capped at [_maxCachedSessions] with LRU eviction — otherwise a
+  /// long session (hundreds of sessions switched) grows this map
+  /// until it holds every ChatMessage the user has ever seen.
+  final Map<String, List<ChatMessage>> _sessionMessageCache = {};
+  static const int _maxCachedSessions = 8;
+
+  void _cacheSessionMessages(String sessionId, List<ChatMessage> messages) {
+    // Touch: remove + re-insert so most-recent is at the end.
+    _sessionMessageCache.remove(sessionId);
+    _sessionMessageCache[sessionId] = List<ChatMessage>.from(messages);
+    while (_sessionMessageCache.length > _maxCachedSessions) {
+      // Drop the oldest entry (first key in insertion order).
+      final oldest = _sessionMessageCache.keys.first;
+      _sessionMessageCache.remove(oldest);
+    }
+  }
+
+  // ── Replay state ────────────────────────────────────────────────────
+  /// True while we are rebuilding the chat from a historical event log.
+  /// Guards side effects in [_onEvent] (notifications, message queue)
+  /// so they don't fire as if they were live.
+  bool _isReplaying = false;
+  int _replayTotal = 0;
+  int _replayDone = 0;
+
+  /// Live events that arrived during a replay — held back until the
+  /// replay finishes, then drained in order. Prevents interleaving of
+  /// historical and live events (which would break tool-call id
+  /// ordering, turn bookkeeping, and _currentMsg references).
+  final List<Map<String, dynamic>> _liveBuffer = [];
+
+  /// Monotonically increasing counter for unique ChatMessage ids.
+  /// `DateTime.now()` collides when two bubbles are created in the
+  /// same millisecond (agent reply + auto-splash widget, etc.).
+  int _msgCounter = 0;
+  String _nextMsgId(String prefix) =>
+      '$prefix-${DateTime.now().millisecondsSinceEpoch}-${_msgCounter++}';
+
+  /// Watchdog for a stuck spinner. If no chat event arrives for this
+  /// long while `_isSending=true`, we reset the spinner so the user
+  /// can send again. Turns can legitimately be slow, so pick a value
+  /// larger than any reasonable daemon timeout (default 60s).
+  Timer? _spinnerWatchdog;
+  // Threshold chosen to comfortably exceed any single daemon-side
+  // operation that legitimately runs without emitting token/status
+  // events — e.g. a sub-agent spawn that does a long tool call. The
+  // watchdog is the last-resort "daemon is truly silent" reset, not
+  // an activity timer. The daemon's own operation timeout is 120 s
+  // so 180 s guarantees we never pre-empt a legitimate long turn.
+  static const _stuckSpinnerThreshold = Duration(seconds: 180);
+  /// Throttles re-arming of [_spinnerWatchdog]. Re-creating a Timer
+  /// on every token during a dense stream pins the GC; one re-arm
+  /// every 2s is plenty to detect a real stall.
+  DateTime? _lastWatchdogArm;
+
+  // ── Find-in-chat (Ctrl+F / Cmd+F) ──────────────────────────────
+  bool _showFind = false;
+  String _findQuery = '';
+  final TextEditingController _findCtrl = TextEditingController();
+  final FocusNode _findFocus = FocusNode();
+
+  // ── Long-running tool tracker ──────────────────────────────────
+  /// Name of the currently executing tool (from a `tool_use:…` phase)
+  /// and when it started. Drives the lean tool bar that only appears
+  /// for tools that run longer than 2 seconds, so short calls stay
+  /// invisible.
+  String? _activeToolName;
+  DateTime? _activeToolStartedAt;
+  Timer? _activeToolTicker;
+
+  /// Set after a successful replay when the last event in the log was
+  /// not a `turn_end`/`result` — the daemon was mid-turn when we last
+  /// saw it. The Socket.IO join that follows will continue streaming
+  /// the rest of the turn.
+  bool _turnInProgress = false;
+
+  /// Set when the daemon reports the session is interrupted. Shown as
+  /// a red badge on the chat header with a retry affordance.
+  bool _isInterrupted = false;
+
   @override
   void initState() {
     super.initState();
-    _sseSub = SessionService().events.listen(_onEvent);
-    _sessionChangeSub = SessionService().onSessionChange.listen(_onSessionChange);
     _scroll.addListener(_onScroll);
     _ctrl.addListener(_onTextChanged);
-    // Restore history if there's already an active session
-    final active = SessionService().activeSession;
-    if (active != null) {
-      _currentSessionId = active.sessionId;
-      _tryRestoreAndConnect(active.appId, active.sessionId);
-    }
+    // Rebuild when the daemon-persisted queue changes so the composer
+    // badge + queue panel visibility stay in sync.
+    QueueService().addListener(_onQueueChanged);
+    // Expose _exportChat so the session drawer's ⋮ menu can trigger
+    // an export of the currently-mounted conversation.
+    ChatExportBridge().register(_exportChat);
+    // Lets the Monaco editor header's "Add to chat" button push a
+    // workspace file into the composer from outside this widget.
+    ChatAttachBridge().register(_addAttachmentExternal);
+    VoiceInputService().addListener(_onVoiceStateChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _eventSub = SessionService().events.listen(_onEvent);
+      _sessionChangeSub =
+          SessionService().onSessionChange.listen(_onSessionChange);
+      _widgetEventSub =
+          widgets_service.WidgetEventBus().stream.listen(_onWidgetEvent);
+      final active = SessionService().activeSession;
+      if (active != null) {
+        _currentSessionId = active.sessionId;
+        _tryRestoreAndConnect(active.appId, active.sessionId);
+      }
+      // Pending message from dashboard
+      final appState = context.read<AppState>();
+      final pending = appState.pendingMessage;
+      if (pending != null && pending.isNotEmpty) {
+        appState.pendingMessage = null;
+        _ctrl.text = pending;
+        _send();
+      }
+      _widgetChatSub = appState.widgetChatStream.listen((msg) {
+        if (!mounted) return;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _ctrl.text = msg;
+          _send();
+        });
+      });
+    });
   }
 
   @override
   void dispose() {
-    _sseSub?.cancel();
+    _eventSub?.cancel();
     _sessionChangeSub?.cancel();
+    _widgetChatSub?.cancel();
+    _widgetEventSub?.cancel();
+    _responseTimeout?.cancel();
+    _spinnerWatchdog?.cancel();
+    _activeToolTicker?.cancel();
+    QueueService().removeListener(_onQueueChanged);
+    VoiceInputService().removeListener(_onVoiceStateChanged);
+    ChatExportBridge().unregister(_exportChat);
+    ChatAttachBridge().unregister(_addAttachmentExternal);
     _ctrl.dispose();
     _scroll.dispose();
     _focus.dispose();
+    _findCtrl.dispose();
+    _findFocus.dispose();
     super.dispose();
+  }
+
+  /// Stable sort by [ChatMessage.sortKey]. In the arrival-order
+  /// model [ChatMessage.sortKey] is a microseconds-since-epoch tick
+  /// assigned once at construction, so this is effectively a no-op
+  /// (the list is always in insertion order already). Kept as a
+  /// defensive guarantee in case anything ever constructs a bubble
+  /// with an out-of-order explicit sortKey.
+  // Throttle streaming artifact extraction — running the regex on
+  // every token would be wasteful once the body gets long. We only
+  // re-run when the text has grown past the last-seen length AND
+  // the new content could plausibly have crossed a fence boundary.
+  DateTime _lastArtifactScan = DateTime.fromMillisecondsSinceEpoch(0);
+  int _lastArtifactScanLen = 0;
+
+  void _maybeExtractStreamingArtifacts(ChatMessage msg) {
+    if (msg.role != MessageRole.assistant) return;
+    final text = msg.text;
+    if (text.isEmpty) return;
+    // Fast path: no fence in the text yet → nothing to extract.
+    if (!text.contains('```')) return;
+    final now = DateTime.now();
+    final grew = text.length > _lastArtifactScanLen + 32;
+    final sinceLast = now.difference(_lastArtifactScan).inMilliseconds;
+    if (!grew && sinceLast < 180) return;
+    _lastArtifactScan = now;
+    _lastArtifactScanLen = text.length;
+    try {
+      final extraction =
+          ArtifactDetector.extractStreaming(messageId: msg.id, text: text);
+      ArtifactService()
+          .upsertForMessage(msg.id, extraction.artifacts);
+    } catch (e) {
+      debugPrint('streaming artifact extraction failed: $e');
+    }
+  }
+
+  void _resortMessages() {
+    _messages.sort((a, b) => a.sortKey.compareTo(b.sortKey));
+  }
+
+  /// Anchor used by every locally-inserted bubble (compaction,
+  /// error banners, optimistic user messages, system notices).
+  /// Returns the max between the envelope-driven `_lastPersistedSeq`
+  /// and the highest `daemonSeq` already present in the chat.
+  ///
+  /// Why not just `_lastPersistedSeq`? In edge cases the daemon can
+  /// emit an ephemeral event (seq 0) or re-deliver an older one;
+  /// the envelope-level cursor stays stuck at the wrong value and a
+  /// new local bubble would end up anchored BEFORE a freshly-rendered
+  /// daemon event — which is the "stuck-on-top" chronology bug.
+  /// Falling back to `max(rendered seqs)` keeps the invariant "local
+  /// bubbles always land at the tail" even when the envelope cursor
+  /// hasn't caught up yet.
+  int _anchorForNewLocalBubble() {
+    int best = _lastPersistedSeq;
+    for (final m in _messages) {
+      final s = m.daemonSeq;
+      if (s != null && s > best) best = s;
+    }
+    return best;
+  }
+
+  /// Race-guard: if `_currentMsg` was spawned by an early event
+  /// (e.g. `status: requesting`) BEFORE `user_message` arrived, its
+  /// provisional anchor is below the user's just-pinned `envSeq` —
+  /// so the assistant/thinking bubble would render ABOVE the user
+  /// bubble once the user gets its canonical seq. Pin the orphan
+  /// assistant to `envSeq + 1` as a transient floor; the next real
+  /// `message_started` / `token` event overwrites this with the
+  /// canonical seq via [ChatMessage.updateSortKey]. A daemon that
+  /// emits events strictly in-order never hits this path — the pin
+  /// is a no-op when `_currentMsg` already carries a daemon seq.
+  ///
+  /// Must be called inside the caller's `setState` so the post-pin
+  /// [_resortMessages] picks up the new order in the same frame;
+  /// caller is also responsible for that re-sort.
+  void _pinOrphanAssistantAbove(int envSeq) {
+    if (envSeq <= 0) return;
+    final cur = _currentMsg;
+    if (cur == null) return;
+    if (cur.daemonSeq != null) return;
+    cur.updateSortKey(envSeq + 1);
+  }
+
+  /// Parse an envelope-level `ts` (ISO-8601 UTC with a trailing Z)
+  /// into a DateTime. The daemon stamps this at publish time —
+  /// downstream bubbles use it for their displayed timestamp so
+  /// the UI shows server-authoritative times (not the client's
+  /// wall clock). Returns null for missing / malformed strings.
+  DateTime? _parseEventTs(Map<String, dynamic> event) {
+    final ts = event['ts'];
+    if (ts is! String || ts.isEmpty) return null;
+    return DateTime.tryParse(ts);
+  }
+
+  bool _hasLiveAgentActivity() =>
+      logic.hasLiveAgentActivity(hadTokens: _hadTokens, phase: _statusPhase);
+
+  /// Prime the composer to overwrite the given tail queued entry via
+  /// `queue_mode=replace_last`. Next Send uses the same position /
+  /// row id — the daemon rotates the correlation id and broadcasts
+  /// `message_replaced`.
+  void _editTailMessage(QueueEntry entry) {
+    if (!mounted) return;
+    setState(() {
+      _pendingReplaceLast = entry;
+      _ctrl.text = entry.message;
+      _ctrl.selection = TextSelection.fromPosition(
+          TextPosition(offset: entry.message.length));
+    });
+    _focus.requestFocus();
+  }
+
+  void _onQueueChanged() {
+    if (!mounted) return;
+    // One-shot toast on queue_full; consume so it doesn't re-fire.
+    final full = QueueService().lastQueueFull;
+    if (full != null && full.sessionId == _currentSessionId) {
+      QueueService().consumeQueueFull();
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      messenger?.showSnackBar(SnackBar(
+        content: Text(
+          'Queue full (${full.depth}/${full.max}). Wait for a running '
+          'turn to finish or clear pending messages first.',
+        ),
+        duration: const Duration(seconds: 4),
+      ));
+    }
+    setState(() {});
   }
 
   // ─── Session switch ──────────────────────────────────────────────────────
 
   void _onSessionChange(String? newSessionId) {
     if (newSessionId == _currentSessionId) return;
-    _currentSessionId = newSessionId;
+    // Snapshot the outgoing session's messages so we can restore
+    // them if the daemon's /history endpoint returns empty on the
+    // way back in.
+    final outgoing = _currentSessionId;
+    if (outgoing != null && _messages.isNotEmpty) {
+      _cacheSessionMessages(outgoing, _messages);
+    }
+    // ATOMIC cleanup — session id, bubble reference, and per-session
+    // UI state must all flip together. Deferring any of this to a
+    // post-frame callback opens a window where events for the new
+    // session land in the old session's bubble (or vice versa).
+    if (mounted) {
+      setState(() {
+        _currentSessionId = newSessionId;
+        _currentMsg = null;
+        _messages.clear();
+        _messageKeys.clear();
+        _pendingApprovals.clear();
+        _liveBuffer.clear();
+        _isSending = false;
+        _hadTokens = false;
+        _statusPhase = '';
+        _activeError = null;
+        _isInterrupted = false;
+        _turnInProgress = false;
+        _isReplaying = false;
+        _replayTotal = 0;
+        _replayDone = 0;
+        _appliedSeqs.clear();
+        _queuedUserMessages.clear();
+        _lastPersistedSeq = 0;
+        _lastEventTs = null;
+      });
+    } else {
+      _currentSessionId = newSessionId;
+      _currentMsg = null;
+      _liveBuffer.clear();
+      _appliedSeqs.clear();
+      _queuedUserMessages.clear();
+      _lastPersistedSeq = 0;
+      _lastEventTs = null;
+    }
+    _responseTimeout?.cancel();
+    _responseTimeout = null;
+    _spinnerWatchdog?.cancel();
+    _spinnerWatchdog = null;
+    _activeToolTicker?.cancel();
+    _activeToolTicker = null;
+    _activeToolName = null;
+    _activeToolStartedAt = null;
 
-    // Clean up workspace from previous session
+    // Global stores tied to the session context.
     WorkspaceService().clearAll();
     WorkspaceState().onNewSession();
     SessionMetrics().reset();
-
-    // Clear current state
-    setState(() {
-      _messages.clear();
-      _messageKeys.clear();
-      _pendingApprovals.clear();
-      _currentMsg = null;
-      _isSending = false;
-      _statusPhase = '';
-      _inTokens = 0;
-      _outTokens = 0;
-    });
+    ContextState().reset();
+    PreviewStore().reset();
+    WorkspaceModule().reset();
+    WorkspaceSnapshotService().resetForNewSession();
+    ArtifactService().clear();
 
     if (newSessionId == null) return;
     final session = SessionService().activeSession;
     if (session == null) return;
-
-    // Always try to restore — _tryRestoreHistory handles both new and existing
     _tryRestoreAndConnect(session.appId, session.sessionId);
   }
 
   Future<void> _tryRestoreAndConnect(String appId, String sessionId) async {
-    // Try loading full history (works for existing sessions, returns null/empty for new)
-    final full = await SessionService().loadFullHistory(appId, sessionId);
+    final cached = _sessionMessageCache[sessionId];
+    final hadCached = cached != null && cached.isNotEmpty;
+    SessionService().markLoadingHistory(true);
+    final full = await SessionService()
+        .loadFullHistory(appId, sessionId)
+        .whenComplete(() {
+      // Only clear if we're still on the same session — avoids
+      // wiping the flag mid-switch for an orphan response.
+      if (SessionService().activeSession?.sessionId == sessionId) {
+        SessionService().markLoadingHistory(false);
+      }
+    });
 
     if (!mounted || _currentSessionId != sessionId) return;
 
     if (full != null) {
       final messages = full['messages'] ?? full['turns'] ?? [];
+      final events = full['events'];
       final workspace = full['workspace'] as String? ?? '';
       final title = full['title'] as String? ?? '';
+      final interrupted = full['interrupted'] as bool? ?? false;
+      final hasEvents = events is List && events.isNotEmpty;
+
+      // Apply snapshots BEFORE replaying events, so preview files,
+      // memory goal/todos, and workbench buffers are already there
+      // when events reference them.
+      final previewSnap = full['preview_snapshot'] as Map<String, dynamic>?;
+      if (previewSnap != null) {
+        PreviewStore().applySnapshot(previewSnap);
+      }
+      _restoreMemorySnapshot(full);
+
+      if (title.isNotEmpty) {
+        SessionService().updateSessionTitle(sessionId, title);
+      }
+      if (workspace.isNotEmpty && mounted) {
+        context.read<AppState>().setWorkspace(workspace);
+      }
+      final ctx = full['context'] as Map<String, dynamic>?;
+      if (ctx != null) ContextState().updateFromJson(ctx);
+
+      // Preferred path — replay the full event log when the daemon
+      // has one. This is lossless and reproduces tool calls, widgets,
+      // agent events, hooks, approvals, etc. exactly as they ran.
+      if (hasEvents) {
+        await _replayEventLog(events, sessionInterrupted: interrupted);
+        if (!mounted || _currentSessionId != sessionId) return;
+        _cacheSessionMessages(sessionId, _messages);
+        _reconnectSession(appId, sessionId);
+        return;
+      }
 
       if (messages is List && messages.isNotEmpty) {
-        // Existing session — restore everything
+        // Legacy sessions (pre event-log) fall back to turn-based
+        // restoration — less granular but still correct for completed
+        // conversations.
         _restoreFromHistory(List<Map<String, dynamic>>.from(messages));
+        _cacheSessionMessages(sessionId, _messages);
 
-        if (title.isNotEmpty) {
-          SessionService().updateSessionTitle(sessionId, title);
-        }
-        if (workspace.isNotEmpty && mounted) {
-          context.read<AppState>().setWorkspace(workspace);
-        }
-        _restoreMemorySnapshot(full);
-        _restoreWorkbenchSnapshot(full);
-
-        final interrupted = full['interrupted'] as bool? ?? false;
         if (interrupted && mounted) {
-          // Show interrupted state but don't auto-resume — wait for user message
-          setState(() => _statusPhase = 'interrupted');
+          setState(() {
+            _statusPhase = 'interrupted';
+            _isInterrupted = true;
+          });
         }
 
         // Reconnect + resume
@@ -176,14 +659,36 @@ class _ChatPanelState extends State<ChatPanel> {
       } else if (workspace.isNotEmpty && mounted) {
         // Session exists on daemon but no messages yet — restore workspace
         context.read<AppState>().setWorkspace(workspace);
+        // Daemon has nothing — hydrate from our cache as fallback.
+        if (hadCached) {
+          setState(() {
+            _messages.clear();
+            _messageKeys.clear();
+            _messages.addAll(cached);
+          });
+          _reconnectSession(appId, sessionId);
+        }
         return;
       }
     }
 
+    // Daemon returned nothing. Hydrate from cache if we have one so
+    // the user never sees an empty chat after a round-trip.
+    if (hadCached) {
+      setState(() {
+        _messages.clear();
+        _messageKeys.clear();
+        _messages.addAll(cached);
+      });
+      _reconnectSession(appId, sessionId);
+      return;
+    }
     // Truly new session — reset workspace
     if (mounted) context.read<AppState>().setWorkspace('');
   }
 
+  /// Rebuild workspace files from tool calls in restored messages.
+  /// Fallback when workbench_snapshot is not available from daemon.
   void _restoreMemorySnapshot(Map<String, dynamic> full) {
     final memory = full['memory_snapshot'] as Map<String, dynamic>?;
     if (memory == null) return;
@@ -206,24 +711,44 @@ class _ChatPanelState extends State<ChatPanel> {
     }
   }
 
-  void _restoreWorkbenchSnapshot(Map<String, dynamic> full) {
-    final workbench = full['workbench_snapshot'] as Map<String, dynamic>?;
-    if (workbench == null) return;
-    final buffers = workbench['buffers'] as List<dynamic>?;
-    if (buffers != null) {
-      for (final buf in buffers) {
-        if (buf is Map<String, dynamic>) {
-          WorkspaceService().handleEvent('workbench_read', buf);
-        }
-      }
-    }
-  }
-
   Future<void> _reconnectSession(String appId, String sessionId) async {
     // Start metrics polling
     SessionMetrics().startPolling(appId, sessionId);
     // Check state + resume if interrupted (workspace already restored by _tryRestoreHistory)
     await SessionService().checkAndResume(appId, sessionId);
+    // Check for pending approvals (filtered by current session + timeout)
+    try {
+      final pending = await SessionService().loadPendingApprovals(appId);
+      if (pending.isNotEmpty && mounted) {
+        final now = DateTime.now().millisecondsSinceEpoch / 1000;
+        setState(() {
+          for (final p in pending) {
+            // Filter by session
+            final pSession = p['session_id'] as String? ?? '';
+            if (pSession.isNotEmpty && pSession != sessionId) continue;
+
+            // Skip expired approvals (> 5 min)
+            final createdAt = (p['created_at'] as num?)?.toDouble() ?? 0;
+            if (createdAt > 0 && (now - createdAt) > 300) continue;
+
+            final req = ApprovalRequest(
+              id: p['request_id'] as String? ?? '',
+              agentId: p['agent_id'] as String? ?? '',
+              toolName: p['tool_name'] as String? ?? p['tool'] as String? ?? 'unknown',
+              params: Map<String, dynamic>.from(p['tool_params'] ?? p['params'] ?? {}),
+              riskLevel: p['risk_level'] as String? ?? 'medium',
+              description: p['description'] as String? ?? '',
+              createdAt: createdAt > 0 ? createdAt : null,
+            );
+            if (req.id.isNotEmpty && !_pendingApprovals.any((a) => a.id == req.id)) {
+              _pendingApprovals.add(req);
+            }
+          }
+        });
+      }
+    } catch (e, st) {
+      debugPrint('loadPendingApprovals failed: $e\n$st');
+    }
   }
 
   /// Convert daemon history turns into ChatMessage objects
@@ -239,11 +764,17 @@ class _ChatPanelState extends State<ChatPanel> {
             id: 'hist-${restored.length}',
             role: MessageRole.user,
             initialText: content,
+            // Legacy turn format has no per-event seq. Assign a
+            // synthetic monotonic seq so the restored history stays
+            // ordered and sorts above any live event (which carries
+            // the session's real, larger seq).
+            daemonSeq: restored.length + 1,
           ));
         } else if (role == 'assistant') {
           final msg = ChatMessage(
             id: 'hist-${restored.length}',
             role: MessageRole.assistant,
+            daemonSeq: restored.length + 1,
           );
 
           // Restore thinking (shows before tools/text)
@@ -253,23 +784,72 @@ class _ChatPanelState extends State<ChatPanel> {
           }
 
           // Restore tool calls with full detail
-          final toolCalls = turn['toolCalls'] as List<dynamic>? ?? [];
+          final toolCalls = (turn['toolCalls'] as List<dynamic>?)
+              ?? (turn['tool_calls'] as List<dynamic>?)
+              ?? [];
           for (int i = 0; i < toolCalls.length; i++) {
             final tc = toolCalls[i];
             if (tc is Map<String, dynamic>) {
-              // Skip silent/hidden tools in history too
               final name = tc['name'] as String? ?? '';
-              if (_isHiddenTool(name)) continue;
+              final display = tc['display'] as Map<String, dynamic>?;
+              // Contract v2 — trust display.hidden when present.
+              // Fall back to the legacy heuristic only for rows
+              // restored from a daemon that predates the display
+              // block.
+              final hiddenFlag = display?['hidden'] as bool? ??
+                  tc['silent'] as bool? ??
+                  false;
+              final skip = display != null
+                  ? hiddenFlag
+                  : (hiddenFlag || _isHiddenTool(name));
+              if (skip) continue;
 
+              final label = (display?['verb'] as String?)
+                  ?? (tc['label'] as String?)
+                  ?? '';
+              final detail = (display?['detail'] as String?)
+                  ?? (tc['detail'] as String?)
+                  ?? '';
+              final visibleParamsRaw = display?['visible_params'];
+
+              final histResult = tc['result'];
+              final histMeta = tc['metadata'];
               msg.addOrUpdateToolCall(ToolCall(
                 id: tc['id'] as String? ?? 'tc-$i',
                 name: name,
-                label: tc['label'] as String? ?? '',
-                detail: tc['detail'] as String? ?? '',
+                label: label,
+                detail: detail,
+                detailParam: (display?['detail_param'] as String?) ??
+                    (tc['detail_param'] as String?) ??
+                    '',
+                icon: (display?['icon'] as String?) ?? 'tool',
+                channel: (display?['channel'] as String?) ?? 'chat',
+                category: (display?['category'] as String?) ?? 'action',
+                group: (display?['group'] as String?) ?? '',
+                hidden: hiddenFlag,
+                visibleParams: visibleParamsRaw is List
+                    ? visibleParamsRaw.whereType<String>().toList()
+                    : null,
                 params: Map<String, dynamic>.from(tc['params'] ?? {}),
                 status: tc['status'] as String? ?? 'completed',
-                result: tc['result'],
+                result: histResult,
                 error: tc['error'] as String?,
+                previousContent: tc['previous_content'] as String?,
+                newContent: tc['new_content'] as String?,
+                output: tc['output'] as String?,
+                metadata: histMeta is Map
+                    ? Map<String, dynamic>.from(histMeta)
+                    : (histResult is Map && histResult['metadata'] is Map
+                        ? Map<String, dynamic>.from(histResult['metadata'] as Map)
+                        : null),
+                diff: tc['diff'] as String?
+                    ?? (histResult is Map ? histResult['diff'] as String? : null),
+                unifiedDiff: tc['unified_diff'] as String?
+                    ?? (histResult is Map ? histResult['unified_diff'] as String? : null),
+                imageData: tc['image_data'] as String?
+                    ?? (histResult is Map ? histResult['image_data'] as String? : null),
+                imageMime: tc['image_mime'] as String?
+                    ?? (histResult is Map ? histResult['image_mime'] as String? : null),
               ));
             }
           }
@@ -311,7 +891,302 @@ class _ChatPanelState extends State<ChatPanel> {
     }
   }
 
-  // ─── SSE handler (session event bus) ────────────────────────────────────
+  // ─── Event-log replay (rebuild from stored events) ──────────────────────
+  //
+  // The daemon now keeps every event of a turn in SQLite. On session
+  // reopen we replay them through the same `_onEvent` handler used for
+  // live events, so history and live behave identically. `preview:*`
+  // events go through [PreviewStore.applyHistoryEvent] (which the live
+  // path uses via its Socket.IO stream).
+  //
+  // Guarantees:
+  //   • Message list is rebuilt from scratch.
+  //   • Dangling `tool_start` without matching `tool_call` stays in
+  //     `status='started'` so the UI shows the running state.
+  //   • Last event != `turn_end` → _turnInProgress is set, Socket.IO
+  //     rejoin will keep streaming.
+  //   • Session-level `interrupted` flag surfaces as a red banner.
+  Future<void> _replayEventLog(
+    List<dynamic> events, {
+    required bool sessionInterrupted,
+  }) async {
+    // Per event-spec §0: seq is the sole authority. Sort by seq
+    // (daemon-assigned, monotonic strict per user), NEVER by ts
+    // (which is only informative and may drift). ts is used as a
+    // tie-break for the rare case a legacy event has no seq.
+    final sorted = events
+        .whereType<Map>()
+        .map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e))
+        .toList()
+      ..sort((a, b) {
+        final sa = (a['seq'] as num?)?.toInt() ?? 0;
+        final sb = (b['seq'] as num?)?.toInt() ?? 0;
+        if (sa != sb) return sa.compareTo(sb);
+        final ta = (a['ts'] as num?)?.toDouble() ?? 0;
+        final tb = (b['ts'] as num?)?.toDouble() ?? 0;
+        return ta.compareTo(tb);
+      });
+
+    if (!mounted) return;
+    setState(() {
+      _messages.clear();
+      _messageKeys.clear();
+      _currentMsg = null;
+      _isSending = false;
+      _statusPhase = '';
+      _isReplaying = true;
+      _replayTotal = sorted.length;
+      _replayDone = 0;
+    });
+
+    int lastSeq = 0;
+    int openTurn = -1;
+    int closedTurn = -2;
+    double lastTurnActivityTs = 0;
+
+    for (var i = 0; i < sorted.length; i++) {
+      if (!mounted) return;
+      final event = sorted[i];
+      final type = event['type'] as String? ?? '';
+      if (type.isEmpty) continue;
+      // Shape-normalisation. `GET /history` returns each event
+      // with its body under `payload` (matches the daemon's
+      // internal EventBuffer shape), while live socket events
+      // come through `DigitornSocketService._handleBusEvent`
+      // already rewrapped as `data`. Accept either so a
+      // session-reopen replay actually populates tokens, tool
+      // params, hooks, etc. — tested live on
+      // `GET /api/apps/digitorn-builder/sessions/resume-a22188e8/history`.
+      final data = (event['data'] as Map?)?.cast<String, dynamic>() ??
+          (event['payload'] as Map?)?.cast<String, dynamic>() ??
+          const <String, dynamic>{};
+      final seq = (event['seq'] as num?)?.toInt();
+      final turn = (event['turn'] as num?)?.toInt();
+      // Daemon's history stamps `ts` as an ISO-8601 string; socket
+      // events use a string too. Keep this value a double so the
+      // existing heuristics that expect an epoch-seconds number
+      // don't crash — but parse ISO when possible so the "recent
+      // activity" check still works after a reopen.
+      final tsRaw = event['ts'];
+      double ts = 0;
+      if (tsRaw is num) {
+        ts = tsRaw.toDouble();
+      } else if (tsRaw is String && tsRaw.isNotEmpty) {
+        final parsed = DateTime.tryParse(tsRaw);
+        if (parsed != null) {
+          ts = parsed.millisecondsSinceEpoch / 1000.0;
+        }
+      }
+      if (seq != null && seq > lastSeq) lastSeq = seq;
+
+      // Track turn balance — the ONLY reliable signal that a turn
+      // is still running. Ancillary events (memory_update, hook,
+      // preview:*, widget:*) don't count — they can legitimately
+      // trail a completed turn (compaction, workspace cleanup…).
+      if (turn != null) {
+        if (type == 'turn_start') {
+          openTurn = turn;
+          lastTurnActivityTs = ts;
+        }
+        if (type == 'turn_end' ||
+            type == 'result' ||
+            type == 'turn_complete' ||
+            type == 'error' ||
+            type == 'abort') {
+          closedTurn = turn;
+        }
+      }
+      // Record ts for any "live" event type so we can tell how long
+      // ago the daemon actually spoke. Infrastructure events don't
+      // count as activity.
+      const liveTypes = {
+        'token', 'out_token', 'thinking', 'thinking_delta',
+        'tool_start', 'tool_call', 'status', 'agent_event',
+      };
+      if (liveTypes.contains(type) && ts > lastTurnActivityTs) {
+        lastTurnActivityTs = ts;
+      }
+
+      _dispatchReplayEvent(type, data, seq: seq);
+
+      // Yield periodically so the progress bar updates and the UI
+      // stays responsive even with thousands of events.
+      if (i % 40 == 0 && i > 0) {
+        if (mounted) setState(() => _replayDone = i);
+        await Future.delayed(Duration.zero);
+      }
+    }
+
+    // Unclosed turn → a turn_start didn't get a matching terminator.
+    // That's the only case we treat as "mid-turn".
+    final turnsUnbalanced = openTurn >= 0 && openTurn > closedTurn;
+    // Stale guard — if the last live event is older than 90 seconds
+    // the turn almost certainly timed out (daemon crash, abort that
+    // wasn't persisted, …). Don't show a stuck spinner for ghosts.
+    final nowSec = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    final hasRecentActivity = lastTurnActivityTs > 0 &&
+        (nowSec - lastTurnActivityTs) < 90;
+    final stillRunning = turnsUnbalanced && hasRecentActivity;
+
+    if (!mounted) return;
+    setState(() {
+      _isReplaying = false;
+      _replayDone = sorted.length;
+      _replayTotal = 0;
+      // The event log wins: if the last events show a turn still
+      // running, the session is live — the top-level `interrupted`
+      // flag was only true at some earlier point and is now stale.
+      _turnInProgress = stillRunning;
+      _isInterrupted = sessionInterrupted && !stillRunning;
+      if (_turnInProgress) {
+        _isSending = true;
+        if (_statusPhase.isEmpty) _statusPhase = 'responding';
+      } else {
+        // Turn is finished — force-reset every spinner flag even if
+        // a mid-replay `status: responding` armed them. Without
+        // this the "phantom spinner on reopen" comes back every
+        // time the daemon emitted a status event after the final
+        // turn_end (compaction hook, memory_update, …).
+        _isSending = false;
+        _statusPhase = '';
+        _hadTokens = false;
+        _currentMsg?.setStreamingState(false);
+        _currentMsg?.setThinkingState(false);
+        _currentMsg = null;
+      }
+    });
+    _spinnerWatchdog?.cancel();
+    _spinnerWatchdog = null;
+
+    if (lastSeq > 0) {
+      final sid = _currentSessionId;
+      if (sid != null && sid.isNotEmpty) {
+        SessionService().setSeqFor(sid, lastSeq);
+      }
+    }
+
+    // Drain any live events that arrived during the replay. They
+    // were captured before `_isReplaying` flipped back to false, so
+    // we dispatch them through the normal path now — in arrival
+    // order. Yield between events so the UI can draw a frame
+    // instead of blocking for the whole drain.
+    if (_liveBuffer.isNotEmpty) {
+      final buffered = List<Map<String, dynamic>>.from(_liveBuffer);
+      _liveBuffer.clear();
+      for (var i = 0; i < buffered.length; i++) {
+        if (!mounted) break;
+        _onEvent(buffered[i]);
+        if (i % 30 == 29) {
+          await Future.delayed(Duration.zero);
+        }
+      }
+    }
+
+    if (mounted) _scrollToBottom();
+  }
+
+  /// Clear [_isInterrupted] when a live event proves the session is
+  /// active again (status running, token, thinking, tool lifecycle).
+  /// Also resets the stuck-spinner watchdog — we just got an event,
+  /// so the daemon is alive.
+  void _noteLiveActivity() {
+    if (_isInterrupted && mounted) {
+      setState(() => _isInterrupted = false);
+    }
+    _armSpinnerWatchdog();
+  }
+
+  /// Re-arm the stuck-spinner watchdog. Called whenever we see a
+  /// chat-level event. If no event arrives for
+  /// [_stuckSpinnerThreshold] while `_isSending=true`, we forcibly
+  /// reset the spinner so the user isn't stuck. Throttled to at
+  /// most one re-arm every 2 seconds so a dense token stream
+  /// doesn't churn Timers.
+  void _armSpinnerWatchdog() {
+    if (!_isSending) {
+      _spinnerWatchdog?.cancel();
+      _spinnerWatchdog = null;
+      _lastWatchdogArm = null;
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastWatchdogArm != null &&
+        now.difference(_lastWatchdogArm!) < const Duration(seconds: 2)) {
+      return;
+    }
+    _lastWatchdogArm = now;
+    _spinnerWatchdog?.cancel();
+    _spinnerWatchdog = Timer(_stuckSpinnerThreshold, () {
+      if (!mounted || !_isSending) return;
+      debugPrint('ChatPanel: spinner watchdog fired — clearing stuck state');
+      setState(() {
+        _isSending = false;
+        _statusPhase = '';
+        _turnInProgress = false;
+      });
+      _currentMsg?.setStreamingState(false);
+      _currentMsg?.setThinkingState(false);
+    });
+  }
+
+  /// Dispatch a single historical event. `preview:*` goes straight to
+  /// [PreviewStore]; `turn_start` spawns a user bubble (since there is
+  /// no live counterpart); everything else reuses the live handler.
+  void _dispatchReplayEvent(
+    String type,
+    Map<String, dynamic> data, {
+    int? seq,
+  }) {
+    // preview:* events bypass _onEvent (which ignores them).
+    if (type.startsWith('preview:')) {
+      PreviewStore().applyHistoryEvent(type, data);
+      return;
+    }
+
+    if (type == 'turn_start') {
+      // Finalise any previous assistant bubble and create the user
+      // bubble that triggered this turn. The live path never emits
+      // `turn_start` — the user's outgoing POST creates the bubble —
+      // so this branch only runs during replay.
+      if (_currentMsg != null) {
+        _currentMsg!.setStreamingState(false);
+        _currentMsg!.setThinkingState(false);
+        _currentMsg = null;
+      }
+      final message = data['message'] as String? ?? '';
+      if (message.isNotEmpty) {
+        final um = ChatMessage(
+          id: 'u-${_messages.length}',
+          role: MessageRole.user,
+          initialText: message,
+          daemonSeq: (seq != null && seq > 0) ? seq : null,
+        );
+        _messages.add(um);
+      }
+      return;
+    }
+
+    // Normalise the daemon's `turn_end` to the existing `turn_complete`
+    // handler so we don't duplicate the finalisation logic. Forward
+    // the original `seq` so dedup and sortKey assignment both work
+    // from the daemon's authoritative ordering.
+    if (type == 'turn_end') {
+      _onEvent({
+        'type': 'turn_complete',
+        'data': data,
+        'seq': ?seq,
+      });
+      return;
+    }
+
+    _onEvent({
+      'type': type,
+      'data': data,
+      'seq': ?seq,
+    });
+  }
+
+  // ─── Session event handler (Socket.IO → SessionService.events) ──────────
   // The daemon sends status events with phase: turn_start, requesting,
   // tool_use, responding, turn_end. Use these directly for the spinner.
   // memory_update and agent_event come as dedicated events — no need to
@@ -321,6 +1196,149 @@ class _ChatPanelState extends State<ChatPanel> {
   void _onEvent(Map<String, dynamic> event) {
     final type = event['type'] as String? ?? '';
     final data = event['data'] as Map<String, dynamic>? ?? {};
+    // Seq is carried at the envelope root — same contract for every
+    // event (user_message, message_*, token, tool_*, thinking_*, etc.).
+    // Defensive fallback into payload is intentional paranoia in case
+    // an older daemon or a history-replay path puts it there.
+    final envSeq = (event['seq'] as num?)?.toInt() ??
+        (data['seq'] as num?)?.toInt() ??
+        0;
+
+    // Dedup by seq (event-spec §0 & §7 "dedup par seq"). An event
+    // can legitimately arrive twice — live over Socket.IO AND via
+    // replay at rejoin, or twice via a socket reconnect handshake.
+    // Ephemeral events (token, thinking_delta, status, preview:*)
+    // don't carry a persisted seq and are allowed through every
+    // time; everything with a real seq goes through the set.
+    if (envSeq > 0 && !_appliedSeqs.add(envSeq)) {
+      return;
+    }
+
+    if (envSeq > _lastPersistedSeq) _lastPersistedSeq = envSeq;
+    // Capture the envelope's ts so bubbles spawned by this event
+    // (ensureBubble for the first token, etc.) can use it for
+    // their displayed timestamp.
+    _lastEventTs = _parseEventTs(event);
+    // Low-volume verify line — filters out token/thinking_delta spam.
+    if (type != 'token' && type != 'thinking_delta') {
+      debugPrint('ChatPanel event: seq=$envSeq type=$type');
+    }
+
+    // ── Buffer live events while we are still replaying history ──────
+    // Lets connection/meta events through so the UI still reflects
+    // socket state during long replays, but holds back everything
+    // that would mutate the chat timeline. The buffer is drained in
+    // order at the end of [_replayEventLog].
+    if (_isReplaying &&
+        !type.startsWith('_') &&
+        type != 'connected' &&
+        type != 'heartbeat') {
+      _liveBuffer.add(event);
+      return;
+    }
+
+    // ── Session isolation: ignore events from other sessions ─────────
+    //
+    // The upstream filter in [SessionService.injectSocketEvent]
+    // already drops cross-session events, but `_currentSessionId` in
+    // this widget lags `SessionService.activeSession` for one
+    // microtask during a switch — compare against the live value so
+    // events for the newly-active session are never dropped.
+    final eventSessionId = event['session_id'] as String? ??
+        data['session_id'] as String? ?? '';
+    final liveSessionId = SessionService().activeSession?.sessionId;
+    if (eventSessionId.isNotEmpty &&
+        liveSessionId != null &&
+        eventSessionId != liveSessionId &&
+        !type.startsWith('_connection')) {
+      return;
+    }
+    // And if the chat-panel's cached current session id doesn't match
+    // the live one, skip mutating widget state — we'll get the event
+    // again after `_onSessionChange` re-syncs in the next microtask.
+    if (_currentSessionId != liveSessionId) {
+      return;
+    }
+
+    // ── Preview events → handled by PreviewWorkspaceProvider ──────────
+    if (type.startsWith('preview:')) return;
+
+    // ── Widget events → forward to global event bus ─────────────────
+    if (type.startsWith('widget:')) {
+      widgets_service.WidgetEventBus().publishRaw(type, data);
+      return;
+    }
+
+    // ── Post-join snapshots ───────────────────────────────────────────
+    // The daemon ships 5 snapshot types right after the event replay
+    // on `join_session` (tested live — see conv.md §join tests). The
+    // preview / queue ones are already absorbed upstream; here we
+    // sync the chat-visible ones so a user who leaves mid-turn and
+    // comes back sees the authoritative latest state.
+    if (type == 'memory:snapshot') {
+      // Reuse the history-path helper by wrapping the payload in the
+      // shape it expects.
+      _restoreMemorySnapshot({'memory_snapshot': data});
+      return;
+    }
+    if (type == 'session:snapshot') {
+      // Update the local AppSession with the daemon's truth so the
+      // sidebar title + preview + cost all reflect the freshest state.
+      final sid = data['session_id'] as String? ?? _currentSessionId ?? '';
+      if (sid.isEmpty) return;
+      final title = (data['title'] as String?)?.trim() ?? '';
+      if (title.isNotEmpty) {
+        SessionService().updateSessionTitle(sid, title);
+      }
+      final interrupted = data['interrupted'];
+      if (interrupted is bool && mounted) {
+        setState(() => _isInterrupted = interrupted);
+      }
+      final turnRunning = data['turn_running'] == true;
+      if (!turnRunning && mounted && _isSending) {
+        // Authoritative "no turn running" — clear any stale spinner
+        // we armed during the history replay heuristic.
+        setState(() {
+          _isSending = false;
+          _turnInProgress = false;
+          _statusPhase = '';
+          _currentMsg?.setStreamingState(false);
+          _currentMsg?.setThinkingState(false);
+          _currentMsg = null;
+        });
+      }
+      return;
+    }
+    if (type == 'active_ops:snapshot') {
+      // Let the OpRegistry / session router handle the heavy
+      // reconciliation if it's wired; here we only clear the chat
+      // panel's transient flags when the server says zero ops are
+      // running. Prevents a phantom spinner after a reopen.
+      final count = (data['count'] as num?)?.toInt() ?? 0;
+      if (count == 0 && mounted && _isSending) {
+        setState(() {
+          _isSending = false;
+          _turnInProgress = false;
+          _statusPhase = '';
+          _currentMsg?.setStreamingState(false);
+          _currentMsg?.setThinkingState(false);
+          _currentMsg = null;
+        });
+      }
+      return;
+    }
+
+    // ── Credential required (top-level event from daemon) ────────────
+    // The daemon emits `type: credential_required` when an agent turn
+    // fails because of a missing/expired/invalid credential. We also
+    // accept the legacy `credential_auth_required` shape in case the
+    // daemon still emits the old form somewhere. Handle them both
+    // through the same picker path.
+    if (type == 'credential_required' ||
+        type == 'credential_auth_required') {
+      _handleCredentialAuthRequired({...data, 'code': type});
+      return;
+    }
 
     // ── Internal session metadata (from checkAndResume) ───────────────
     if (type == '_session_meta') {
@@ -329,26 +1347,113 @@ class _ChatPanelState extends State<ChatPanel> {
       if (workspace.isNotEmpty && mounted) {
         context.read<AppState>().setWorkspace(workspace);
       }
-      return;
-    }
+      // Restore context state from daemon session
+      final ctx = data['context'] as Map<String, dynamic>?;
+      if (ctx != null) ContextState().updateFromJson(ctx);
 
-    // ── Infrastructure events (no bubble) ────────────────────────────
-    if (type == 'connected' || type == 'heartbeat') {
-      if (type == 'heartbeat' && mounted) {
-        setState(() => _heartbeat = true);
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted) setState(() => _heartbeat = false);
+      // Orphan skeleton cleanup. `_BlinkCursor` (the 3-line shimmer
+      // placeholder in the assistant bubble, chat_bubbles.dart:4566)
+      // renders whenever `_currentMsg.isStreaming && text.isEmpty`.
+      // The drain-after-replay path can leave such a bubble behind
+      // when the replay buffer contains a `status: responding` /
+      // `token` that fires `_ensureBubble` but no matching terminal
+      // event (`turn_complete` / `error` / `abort`) ever lands — a
+      // typical shape when the daemon wrote ancillary events (hook,
+      // memory_update, compaction) after the turn closed. `_session_meta`
+      // fires AFTER the drain, so it's the safe place to clear that
+      // orphan. If the session is genuinely active the upcoming live
+      // events will spawn a fresh bubble immediately.
+      final cur = _currentMsg;
+      if (mounted &&
+          cur != null &&
+          cur.role == MessageRole.assistant &&
+          cur.text.isEmpty &&
+          cur.isStreaming) {
+        setState(() {
+          cur.setStreamingState(false);
+          cur.setThinkingState(false);
+          _currentMsg = null;
+        });
+      }
+
+      // Phantom-spinner guard. The replay heuristic at line ~1017
+      // arms `_isSending`/`_turnInProgress` when it sees an
+      // unbalanced `turn_start` within the last 90 s — often wrong
+      // when the daemon appended hooks/memory_update/compaction
+      // events after the turn actually closed. `_session_meta`
+      // carries the daemon's authoritative `is_active`; trust it
+      // when it says the session isn't running.
+      final isActive = data['is_active'] as bool? ?? false;
+      if (!isActive && mounted) {
+        setState(() {
+          _isSending = false;
+          _statusPhase = '';
+          _turnInProgress = false;
+          _hadTokens = false;
         });
       }
       return;
     }
 
+    // ── Connection lost/restored ───────────────────────────────────────
+    if (type == '_connection_lost') {
+      if (mounted) {
+        setState(() {
+          _statusPhase = 'disconnected';
+          // Clear pending approvals — they can't be sent while offline.
+          // The daemon will re-emit them on reconnect if still pending.
+          _pendingApprovals.clear();
+        });
+      }
+      return;
+    }
+    if (type == '_connection_restored') {
+      if (mounted && _statusPhase == 'disconnected') {
+        setState(() => _statusPhase = _isSending ? 'requesting' : '');
+      }
+      return;
+    }
+
+    // ── Infrastructure events (no bubble) ────────────────────────────
+    if (type == 'connected') {
+      // Per event-spec §4: daemon sends `connected` at handshake
+      // with `latest_seq`. If it's smaller than our last-applied
+      // seq the daemon has restarted (its counter reset) — our
+      // local cache is invalid and we must reload from scratch via
+      // GET /history.
+      final latest = (event['latest_seq'] as num?)?.toInt() ??
+          (data['latest_seq'] as num?)?.toInt() ??
+          0;
+      if (latest > 0 &&
+          _lastPersistedSeq > 0 &&
+          latest < _lastPersistedSeq) {
+        debugPrint(
+            'ChatPanel: daemon restart detected (latest=$latest < last=$_lastPersistedSeq) — reloading history');
+        final session = SessionService().activeSession;
+        if (session != null) {
+          setState(() {
+            _messages.clear();
+            _messageKeys.clear();
+            _appliedSeqs.clear();
+            _lastPersistedSeq = 0;
+            _currentMsg = null;
+          });
+          _tryRestoreAndConnect(session.appId, session.sessionId);
+        }
+      }
+      return;
+    }
+    if (type == 'heartbeat') {
+      return;
+    }
+
+    // ── Background task updates → handled by BackgroundService ────────
+    if (type == 'bg_task_update') return;
+
     // ── Workspace-only events (not shown in chat) ────────────────────
-    const wsOnly = {
-      'workbench_read', 'workbench_write', 'workbench_edit',
-      'terminal_output', 'diagnostics',
-    };
-    if (wsOnly.contains(type)) {
+    if (type.startsWith('workbench_') ||
+        type == 'terminal_output' ||
+        type == 'diagnostics') {
       WorkspaceService().handleEvent(type, data);
       final appState = context.read<AppState>();
       // Auto-open workspace panel
@@ -368,14 +1473,63 @@ class _ChatPanelState extends State<ChatPanel> {
 
     // ── Agent event → sidebar + chat ─────────────────────────────────
     if (type == 'agent_event') {
-      final agentId = data['agent_id'] as String? ?? '';
-      final status = data['status'] as String? ?? '';
+      // Daemon sends { action, name, result: {agent_id, status, ...} }
+      // Accept fields at root or nested in result for compat.
+      final result = data['result'] as Map<String, dynamic>? ?? {};
+      final agentId = data['agent_id'] as String?
+          ?? result['agent_id'] as String?
+          ?? '';
+      final status = data['status'] as String?
+          ?? result['status'] as String?
+          ?? '';
+      final action = data['action'] as String?
+          ?? data['name'] as String?
+          ?? '';
+
+      // Map action to status if status is empty
+      final effectiveStatus = status.isNotEmpty ? status : switch (action) {
+        'spawn_agent'    => 'spawned',
+        'agent_result'   => 'completed',
+        'agent_cancel'   => 'cancelled',
+        'agent_wait' || 'agent_wait_all' => 'running',
+        _ => 'running',
+      };
+
+      final specialist = data['specialist'] as String?
+          ?? result['specialist'] as String?
+          ?? data['name'] as String?
+          ?? '';
+      final task = data['task'] as String?
+          ?? result['task'] as String?
+          ?? '';
+      final duration = (data['duration_seconds'] as num?)?.toDouble()
+          ?? (result['duration_seconds'] as num?)?.toDouble()
+          ?? 0;
+      final preview = data['preview'] as String?
+          ?? result['preview'] as String?
+          ?? '';
+      final toolCallsCount = (data['tool_calls_count'] as num?)?.toInt()
+          ?? (result['tool_calls_count'] as num?)?.toInt()
+          ?? 0;
+      final resultSummary = data['result_summary'] as String?
+          ?? result['result_summary'] as String?;
+      final agentError = data['error'] as String?
+          ?? result['error'] as String?;
+      final reason = data['reason'] as String?
+          ?? result['reason'] as String?;
+      final parentAgent = data['parent_agent'] as String?
+          ?? result['parent_agent'] as String?;
+      final waitingForRaw = data['waiting_for'] ?? result['waiting_for'];
+      final waitingFor = waitingForRaw is List
+          ? waitingForRaw.cast<String>()
+          : null;
+
       if (agentId.isNotEmpty) {
         WorkspaceState().updateAgent(SubAgent(
           id: agentId,
-          specialist: data['specialist'] as String? ?? '',
-          task: data['task'] as String? ?? '',
-          status: switch (status) {
+          specialist: specialist,
+          task: task,
+          status: switch (effectiveStatus) {
             'spawned'   => AgentStatus.spawned,
             'running'   => AgentStatus.running,
             'completed' => AgentStatus.completed,
@@ -383,15 +1537,31 @@ class _ChatPanelState extends State<ChatPanel> {
             'cancelled' => AgentStatus.cancelled,
             _           => AgentStatus.running,
           },
-          duration: (data['duration_seconds'] as num?)?.toDouble() ?? 0,
-          preview: (data['preview'] as String?) ?? '',
+          duration: duration,
+          preview: preview,
+          parentAgent: parentAgent,
+          toolCallsCount: toolCallsCount,
+          resultSummary: resultSummary,
+          error: agentError,
+          reason: reason,
+          waitingFor: waitingFor,
           updatedAt: DateTime.now(),
         ));
       }
       // Also show in chat bubble
       _ensureBubble();
       if (_currentMsg != null) {
-        DigitornApiClient().handleStreamEvent(type, data, _currentMsg!);
+        _currentMsg!.addAgentEvent(AgentEventData(
+          agentId: agentId,
+          status: effectiveStatus,
+          specialist: specialist,
+          task: task,
+          duration: duration,
+          preview: preview,
+          toolCallsCount: toolCallsCount,
+          resultSummary: resultSummary,
+          error: agentError,
+        ));
       }
       _scrollToBottom();
       return;
@@ -400,8 +1570,53 @@ class _ChatPanelState extends State<ChatPanel> {
     // ── Status → spinner + metrics ─────────────────────────────────────
     if (type == 'status') {
       final phase = data['phase'] as String? ?? '';
+      // The daemon is talking — cancel the 30 s response watchdog
+      // and the spinner watchdog (they are both "silence" timers).
+      _responseTimeout?.cancel();
+      // Any of these phases means the agent is currently turning —
+      // re-arm `_isSending` so the Stop button reappears even when
+      // the user just navigated back to a session that started
+      // running in their absence.
+      const liveTurnPhases = {
+        'requesting',
+        'generating',
+        'planning',
+        'executing',
+        'responding',
+        'thinking',
+        'tool_use',
+        'waiting',
+        'compacting',
+      };
+      if (liveTurnPhases.contains(phase)) {
+        _noteLiveActivity();
+        if (!_isSending) {
+          _isSending = true;
+          _ensureBubble();
+        }
+      }
       if (phase.isNotEmpty && mounted) {
-        setState(() => _statusPhase = phase);
+        // For tool_use and rate_limited, include extra info
+        String display = phase;
+        if (phase == 'tool_use') {
+          final tool = data['tool_name'] as String? ?? data['tool'] as String? ?? '';
+          final detail = data['detail'] as String? ?? '';
+          if (tool.isNotEmpty) display = 'tool_use:$tool${detail.isNotEmpty ? ':$detail' : ''}';
+          // Remember the tool + its start time so the lean
+          // tool-progress bar can tick a duration for any call
+          // that runs longer than ~2 s.
+          _setActiveTool(tool.isNotEmpty ? tool : 'tool');
+        } else if (phase == 'rate_limited') {
+          final attempt = data['attempt'] ?? '';
+          final max = data['max'] ?? '';
+          if (attempt.toString().isNotEmpty) display = 'rate_limited:$attempt/$max';
+          _clearActiveTool();
+        } else {
+          // Any other phase (responding, generating, thinking…)
+          // means the tool finished — drop the tracker.
+          _clearActiveTool();
+        }
+        setState(() => _statusPhase = display);
       }
       // Metrics are polled from the API, not from SSE events
       if (phase == 'turn_start') {
@@ -411,12 +1626,38 @@ class _ChatPanelState extends State<ChatPanel> {
     }
 
     // ── Ensure assistant bubble exists for remaining chat events ─────
-    _ensureBubble();
+    //
+    // Skip for event types that are NOT agent-content carriers:
+    //   • user_message / message_* — queue + user turn metadata
+    //   • queue_* — queue lifecycle
+    //   • approval_request — handled inline
+    //   • credential_* — picker flow
+    //
+    // Spawning an agent bubble on those would give it a sortKey
+    // seeded from the current seq, and it would land ABOVE the user
+    // bubble once the user_message handler updates sortKeys.
+    const noAgentBubbleEvents = {
+      'user_message',
+      'message_queued', 'message_started', 'message_done',
+      'message_cancelled', 'message_merged', 'message_replaced',
+      'queue_cleared', 'queue_full',
+      'approval_request', 'session.awaiting_approval',
+      'credential_required', 'credential_auth_required',
+      'abort',
+    };
+    if (!noAgentBubbleEvents.contains(type)) {
+      _ensureBubble();
+    }
+    _responseTimeout?.cancel(); // Response received — cancel timeout
+    // Any stream-level event proves the session is alive: clear a
+    // stale interrupted badge from an earlier crash.
+    _noteLiveActivity();
 
     switch (type) {
       // ── Thinking ───────────────────────────────────────────────────
       case 'thinking_started':
         _currentMsg?.setThinkingState(true);
+        if (mounted) setState(() => _statusPhase = 'thinking');
         _scrollToBottom();
         break;
       case 'thinking_delta':
@@ -436,13 +1677,26 @@ class _ChatPanelState extends State<ChatPanel> {
         final display = data['display'] as Map<String, dynamic>?;
         final verb = display?['verb'] as String? ??
             data['label'] as String? ?? toolName;
-        final silent = data['silent'] as bool? ?? false;
+        // Contract v2 — trust `display.hidden` when the daemon
+        // provides a display block. Fall back to the legacy
+        // name-based heuristic only for old daemons that omit
+        // `display` entirely (spec §Découverte dynamique).
+        final hidden = display?['hidden'] as bool? ??
+            data['silent'] as bool? ?? false;
+        final hideFromChat = display != null
+            ? hidden
+            : (hidden || _isHiddenTool(toolName));
 
-        final hideFromChat = silent || _isHiddenTool(toolName);
-
-        // Spinner always updates
-        final spinnerLabel = _friendlySpinnerLabel(toolName, verb);
-        if (mounted) setState(() => _statusPhase = spinnerLabel);
+        // Spinner phase only flips for visible tools — a hidden
+        // plumbing tool (search_tools, spawn_agent, …) shouldn't flash
+        // its internal name at the user. The scout confirmed these
+        // always arrive with display.hidden=true, so the check below
+        // keeps the previous phase ("Thinking…", etc.) for them.
+        if (!hideFromChat) {
+          final spinnerLabel = _friendlySpinnerLabel(
+              toolName, verb, hasDisplay: display != null);
+          if (mounted) setState(() => _statusPhase = spinnerLabel);
+        }
 
         // Capture bash/shell command for terminal
         if (toolName.toLowerCase().contains('bash') ||
@@ -453,7 +1707,9 @@ class _ChatPanelState extends State<ChatPanel> {
         }
 
         if (!hideFromChat && _currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(type, data, _currentMsg!);
+          DigitornApiClient().handleStreamEvent(
+              type, data, _currentMsg!,
+              envelopeTs: event['ts'] as String?);
           _scrollToBottom();
         }
         break;
@@ -461,13 +1717,26 @@ class _ChatPanelState extends State<ChatPanel> {
       // ── Tool complete ──────────────────────────────────────────────
       case 'tool_call':
         final toolName = data['name'] as String? ?? '';
-        final silent = data['silent'] as bool? ?? false;
+        final display = data['display'] as Map<String, dynamic>?;
+        // Contract v2 — `display.hidden` is authoritative. Legacy
+        // daemons without a display block fall back to the name
+        // heuristic, same as tool_start.
+        final hidden = display?['hidden'] as bool? ??
+            data['silent'] as bool? ?? false;
+        final category = display?['category'] as String? ?? '';
         if (mounted) setState(() => _statusPhase = 'responding');
 
-        final hideFromChat = silent || _isHiddenTool(toolName);
+        // Database tool_calls → forward to the passive observer service
+        if (DatabaseService.isDatabaseTool(toolName)) {
+          DatabaseService().handleToolCall(data);
+        }
+
+        final hideFromChat = display != null
+            ? hidden
+            : (hidden || _isHiddenTool(toolName));
 
         // Memory tools → always route to sidebar
-        if (WorkspaceState.isMemoryTool(toolName)) {
+        if (WorkspaceState.isMemoryTool(toolName) || category == 'memory') {
           final action = toolName.split(RegExp(r'[.__]')).last;
           final result = data['result'];
           if (result is Map<String, dynamic>) {
@@ -475,23 +1744,68 @@ class _ChatPanelState extends State<ChatPanel> {
           }
         }
 
-        if (!hideFromChat && _currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(type, data, _currentMsg!);
-          _scrollToBottom();
+        // Filesystem + bash tools → bridge into the workspace pipeline.
+        // Scout bilan:
+        //   * fs-tester / prod-coding-assistant emit tool_call with
+        //     rich `result` but never `preview:*` — synthesize a
+        //     resource_set so the CodeExplorer lights up.
+        //   * Bash emits tool_call with stdout/stderr/exit_code/cwd
+        //     AND a follow-up `terminal_output` envelope that drops
+        //     everything but stdout/stderr. We ingest the richer
+        //     tool_call.result directly and dedupe the terminal_output.
+        {
+          final ok = data['success'] == true ||
+              (data['error'] as String? ?? '').isEmpty;
+          if (ok) {
+            final rawParams = data['params'];
+            final rawResult = data['result'];
+            if (rawParams is Map<String, dynamic> &&
+                rawResult is Map<String, dynamic>) {
+              PreviewStore().ingestToolCall(
+                toolName: toolName,
+                params: rawParams,
+                result: rawResult,
+                display: display,
+              );
+              final channel = display?['channel'] as String? ?? '';
+              final group = display?['group'] as String? ?? '';
+              final lname = toolName.toLowerCase();
+              final isBash = channel == 'terminal'
+                  || group == 'shell'
+                  || lname.contains('bash')
+                  || lname.contains('shell');
+              if (isBash) {
+                WorkspaceService()
+                    .ingestBashToolCall(rawParams, rawResult);
+              }
+            }
+          }
         }
 
-        // Synthesize workbench events from tool_call results
-        _synthesizeWorkbench(toolName, data);
+        if (!hideFromChat && _currentMsg != null) {
+          DigitornApiClient().handleStreamEvent(
+              type, data, _currentMsg!,
+              envelopeTs: event['ts'] as String?);
+          _scrollToBottom();
+        }
         break;
 
       // ── Text tokens (update spinner) ───────────────────────────────
       case 'token':
         _hadTokens = true;
-        if (_statusPhase != 'responding' && mounted) {
+        // Only flip to 'responding' if we're not currently showing a
+        // more specific phase (tool_use, thinking). A stray token
+        // during a tool execution shouldn't wipe the tool label.
+        if (mounted && !_statusPhase.startsWith('tool_use:') &&
+            _statusPhase != 'thinking' &&
+            _statusPhase != 'responding') {
           setState(() => _statusPhase = 'responding');
         }
         if (_currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(type, data, _currentMsg!);
+          DigitornApiClient().handleStreamEvent(
+              type, data, _currentMsg!,
+              envelopeTs: event['ts'] as String?);
+          _maybeExtractStreamingArtifacts(_currentMsg!);
         }
         _scrollToBottom();
         break;
@@ -501,114 +1815,502 @@ class _ChatPanelState extends State<ChatPanel> {
         _currentMsg?.setThinkingState(false);
         break;
 
-      // ── Token counts ───────────────────────────────────────────────
-      case 'out_token':
-        final count = data['count'] as int? ?? 0;
-        if (count > 0 && mounted) setState(() => _outTokens += count);
-        if (_currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(type, data, _currentMsg!);
-        }
-        break;
-      case 'in_token':
-        final count = data['count'] as int? ?? 0;
-        if (count > 0 && mounted) setState(() => _inTokens = count);
-        if (_currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(type, data, _currentMsg!);
+      // ── Accumulated-content snapshot (persisted) ───────────────────
+      // Per event-spec §3C: the daemon emits this for two purposes:
+      //   * Replay — after rejoining a mid-turn session, to convey the
+      //     full accumulated text so far in one shot.
+      //   * Live streaming — the scout confirmed they land periodically
+      //     (every ~50 ms of streaming, every ~100 chars) to persist
+      //     progress server-side. Each snapshot is the FULL content at
+      //     its seq, not a delta.
+      //
+      // Race: during live streaming, token deltas race with snapshots.
+      // A snapshot at seq=X may arrive while the local bubble has
+      // already accumulated tokens past X (wire reorder, batching).
+      // Adopting a SHORTER snapshot would visibly shrink the bubble.
+      // Guard with `length >= current` so replay always wins (empty
+      // bubble) but live interleave never flickers.
+      case 'assistant_stream_snapshot':
+        _ensureBubble();
+        final snapshotContent = data['content'] as String? ?? '';
+        if (_currentMsg != null && snapshotContent.isNotEmpty) {
+          if (snapshotContent.length >= _currentMsg!.text.length) {
+            _currentMsg!.replaceText(snapshotContent);
+          }
+          _hadTokens = true;
         }
         break;
 
-      // ── Hook (context_status for pressure meter) ───────────────────
+      // ── Token counts ───────────────────────────────────────────────
+      case 'out_token':
+        if (_currentMsg != null) {
+          DigitornApiClient().handleStreamEvent(
+              type, data, _currentMsg!,
+              envelopeTs: event['ts'] as String?);
+        }
+        break;
+      case 'in_token':
+        if (_currentMsg != null) {
+          DigitornApiClient().handleStreamEvent(
+              type, data, _currentMsg!,
+              envelopeTs: event['ts'] as String?);
+        }
+        break;
+
+      // ── Hook (context_status, compaction) ─────────────────────────
       case 'hook':
-        final actionType = data['action_type'] as String? ?? '';
+        final actionType = data['action_type'] as String?
+            ?? data['action'] as String?
+            ?? data['event'] as String?
+            ?? '';
         final phase = data['phase'] as String? ?? '';
-        if (actionType == 'context_status' && phase == 'update') {
-          final details = data['details'] as Map<String, dynamic>? ?? {};
-          final estimated = details['estimated_tokens'] as int? ?? 0;
-          final maxT = details['max_tokens'] as int? ?? 0;
-          if (estimated > 0 && mounted) setState(() => _inTokens = estimated);
-          if (maxT > 0 && mounted) setState(() => _contextMax = maxT);
+        final details = data['details'] as Map<String, dynamic>? ?? {};
+        // The envelope's authoritative seq — threaded to the
+        // compaction bubble so it anchors at its canonical position
+        // in the timeline instead of drifting to the current max
+        // (scout-verified: a compaction hook can fire with ~1k
+        // higher-seq envelopes still buffered behind it).
+        final envSeq = (event['seq'] as num?)?.toInt();
+
+        if (actionType == 'context_status') {
+          ContextState().updateFromJson(details);
           SessionMetrics().updateContext(details);
+        } else if (actionType == 'compact_context' && phase == 'start') {
+          // Compaction started — show compacting spinner
+          if (mounted) setState(() => _statusPhase = 'compacting');
+        } else if (actionType == 'compact_context' && phase == 'end') {
+          // Compaction completed — update context + show toast.
+          // Skip the toast during replay so old compactions don't
+          // spam the user with "Context compacted" on every reload.
+          if (!_isReplaying) {
+            _onCompactionCompleted(details,
+                emergency: false, envelopeSeq: envSeq);
+          }
+        } else if (actionType == 'emergency_compaction') {
+          if (!_isReplaying) {
+            _onCompactionCompleted(details,
+                emergency: true, envelopeSeq: envSeq);
+          }
         }
         break;
 
       // ── Result → turn complete ─────────────────────────────────────
       case 'result':
+      case 'turn_complete':
         final content = data['content'] as String? ?? '';
         final resultError = data['error'] as String?;
         if (!_hadTokens && content.isNotEmpty && _currentMsg != null) {
           _currentMsg!.appendText(content);
         }
+        // Scout bilan: some agents (digitorn-builder coordinator)
+        // ship a final `thinking` snapshot that concatenates the
+        // response text onto the chain-of-thought. We excise it
+        // here — `result.content` is the clean source of truth.
+        if (content.isNotEmpty && _currentMsg != null) {
+          _currentMsg!.stripThinkingOverlap(content);
+        }
         _currentMsg?.setStreamingState(false);
         _currentMsg?.setThinkingState(false);
-        // Desktop notification
-        NotificationService().onTurnComplete(content: content, error: resultError);
-        final usage = data['usage'] as Map<String, dynamic>?;
-        if (usage != null) {
-          final inT = usage['input_tokens'] as int? ?? 0;
-          if (inT > 0 && mounted) setState(() => _inTokens = inT);
+        // Desktop notification — skip during replay so old turns
+        // don't trigger banners days after the fact.
+        if (!_isReplaying) {
+          NotificationService().onTurnComplete(content: content, error: resultError);
         }
-        final ctx = data['context'] as Map<String, dynamic>?;
+        // Context state from daemon (try 'context' field, then inside 'usage').
+        // `result.context` is the stable post-turn baseline — trust it
+        // UNCONDITIONALLY via `authoritative: true` so it can overwrite
+        // the noisy mid-turn hook pressures (the scout confirmed hook
+        // events oscillate 0.02 → 0.44 → 0.02 within a single turn,
+        // which would otherwise pin the ring at the spike).
+        final ctx = data['context'] as Map<String, dynamic>?
+            ?? (data['usage'] as Map<String, dynamic>?)?['context'] as Map<String, dynamic>?;
         if (ctx != null) {
-          final maxT = ctx['context_window'] as int? ?? ctx['max_tokens'] as int?;
-          if (maxT != null && maxT > 0 && mounted) setState(() => _contextMax = maxT);
+          ContextState().updateFromJson(ctx, authoritative: true);
           SessionMetrics().updateContext(ctx);
+        }
+        // Fallback — a `usage` block carrying the full aggregate shape
+        // (effective_max > 0) is treated as authoritative too. A
+        // `usage` block with only `pressure` is a per-turn delta and
+        // intentionally skipped; the scout confirmed those are mid-turn
+        // noise and would blank the ring ("0 % after turn" regression).
+        final usage = data['usage'] as Map<String, dynamic>?;
+        if (ctx == null &&
+            usage != null &&
+            (usage['effective_max'] as num? ?? 0) > 0) {
+          ContextState().updateFromJson(usage, authoritative: true);
         }
         final wsStatus = data['workspace_status'] as Map<String, dynamic>?;
         if (wsStatus != null) WorkspaceService().updateGitStatus(wsStatus);
         if (_currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(type, data, _currentMsg!);
+          DigitornApiClient().handleStreamEvent(
+              type, data, _currentMsg!,
+              envelopeTs: event['ts'] as String?);
+        }
+        if (_currentMsg != null &&
+            _currentMsg!.role == MessageRole.assistant &&
+            _currentMsg!.text.isNotEmpty) {
+          try {
+            final extraction = ArtifactDetector.extract(
+              messageId: _currentMsg!.id,
+              text: _currentMsg!.text,
+            );
+            ArtifactService()
+                .upsertForMessage(_currentMsg!.id, extraction.artifacts);
+          } catch (e, st) {
+            debugPrint('artifact extraction failed: $e\n$st');
+          }
         }
         _currentMsg = null;
         _hadTokens = false;
+        _responseTimeout?.cancel();
+        // Mark all remaining active agents as completed
+        WorkspaceState().finishAllAgents();
+        // Keep `_isSending` armed if there's still work ahead in the
+        // queue — the daemon will auto-dispatch the next message in
+        // ~200 ms (fires `message_started`) and the ring should stay
+        // lit through that gap instead of flickering off and on.
+        final sidForTurn =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        // "More work ahead?" = is there a QUEUED message waiting to
+        // be dispatched. We explicitly DON'T include the running
+        // entry in this check — that's this very turn, which is
+        // completing right now. If we did include it the spinner
+        // would stay lit forever whenever there was no queued
+        // follow-up (running never flips to null until
+        // `message_done` lands, which is AFTER turn_complete).
+        final hasMoreWork = sidForTurn.isNotEmpty &&
+            QueueService().pendingCountFor(sidForTurn) > 0;
         if (mounted) {
           setState(() {
-            _isSending = false;
-            _statusPhase = '';
-            _suggestions = _generateSuggestions(data, content);
+            if (!hasMoreWork) _isSending = false;
+            _statusPhase = hasMoreWork ? 'requesting' : '';
           });
         }
+        _clearActiveTool();
         _scrollToBottom();
+        // Daemon picks the next queued message on its own; the
+        // `message_started` event will drive our UI transition.
         break;
 
-      // ── Error ──────────────────────────────────────────────────────
+      // ── Error (structured from daemon) ────────────────────────────
       case 'error':
-        final errMsg = data['error'] as String? ?? 'Unknown error';
-        if (_currentMsg != null) {
-          _currentMsg!.appendText('\n\n**Error:** $errMsg');
-          _currentMsg!.setStreamingState(false);
-        } else {
-          _messages.add(ChatMessage(
-            id: 'err-${DateTime.now().millisecondsSinceEpoch}',
-            role: MessageRole.assistant,
-            initialText: '**Error:** $errMsg',
-          ));
+        _responseTimeout?.cancel();
+        final code = data['code'] as String? ??
+            data['error'] as String? ??
+            '';
+        // Special case: missing credential / grant. We don't surface
+        // this as a red error — it's a normal first-use moment. Pop
+        // the picker, buffer the original message, retry on success.
+        if (code == 'credential_auth_required' ||
+            code == 'credential_required') {
+          _handleCredentialAuthRequired({...data, 'code': code});
+          break;
         }
+        final daemonErr = DaemonError.fromJson(data);
+        _currentMsg?.setStreamingState(false);
+        _currentMsg?.setThinkingState(false);
         _currentMsg = null;
         _hadTokens = false;
+        WorkspaceState().finishAllAgents();
         if (mounted) {
           setState(() {
             _isSending = false;
             _statusPhase = '';
+            _activeError = daemonErr;
           });
         }
-        _scrollToBottom();
         break;
 
       // ── Abort (daemon confirmed abort) ────────────────────────────
       case 'abort':
-        _handleAbortCleanup();
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onAbort(sid, data);
+        // Soft abort (default): the daemon will emit `message_started`
+        // for the next queued message within ~200 ms, so we only tear
+        // down the spinner UI if the queue was explicitly purged OR
+        // there's nothing pending to take over.
+        final queuePurged = (data['queue_purged'] as num?)?.toInt() ?? 0;
+        final hasPending = sid.isNotEmpty &&
+            QueueService().pendingCountFor(sid) > 0;
+        if (queuePurged > 0 || !hasPending) {
+          _handleAbortCleanup();
+        } else {
+          // Keep spinner armed — but drop the stale assistant bubble
+          // so the next message_started spawns a fresh one at the
+          // bottom instead of streaming into the aborted turn's card.
+          if (_currentMsg != null) {
+            _currentMsg!.setStreamingState(false);
+            _currentMsg!.setThinkingState(false);
+            _currentMsg = null;
+          }
+          setState(() => _statusPhase = 'aborting');
+        }
+        break;
+
+      // ── Authoritative user-message event ──────────────────────────
+      //
+      // Fires from the daemon the moment a user turn is appended to
+      // session history (both fast-path and queue-drain) and on
+      // replay after a reload. Our optimistic bubble carries the
+      // matching `client_message_id`; on echo we pin its `sortKey`
+      // to the daemon's `seq` and attach the `correlation_id`.
+      case 'user_message':
+        final content = data['content'] as String? ?? '';
+        if (content.isEmpty) break;
+        final envSeq = (event['seq'] as num?)?.toInt() ?? 0;
+        if (envSeq > _lastPersistedSeq) _lastPersistedSeq = envSeq;
+        final cmid = data['client_message_id'] as String?;
+        final corrId = data['correlation_id'] as String?;
+        final isPending = data['pending'] == true;
+
+        final existing = logic.findUserBubbleToReconcile(
+          _messages,
+          clientMessageId: cmid,
+          correlationId: corrId,
+          content: content,
+        );
+        if (existing != null) {
+          setState(() {
+            existing.correlationId = corrId ?? existing.correlationId;
+            existing.clientMessageId ??= cmid;
+            existing.pending = isPending;
+            // Reconciliation: pin the optimistic bubble to the
+            // daemon's authoritative seq. sortKey flips from the
+            // provisional micro-tick (tail) to `envSeq`, slotting
+            // the bubble at its canonical chronological position.
+            if (envSeq > 0) existing.updateSortKey(envSeq);
+            _pinOrphanAssistantAbove(envSeq);
+            _resortMessages();
+          });
+          _scrollToBottom();
+          break;
+        }
+
+        // No matching optimistic bubble.
+        //
+        // Branch on `pending`:
+        //   * `pending: true`  → the daemon is queueing this message
+        //     behind a running turn. Per product contract the chat
+        //     timeline must stay clean — the message lives only in
+        //     the queue panel until execution actually starts. We
+        //     buffer the payload keyed by correlation_id and flush
+        //     it into a bubble when the matching `message_started`
+        //     event arrives.
+        //   * `pending: false` → fast-path, cross-tab send, or
+        //     replay. Create the bubble immediately at the daemon's
+        //     authoritative seq.
+        if (isPending && corrId != null && corrId.isNotEmpty) {
+          _queuedUserMessages[corrId] = _QueuedUserMessage(
+            content: content,
+            clientMessageId: cmid,
+          );
+          break;
+        }
+
+        final userMsg = ChatMessage(
+          id: _nextMsgId('u'),
+          role: MessageRole.user,
+          initialText: content,
+          timestamp: _parseEventTs(event),
+          correlationId: corrId,
+          clientMessageId: cmid,
+          daemonSeq: envSeq > 0 ? envSeq : null,
+          anchorSeq: _anchorForNewLocalBubble(),
+        );
+        userMsg.pending = isPending;
+        setState(() {
+          _messages.add(userMsg);
+          _pinOrphanAssistantAbove(envSeq);
+          _resortMessages();
+        });
+
+        final session = SessionService().activeSession;
+        final firstUser = _messages
+                .where((m) => m.role == MessageRole.user)
+                .length ==
+            1;
+        if (firstUser && session != null && session.title.isEmpty) {
+          final title = content.length > 60
+              ? '${content.substring(0, 60)}…'
+              : content;
+          SessionService().updateSessionTitle(session.sessionId, title);
+        }
+        _scrollToBottom();
+        break;
+
+      // ── Queue events (daemon-persisted message queue) ─────────────
+      case 'message_queued':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onMessageQueued(sid, data);
+        break;
+      case 'message_merged':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onMessageMerged(sid, data);
+        break;
+      case 'message_replaced':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onMessageReplaced(sid, data);
+        break;
+      case 'message_started':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onMessageStarted(sid, data);
+        final envSeq = (event['seq'] as num?)?.toInt() ?? 0;
+        if (envSeq > _lastPersistedSeq) _lastPersistedSeq = envSeq;
+        final corrId = data['correlation_id'] as String?;
+
+        // Flush any queued user_message buffered for this
+        // correlation_id — this is the moment the daemon actually
+        // injects the message into the chat. Bubble is placed at
+        // `envSeq` so it lands at the point in the timeline where
+        // execution started, not where it was recorded.
+        if (corrId != null && corrId.isNotEmpty) {
+          final buffered = _queuedUserMessages.remove(corrId);
+          if (buffered != null) {
+            // Use the message_started envelope's ts for the bubble
+            // timestamp — that's the moment the daemon actually
+            // injected this message into the chat timeline (what
+            // matches the bubble's visual position).
+            final userMsg = ChatMessage(
+              id: _nextMsgId('u'),
+              role: MessageRole.user,
+              initialText: buffered.content,
+              timestamp: _parseEventTs(event),
+              correlationId: corrId,
+              clientMessageId: buffered.clientMessageId,
+              daemonSeq: envSeq > 0 ? envSeq : null,
+              anchorSeq: _anchorForNewLocalBubble(),
+            );
+            setState(() {
+              _messages.add(userMsg);
+              _resortMessages();
+            });
+            _scrollToBottom();
+          }
+        }
+
+        // Un-dim any matching optimistic bubble (pending → active).
+        if (corrId != null && corrId.isNotEmpty) {
+          for (final m in _messages) {
+            if (m.role == MessageRole.user &&
+                m.correlationId == corrId &&
+                m.pending) {
+              m.pending = false;
+              break;
+            }
+          }
+        }
+        if (_currentMsg != null && envSeq > 0) {
+          _currentMsg!.updateSortKey(envSeq);
+          setState(_resortMessages);
+        }
+        if (mounted) {
+          setState(() {
+            _isSending = true;
+            _activeError = null;
+            if (_statusPhase.isEmpty) _statusPhase = 'requesting';
+          });
+          _armSpinnerWatchdog();
+        }
+        break;
+      case 'message_done':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onMessageDone(sid, data);
+        // Safety net: after the queue prunes the finished entry, if
+        // the session is truly idle (no running turn, no queued
+        // follow-up, no in-flight streaming bubble) and the spinner
+        // is somehow still armed, clear it. Prevents the
+        // "ring-keeps-spinning-after-last-turn" regression when
+        // turn_complete misses the reset.
+        if (sid.isNotEmpty &&
+            _isSending &&
+            _currentMsg == null &&
+            QueueService().pendingCountFor(sid) == 0 &&
+            QueueService().runningFor(sid) == null) {
+          if (mounted) {
+            setState(() {
+              _isSending = false;
+              _statusPhase = '';
+            });
+          }
+        }
+        break;
+      case 'message_cancelled':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onMessageCancelled(sid, data);
+        // Drop any buffered user_message for this corrId — it was
+        // queued, aborted before the daemon could pick it up, and
+        // therefore must never produce a chat bubble.
+        final cancelledCorrId = data['correlation_id'] as String?;
+        if (cancelledCorrId != null && cancelledCorrId.isNotEmpty) {
+          _queuedUserMessages.remove(cancelledCorrId);
+        }
+        break;
+      case 'queue_cleared':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onQueueCleared(sid);
+        // Clear the whole buffer — the queue panel just had every
+        // pending entry wiped by the user (or the daemon), so any
+        // user_message we were holding back for them must die too.
+        _queuedUserMessages.clear();
+        break;
+      case 'queue_full':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        if (sid.isNotEmpty) QueueService().onQueueFull(sid, data);
+        break;
+
+      // ── Queue snapshot (hydration + post-reconnect reconcile) ────
+      //
+      // Scout-verified: daemon emits this on `join_session` with the
+      // authoritative state of the session's turn lifecycle:
+      //   {is_active: bool, running_correlation_id: str?,
+      //    depth: int,    entries: [queue entries...]}
+      //
+      // We use it to reconcile UI state after a reconnect / mid-turn
+      // disconnect. If the daemon says "no turn running" but our
+      // local state still has an in-flight assistant bubble or an
+      // open tool_start without its tool_call echo, we finalize them
+      // as interrupted so the user isn't staring at a stale spinner.
+      case 'queue:snapshot':
+        final sid =
+            event['session_id'] as String? ?? _currentSessionId ?? '';
+        final isActive = data['is_active'] == true;
+        final runningCorr = data['running_correlation_id'] as String?;
+        _onQueueSnapshot(sid, isActive: isActive, runningCorr: runningCorr);
         break;
 
       // ── Approval request ───────────────────────────────────────────
       case 'approval_request':
         if (mounted) {
-          setState(() => _pendingApprovals.add(ApprovalRequest(
-            id: data['request_id'] as String? ?? DateTime.now().toString(),
+          final reqId = data['request_id'] as String? ?? _nextMsgId('appr');
+          // Skip if not for the current session
+          final eventSessionId = data['session_id'] as String? ??
+              event['session_id'] as String? ?? '';
+          if (eventSessionId.isNotEmpty && eventSessionId != _currentSessionId) break;
+          // Skip if already pending (duplicate event)
+          if (_pendingApprovals.any((a) => a.id == reqId)) break;
+          final req = ApprovalRequest(
+            id: reqId,
+            agentId: data['agent_id'] as String? ?? '',
             toolName: data['tool_name'] as String? ?? data['tool'] as String? ?? 'unknown',
             params: Map<String, dynamic>.from(data['tool_params'] ?? data['params'] ?? {}),
             riskLevel: data['risk_level'] as String? ?? 'medium',
             description: data['description'] as String? ?? '',
-          )));
+            createdAt: (data['created_at'] as num?)?.toDouble(),
+          );
+          setState(() => _pendingApprovals.add(req));
+          // If ask_user with long content, open in workspace
+          if (req.isAskUser && req.hasLongContent) {
+            _openAskUserContent(req);
+          }
         }
         break;
 
@@ -618,116 +2320,665 @@ class _ChatPanelState extends State<ChatPanel> {
     }
   }
 
-  void _ensureBubble() {
-    if (_currentMsg != null) return;
-    final msg = ChatMessage(
-      id: DateTime.now().toString(),
-      role: MessageRole.assistant,
+  /// Handle an inbound widget event from the runtime bus. Only
+  /// events with `zone: "inline"` (or no zone) are our concern —
+  /// the others (chat_side, workspace, modal) route themselves
+  /// through their own mounted hosts.
+  void _onWidgetEvent(widgets_models.WidgetEvent event) {
+    if (!mounted) return;
+    final zone = event.zone;
+    if (zone != null && zone != 'inline') return;
+
+    final widgetId = event.widgetId;
+    if (widgetId == null || widgetId.isEmpty) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      switch (event.kind) {
+        case 'render':
+          _mountInlineWidget(event);
+          break;
+        case 'update':
+          break;
+        case 'close':
+          setState(() {
+            for (final m in _messages) {
+              if (m.role == MessageRole.assistant) {
+                m.removeWidget(widgetId);
+              }
+            }
+          });
+          break;
+        case 'error':
+          break;
+      }
+    });
+  }
+
+  /// Resolve a `widget:render` event into a [WidgetPaneSpec] and
+  /// attach it to the current (or a newly-created) assistant bubble.
+  ///
+  /// Resolution order:
+  ///   1. `tree:` inlined in the event → wrap in a [WidgetPaneSpec]
+  ///   2. `ref:` → lookup `AppState.activeAppWidgets.inline[ref]`
+  ///   3. otherwise, ignore (malformed)
+  void _mountInlineWidget(widgets_models.WidgetEvent event) {
+    final appState = context.read<AppState>();
+    widgets_models.WidgetPaneSpec? pane;
+    final inlineTree = event.tree;
+    if (inlineTree != null) {
+      pane = widgets_models.WidgetPaneSpec(tree: inlineTree);
+    } else {
+      final ref = event.ref;
+      if (ref != null && ref.isNotEmpty) {
+        pane = appState.activeAppWidgets.inline[ref];
+      }
+    }
+    if (pane == null) return;
+
+    final payload = InlineWidgetPayload(
+      widgetId: event.widgetId!,
+      paneSpec: pane,
+      ctx: event.ctx ?? const {},
     );
-    msg.setStreamingState(true);
+
+    // Target the current in-progress assistant bubble when a turn
+    // is streaming. Otherwise create a standalone bubble for the
+    // widget (agent emitted it between turns).
     setState(() {
-      _currentMsg = msg;
-      _messages.add(msg);
+      final target = _currentMsg ??
+          () {
+            final msg = ChatMessage(
+              id: 'w_${event.widgetId}_${DateTime.now().millisecondsSinceEpoch}',
+              role: MessageRole.assistant,
+              anchorSeq: _anchorForNewLocalBubble(),
+            );
+            _messages.add(msg);
+            return msg;
+          }();
+      target.addOrUpdateWidget(payload);
     });
     _scrollToBottom();
   }
 
-  // ─── Send (fire-and-forget via POST /messages, response via SSE) ────────
+  /// Handle the daemon's `credential_auth_required` SSE error.
+  /// Buffers the user's last message, opens the picker dialog, and
+  /// resends the message on success so the second turn flows
+  /// silently. Failures and dismissals just abort the current turn
+  /// like a normal error would.
+  Future<void> _handleCredentialAuthRequired(
+      Map<String, dynamic> data) async {
+    _responseTimeout?.cancel();
+    _currentMsg?.setStreamingState(false);
+    _currentMsg?.setThinkingState(false);
+    // Drop the half-built assistant bubble — the picker is a
+    // standalone modal, no chat trace needed.
+    if (_currentMsg != null) {
+      setState(() {
+        _messages.remove(_currentMsg);
+        _currentMsg = null;
+      });
+    }
+    _hadTokens = false;
+    WorkspaceState().finishAllAgents();
+    if (mounted) {
+      setState(() {
+        _isSending = false;
+        _statusPhase = '';
+      });
+    }
 
+    // The daemon payload may omit `app_id` — if so, fall back to
+    // the currently-active session's app. Without this the grant
+    // would be stored with an empty app id and the daemon would
+    // never match it back to the requesting app, re-emitting the
+    // same credential_required event in a tight loop.
+    final activeSession = SessionService().activeSession;
+    final enrichedData = {
+      ...data,
+      if ((data['app_id'] as String?)?.trim().isEmpty ?? true)
+        'app_id': activeSession?.appId ??
+            context.read<AppState>().activeApp?.appId ??
+            '',
+    };
+    final event = CredentialAuthRequiredEvent.fromJson(enrichedData);
+
+    // Loop guard: if the daemon keeps re-emitting credential_required
+    // for the same provider/app even though we successfully granted,
+    // the daemon's turn-time credential lookup is broken. Break out
+    // after 2 attempts and surface a clear error instead of opening
+    // the picker a third time forever.
+    final retryKey = '${event.provider}|${event.appId}';
+    if (_credentialRetryKey == retryKey) {
+      _credentialRetryCount++;
+    } else {
+      _credentialRetryKey = retryKey;
+      _credentialRetryCount = 1;
+    }
+    if (_credentialRetryCount > 2) {
+      debugPrint('[creds] loop detected for $retryKey — aborting');
+      _credentialRetryCount = 0;
+      _credentialRetryKey = '';
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Credential granted but daemon keeps asking — this is a daemon-side bug. Check daemon logs.',
+            ),
+            duration: const Duration(seconds: 6),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
+      return;
+    }
+
+    final activeSessionId = SessionService().activeSession?.sessionId;
+    final pending = activeSessionId != null
+        ? SessionService().pendingFor(activeSessionId)
+        : null;
+    final bufferedText = pending?.message ?? _lastUserText;
+    if (!mounted) return;
+    final ok = await CredentialPickerDialog.show(context, event: event);
+    if (!mounted) return;
+    if (!ok) {
+      // User cancelled the picker. Surface a discreet toast so they
+      // know why nothing happened and put the original text back in
+      // the input so they can retry manually.
+      if (bufferedText.isNotEmpty) {
+        _ctrl.text = bufferedText;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Message not sent — ${event.providerLabel.isNotEmpty ? event.providerLabel : event.provider} credential required',
+          ),
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    // Re-send the original message — same path as a normal user
+    // submission so the spinner reappears, the SSE continues, etc.
+    if (bufferedText.isNotEmpty) {
+      _ctrl.text = bufferedText;
+      unawaited(_send());
+      // Clear the stashed pending once we've re-submitted; the new
+      // send will overwrite it anyway, but belt-and-braces so a
+      // second credential event doesn't accidentally resurrect it.
+      if (activeSessionId != null) {
+        SessionService().clearPending(activeSessionId);
+      }
+    }
+  }
+
+  void _ensureBubble() {
+    if (_currentMsg != null) return;
+    // During replay we must not spawn a bubble on our own — the
+    // replay creates them from `turn_start` events and any extra
+    // bubble would render an orphan "thinking…" card at the bottom.
+    if (_isReplaying) return;
+    // Seed the assistant bubble with the seq of the event that
+    // triggered it (typically the first token/thinking/tool for the
+    // turn — `_lastPersistedSeq` was just bumped at the top of
+    // _onEvent from the envelope). A later `message_started` /
+    // canonical event may call updateSortKey() to re-pin to the
+    // exact seq; that's a no-op when the daemon is in order.
+    final msg = ChatMessage(
+      id: _nextMsgId('a'),
+      role: MessageRole.assistant,
+      // Use the ts from the event that triggered the bubble — it
+      // was just stored on `_lastEventTs` at the top of _onEvent.
+      // Falls back to `DateTime.now()` in the constructor when
+      // null (ephemeral events don't always carry ts).
+      timestamp: _lastEventTs,
+      anchorSeq: _anchorForNewLocalBubble(),
+    );
+    msg.setStreamingState(true);
+    // Reset streaming-artifact scan bookkeeping for the new bubble.
+    _lastArtifactScan = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastArtifactScanLen = 0;
+    setState(() {
+      _currentMsg = msg;
+      _messages.add(msg);
+      _resortMessages();
+    });
+    // Scroll AFTER the bubble is in the tree — otherwise `animateTo`
+    // targets the old `maxScrollExtent` and the new bubble slips
+    // below the viewport until the next token forces a re-scroll.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scrollToBottom();
+    });
+  }
+
+  // ─── Send (fire-and-forget POST /messages, response via Socket.IO) ─────
+
+  /// Single-button send/abort/queue dispatcher. The behaviour is
+  /// Enqueue the composer text on the daemon's persistent queue.
+  ///
+  /// Behaviour by state:
+  ///   * empty + no active turn → no-op (button is disabled visually)
+  ///   * empty + active turn    → abort the running turn
+  ///   * text                   → optimistic-add to the queue + fire
+  ///                              POST. The daemon decides whether to
+  ///                              dispatch the turn now or park it
+  ///                              behind others. `message_started`
+  ///                              events drive the spinner transition.
   Future<void> _send() async {
     final text = _ctrl.text.trim();
-    if (text.isEmpty || _isSending) return;
-    _isSending = true;
+
+    if (text.isEmpty) {
+      if (_isSending) await _abort();
+      return;
+    }
 
     final appState = context.read<AppState>();
     final activeApp = appState.activeApp;
     final workspace = appState.workspace;
 
     if (activeApp?.workspaceMode == 'required' && workspace.isEmpty) {
-      _isSending = false;
       return;
     }
 
-    final session = SessionService().activeSession;
+    var session = SessionService().activeSession;
     final appId = activeApp?.appId ?? DigitornApiClient().appId;
 
-    if (session == null) {
-      _isSending = false;
+    if (!await ensureCredentials(
+      context,
+      appId: appId,
+      appName: activeApp?.name ?? appId,
+    )) {
       return;
     }
+    if (!mounted) return;
 
-    final userMsg = ChatMessage(
-      id: DateTime.now().toString(),
-      role: MessageRole.user,
-      initialText: text,
+    if (session == null) {
+      final ok = await SessionService().createAndSetSession(appId);
+      session = SessionService().activeSession;
+      if (!ok || session == null) {
+        if (mounted) {
+          setState(() {
+            _messages.add(ChatMessage(
+              id: _nextMsgId('err'),
+              role: MessageRole.assistant,
+              initialText:
+                  '**Error:** Could not create session. Check daemon connection.',
+              anchorSeq: _anchorForNewLocalBubble(),
+            ));
+            _resortMessages();
+          });
+        }
+        return;
+      }
+    }
+
+    // Drop any stale assistant bubble that may have been spawned by
+    // late trailing events (memory_update / hook / agent_event) after
+    // the previous turn_complete. Leaving it in place would push the
+    // new user bubble below a pre-existing agent card, and the next
+    // turn's tokens would stream into the stale bubble — which sits
+    // ABOVE the user message in the transcript. This is what caused
+    // the "agent replies appear above my message" regression.
+    if (_currentMsg != null && !_isSending) {
+      final stale = _currentMsg!;
+      stale.setStreamingState(false);
+      stale.setThinkingState(false);
+      if (stale.text.isEmpty && stale.thinkingText.isEmpty) {
+        _messages.remove(stale);
+      }
+      _currentMsg = null;
+    }
+
+    // Two parallel flows depending on whether the daemon is busy:
+    //   • idle — the daemon dispatches the turn immediately. No need
+    //     to show an optimistic row in the queue panel.
+    //   • busy — the daemon parks the message in the queue. Add a
+    //     QueueService entry so the panel shows it while we wait for
+    //     the canonical `message_started`.
+    //
+    // In BOTH cases the user bubble is added to the chat right now
+    // with a client-generated [clientMessageId] and a provisional
+    // `sortKey`. When the `user_message` event echoes back, its
+    // payload carries the same `client_message_id` → we reconcile
+    // (attach correlation_id, pin sortKey to the daemon's `seq`)
+    // and re-sort. Chronology is governed by `seq`, not by insertion
+    // order, so a delayed event still lands the bubble in its
+    // authoritative position after re-sort.
+    final qsvc = QueueService();
+    final sid = session.sessionId;
+    final busy = logic.computeBusy(
+      isSending: _isSending,
+      sessionId: sid,
+      queue: qsvc,
     );
+    final replacing = _pendingReplaceLast;
+    final String cid;
+    final String clientMessageId = QueueService.newCorrelationId();
+    if (replacing != null) {
+      cid = replacing.correlationId;
+    } else if (busy) {
+      final entry = qsvc.addOptimistic(sid, text);
+      cid = entry.correlationId;
+    } else {
+      cid = QueueService.newCorrelationId();
+    }
 
-    // Auto-title: use first message as session title
-    if (_messages.isEmpty && session.title.isEmpty) {
-      final title = text.length > 60 ? '${text.substring(0, 60)}…' : text;
-      SessionService().updateSessionTitle(session.sessionId, title);
+    // Idle path only: add the user bubble to chat right away for
+    // snappy feedback. Busy path: the bubble lives in the queue
+    // panel until the daemon picks it, then `user_message` creates
+    // the chat bubble at its authoritative seq — that way the user
+    // never sees the same message in two places.
+    if (replacing == null && !busy) {
+      final userMsg = ChatMessage(
+        id: _nextMsgId('u'),
+        role: MessageRole.user,
+        initialText: text,
+        correlationId: cid,
+        clientMessageId: clientMessageId,
+        anchorSeq: _anchorForNewLocalBubble(),
+      );
+      setState(() => _messages.add(userMsg));
+
+      final firstUser =
+          _messages.where((m) => m.role == MessageRole.user).length == 1;
+      if (firstUser && session.title.isEmpty) {
+        final title = text.length > 60 ? '${text.substring(0, 60)}…' : text;
+        SessionService().updateSessionTitle(session.sessionId, title);
+      }
     }
 
     _hadTokens = false;
+    _lastUserText = text;
     setState(() {
-      _messages.add(userMsg);
       _ctrl.clear();
       _statusPhase = 'requesting';
-      _suggestions = [];
-      _outTokens = 0;
+      _activeError = null;
+      _isSending = true;
     });
+    _armSpinnerWatchdog();
+
+    final images = _attachments
+        .where((a) => a.isImage)
+        .map((a) => a.path)
+        .toList();
+    final files = _attachments
+        .where((a) => !a.isImage)
+        .map((a) => a.path)
+        .toList();
+    setState(() => _attachments.clear());
     _scrollToBottom();
     _focus.requestFocus();
 
-    // Invalidate cached history since we're adding new messages
     SessionService().invalidateHistory(session.sessionId);
-
-    // Fire-and-forget — response arrives via session SSE (_onEvent)
-    SessionService().reconnectSSE();
-    // Start polling session metrics
+    SessionService().rejoinSessionRoom();
     SessionMetrics().startPolling(appId, session.sessionId);
 
-    final err = await SessionService().sendMessage(
-      appId, session.sessionId, text,
+    var result = await SessionService().enqueueMessage(
+      appId,
+      session.sessionId,
+      text,
       workspace: workspace.isEmpty ? null : workspace,
+      images: images.isNotEmpty ? images : null,
+      files: files.isNotEmpty ? files : null,
+      correlationId: cid,
+      clientMessageId: clientMessageId,
+      queueMode: replacing != null ? 'replace_last' : 'async',
     );
-    if (err != null) {
-      final errMsg = ChatMessage(
+    // Consume the replace-last intent whether the call succeeded or
+    // failed — the user's action has been applied or rejected once.
+    if (replacing != null) {
+      setState(() => _pendingReplaceLast = null);
+    }
+
+    // Session not found → create new session and retry once.
+    if (!result.isOk &&
+        (result.error ?? '').contains('Session not found')) {
+      await SessionService().createAndSetSession(appId);
+      final newSession = SessionService().activeSession;
+      if (newSession != null) {
+        _currentSessionId = newSession.sessionId;
+        SessionService().rejoinSessionRoom();
+        SessionMetrics().startPolling(appId, newSession.sessionId);
+        result = await SessionService().enqueueMessage(
+          appId,
+          newSession.sessionId,
+          text,
+          workspace: workspace.isEmpty ? null : workspace,
+          correlationId: cid,
+        );
+        if (result.isOk) {
+          _messages.add(ChatMessage(
+            id: _nextMsgId('sys'),
+            role: MessageRole.system,
+            initialText: 'Session recreated automatically',
+            anchorSeq: _anchorForNewLocalBubble(),
+          ));
+          setState(_resortMessages);
+        }
+      }
+    }
+
+    if (!mounted) return;
+
+    if (result.isOk) {
+      // Pass the client-generated cid so reconcile can find the
+      // optimistic entry even when the daemon minted a different
+      // correlation_id for its canonical row.
+      QueueService().reconcile(session.sessionId, result, tempCid: cid);
+      // Arm the response timeout so a truly stuck POST surfaces an
+      // error banner after 30s. "Stuck" here means: we're still in
+      // the `requesting` phase, no tokens have arrived, no tool
+      // phase, no thinking — the daemon never acknowledged our POST.
+      // Long turns with heavy tool calls or compactions reset
+      // `_hadTokens` at turn_complete, so we can't rely on that
+      // flag alone — the status phase is the authoritative signal
+      // that the daemon is doing something for us.
+      _responseTimeout?.cancel();
+      _responseTimeout = Timer(const Duration(seconds: 30), () {
+        if (!mounted || !_isSending) return;
+        if (_hasLiveAgentActivity()) return;
+        setState(() {
+          _messages.add(ChatMessage(
+            id: 'timeout-${DateTime.now().millisecondsSinceEpoch}',
+            role: MessageRole.assistant,
+            initialText: '**Error:** No response received from the agent. '
+                'This could be due to insufficient balance, rate limiting, '
+                'or the daemon being unavailable. Check the daemon logs for details.',
+            anchorSeq: _anchorForNewLocalBubble(),
+          ));
+          _resortMessages();
+          _isSending = false;
+          _statusPhase = '';
+        });
+        _scrollToBottom();
+      });
+      return;
+    }
+
+    // ── Error path ───────────────────────────────────────────────
+    QueueService().removeOptimistic(session.sessionId, cid);
+    // Drop the optimistic user bubble we added in _send — the send
+    // never landed, so leaving it in the transcript is misleading.
+    _messages.removeWhere((m) => m.clientMessageId == clientMessageId);
+    _responseTimeout?.cancel();
+    final err = result.error ?? 'send failed';
+    setState(() {
+      _messages.add(ChatMessage(
         id: '${DateTime.now().millisecondsSinceEpoch}',
         role: MessageRole.assistant,
         initialText: '**Error:** $err',
-      );
-      setState(() {
-        _messages.add(errMsg);
-        _isSending = false;
-      });
-      _scrollToBottom();
+        anchorSeq: _anchorForNewLocalBubble(),
+      ));
+      _resortMessages();
+      _isSending = false;
+      _statusPhase = '';
+    });
+    _scrollToBottom();
+  }
+
+  /// Start tracking a live tool execution so the lean tool bar can
+  /// display `🔧 Bash · 4.2s` for calls that exceed the visibility
+  /// threshold. The ticker rebuilds every 500 ms while the tool is
+  /// running so the duration stays fresh.
+  void _setActiveTool(String name) {
+    _activeToolTicker?.cancel();
+    _activeToolName = name;
+    _activeToolStartedAt = DateTime.now();
+    _activeToolTicker = Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) {
+        if (!mounted || _activeToolStartedAt == null) return;
+        setState(() {}); // rerender duration
+      },
+    );
+  }
+
+  void _clearActiveTool() {
+    _activeToolTicker?.cancel();
+    _activeToolTicker = null;
+    if (_activeToolName != null || _activeToolStartedAt != null) {
+      if (mounted) {
+        setState(() {
+          _activeToolName = null;
+          _activeToolStartedAt = null;
+        });
+      } else {
+        _activeToolName = null;
+        _activeToolStartedAt = null;
+      }
     }
-    // _isSending stays true — will be reset by _onEvent when 'result' arrives
+  }
+
+
+  // ─── Recording ────────────────────────────────────────────────────────────
+
+  /// Finalise a recording — pulls the transcript (live STT /
+  /// server transcription) into the composer, or attaches the
+  /// audio file if no transcript is available. Same logic as the
+  /// mic button's toggle, but triggered by the overlay's Stop.
+  /// Snap the pre-dictate composer text when recording starts, so
+  /// we can restore it if the recording / transcription fails. Clear
+  /// the snapshot once the recording leaves the listening state so
+  /// a successful transcript doesn't get overwritten on the next
+  /// mount / rebuild.
+  void _onVoiceStateChanged() {
+    final current = VoiceInputService().state;
+    if (current == _lastVoiceState) return;
+    if (_lastVoiceState != VoiceState.listening &&
+        current == VoiceState.listening) {
+      _preDictateText = _ctrl.text;
+    }
+    _lastVoiceState = current;
+  }
+
+  Future<void> _handleRecordingStop() async {
+    final svc = VoiceInputService();
+    // Snapshot the pre-dictate text — `_onVoiceStateChanged` captured
+    // it at listening-start; we re-read here in case the listener
+    // fired after a rebuild scrambled the reference.
+    final preDictate = _preDictateText ?? '';
+    final result = await svc.stop();
+    if (!mounted) return;
+
+    // Success path: a non-empty transcript lands in the composer.
+    // We do NOT auto-send any more — the user reviews the text and
+    // hits Send themselves. Auto-send mid-turn was too eager: a
+    // noisy recording would fire messages the user never vetted.
+    if (result != null && result.isNotEmpty) {
+      _ctrl.value = _ctrl.value.copyWith(
+        text: result,
+        selection: TextSelection.collapsed(offset: result.length),
+      );
+      _focus.requestFocus();
+      _preDictateText = null;
+      return;
+    }
+
+    // Failure path — the service has a non-null `lastError` OR
+    // produced no transcript and no audio. In both cases we roll the
+    // composer back to whatever was there BEFORE the user hit the
+    // mic. This fixes the "partial transcript leaked into the input
+    // after failure" regression.
+    final audio = svc.lastAudioPath;
+    final err = svc.lastError;
+    final hasAudio = audio != null && audio.isNotEmpty;
+
+    // Restore the pre-dictate text — whether we fall through to
+    // attaching an audio file or not, the STT partial transcripts
+    // that may have streamed in should not be left behind waiting
+    // to be sent.
+    if (_ctrl.text != preDictate) {
+      _ctrl.value = _ctrl.value.copyWith(
+        text: preDictate,
+        selection: TextSelection.collapsed(offset: preDictate.length),
+      );
+    }
+    _preDictateText = null;
+
+    // If we managed to capture audio (server-transcribe fallback,
+    // pure-record mode), attach it so the user can still send it
+    // as-is. No auto-send, no placeholder text — user intent drives
+    // the actual dispatch.
+    if (hasAudio) {
+      final filename = audio.split(RegExp(r'[\\/]')).last;
+      setState(() {
+        _attachments.add((name: filename, path: audio, isImage: false));
+      });
+    }
+    if (err != null && err.isNotEmpty && mounted) {
+      final c = context.colors;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Row(children: [
+            Icon(Icons.info_outline_rounded, size: 14, color: c.orange),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(err,
+                  style:
+                      GoogleFonts.inter(fontSize: 12, color: c.text)),
+            ),
+          ]),
+          backgroundColor: c.surfaceAlt,
+          duration: const Duration(seconds: 6),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8)),
+          margin: const EdgeInsets.all(16),
+        ));
+    }
   }
 
   // ─── Abort ────────────────────────────────────────────────────────────────
 
-  Future<void> _abort() async {
+  /// Default abort = cancel the running turn but keep the queue. The
+  /// daemon dispatches the next queued message within ~200 ms. Pass
+  /// [purgeQueue] = true (long-press / secondary action) to also drop
+  /// everything pending.
+  Future<void> _abort({bool purgeQueue = false}) async {
     final session = SessionService().activeSession;
     final appId = context.read<AppState>().activeApp?.appId ?? DigitornApiClient().appId;
     if (session == null) return;
 
-    // Show immediate visual feedback
     setState(() => _statusPhase = 'aborting');
 
-    // Send abort to daemon — it will:
-    // 1. Cancel the asyncio task
-    // 2. Save state (messages, memory, tool calls)
-    // 3. Mark session.interrupted = True
-    // 4. Emit SSE {"type": "abort"} which _onEvent handles
-    await SessionService().abortSession(appId, session.sessionId);
+    await SessionService().abortSession(
+      appId,
+      session.sessionId,
+      purgeQueue: purgeQueue,
+    );
 
-    // Fallback: if SSE abort event doesn't arrive within 3s, clean up locally
+    // Fallback: if SSE abort event doesn't arrive within 3s, clean up
+    // locally. Only runs when the queue would be empty anyway — a
+    // soft abort expects `message_started` for the next pending row
+    // to take over.
     Future.delayed(const Duration(seconds: 3), () {
-      if (mounted && _isSending) {
-        _handleAbortCleanup();
-      }
+      if (!mounted || !_isSending) return;
+      final pending = QueueService().pendingCountFor(session.sessionId);
+      if (purgeQueue || pending == 0) _handleAbortCleanup();
     });
   }
 
@@ -751,7 +3002,9 @@ class _ChatPanelState extends State<ChatPanel> {
       _currentMsg!.setThinkingState(false);
     }
     _currentMsg = null;
+    WorkspaceState().finishAllAgents();
     _hadTokens = false;
+    _responseTimeout?.cancel();
     if (mounted) {
       setState(() {
         _isSending = false;
@@ -760,25 +3013,220 @@ class _ChatPanelState extends State<ChatPanel> {
     }
   }
 
-  // ─── Approve ──────────────────────────────────────────────────────────────
+  // ─── Approve / Deny ───────────────────────────────────────────────────────
 
-  Future<void> _approve(ApprovalRequest req, bool approved) async {
-    setState(() => _pendingApprovals.remove(req));
+  Future<void> _handleApproval(ApprovalRequest req, bool approved, String message) async {
     final appId = context.read<AppState>().activeApp?.appId ?? DigitornApiClient().appId;
-    await SessionService().approveRequest(
+
+    // Send to daemon FIRST, only remove from UI if successful
+    final ok = await SessionService().approveRequest(
       appId: appId,
       requestId: req.id,
       approved: approved,
+      message: message,
     );
-    final msg = ChatMessage(
-      id: DateTime.now().toString(),
-      role: MessageRole.assistant,
-      initialText: approved
-          ? '✅ **Approved** — `${req.toolName}` will proceed.'
-          : '❌ **Denied** — `${req.toolName}` was blocked.',
+
+    if (!ok) {
+      // Request failed — show error, keep the approval banner visible
+      if (mounted) {
+        showToast(context, 'Failed to send approval. Retrying...');
+        // Retry once after 2s
+        await Future.delayed(const Duration(seconds: 2));
+        final retryOk = await SessionService().approveRequest(
+          appId: appId,
+          requestId: req.id,
+          approved: approved,
+          message: message,
+        );
+        if (!retryOk && mounted) {
+          showToast(context, 'Approval failed. Check connection.');
+          return; // Keep banner visible so user can try again
+        }
+      } else {
+        return;
+      }
+    }
+
+    // Success — remove the banner. The daemon will send the real
+    // tool_call event with the complete result — no need to inject
+    // a fake ToolCall here (it would create a duplicate).
+    if (mounted) {
+      setState(() => _pendingApprovals.remove(req));
+    }
+
+    // Clean up preview buffers
+    final wsSvc = WorkspaceService();
+    for (final prefix in ['_approval/${req.id}', '_ask_user/${req.id}']) {
+      for (final ext in ['.md', '.txt']) {
+        wsSvc.closeBuffer('$prefix$ext');
+      }
+    }
+    final path = req.params['path'] as String?
+        ?? req.params['file'] as String?
+        ?? req.params['file_path'] as String?
+        ?? '';
+    if (path.isNotEmpty) wsSvc.closeBuffer(path);
+  }
+
+  void _onCompactionCompleted(Map<String, dynamic> details,
+      {required bool emergency, int? envelopeSeq}) {
+    final before = details['tokens_before'] as int? ?? 0;
+    final after = details['tokens_after'] as int? ?? 0;
+    final reduced = details['tokens_reduced'] as int? ?? (before - after);
+    final strategy = details['strategy'] as String? ?? 'truncate';
+
+    // Update context meter immediately — [afterCompaction: true]
+    // bypasses the monotonic guard so the legitimate pressure drop
+    // is accepted even though compact_context:end payloads don't
+    // carry a `compactions` counter (scout-confirmed wire shape).
+    //
+    // Called unconditionally so the local compactions counter bumps
+    // even when the hook omits `pressure`: that way the NEXT
+    // `context_status` envelope (which carries the lower pressure)
+    // also passes the monotonic guard.
+    ContextState().updateFromJson(details, afterCompaction: true);
+    SessionMetrics().updateContext(details);
+
+    // Reset spinner phase
+    if (mounted) setState(() => _statusPhase = _isSending ? 'requesting' : '');
+
+    // Show compaction message in chat if significant
+    if (reduced > 5000 || emergency) {
+      final fmtBefore = ContextState().fmt(before);
+      final fmtAfter = ContextState().fmt(after);
+      final fmtReduced = ContextState().fmt(reduced);
+      final icon = emergency ? 'Emergency compaction' : 'Context compacted';
+      final strat = strategy == 'summarize' ? 'summary' : 'truncate';
+      // Anchor to the daemon envelope's seq when we know it — the
+      // scout confirmed a compaction hook can fire while hundreds
+      // of higher-seq events (thinking_delta, out_token, preview:*)
+      // are already in the stream. Falling back to
+      // `_anchorForNewLocalBubble()` in that case would pin the
+      // bubble to the CURRENT max, which sends it to the bottom of
+      // the chat regardless of when the compaction actually
+      // happened in the timeline (the exact symptom reported).
+      final anchor = (envelopeSeq != null && envelopeSeq > 0)
+          ? envelopeSeq
+          : _anchorForNewLocalBubble();
+      _messages.add(ChatMessage(
+        id: 'compact-${DateTime.now().millisecondsSinceEpoch}',
+        role: MessageRole.system,
+        initialText: '$icon: $fmtBefore → $fmtAfter tokens (-$fmtReduced, $strat)',
+        anchorSeq: anchor,
+      ));
+      if (mounted) setState(_resortMessages);
+      _scrollToBottom();
+    }
+  }
+
+  /// Reconcile local UI state with the daemon's authoritative view
+  /// of the session after a reconnect / join_session.
+  ///
+  /// Called from the `queue:snapshot` handler. The snapshot carries
+  /// `is_active` (any turn running) and `running_correlation_id`
+  /// (which turn exactly). We cross-reference with our local
+  /// `_currentMsg` / `_statusPhase` / open tool bubbles:
+  ///
+  ///   * daemon says INACTIVE → finalize any in-flight bubble as
+  ///     "interrupted" and drop the busy spinner. Covers the
+  ///     mid-tool crash case: daemon died after `tool_start` but
+  ///     before `tool_call`; replay gives us the orphan tool_start;
+  ///     queue:snapshot.is_active == false tells us it's never
+  ///     completing.
+  ///   * daemon says ACTIVE with a different correlation_id than
+  ///     our local bubble → our bubble is stale (we missed the
+  ///     previous turn's completion). Finalize it.
+  ///   * daemon says ACTIVE with the same correlation_id → keep
+  ///     the bubble, live events will resume the stream.
+  void _onQueueSnapshot(String sid,
+      {required bool isActive, String? runningCorr}) {
+    if (!mounted) return;
+    final active = SessionService().activeSession?.sessionId ?? '';
+    if (sid.isNotEmpty && sid != active) return;
+    debugPrint('ChatPanel: queue:snapshot is_active=$isActive '
+        'runningCorr=$runningCorr currentMsg.corr='
+        '${_currentMsg?.correlationId}');
+
+    // ── Gate: only reconcile when we have REAL evidence of an
+    //    orphaned bubble/tool. "is_active: false" is the NORMAL
+    //    state when opening any app with no running turn — we
+    //    must not touch the chat in that case or the user sees a
+    //    stray "(interrupted — reconnect detected)" sticker that
+    //    has nothing to reconcile.
+    //
+    // A bubble is considered orphaned ONLY when:
+    //   • it has NO daemon-assigned seq yet (unacknowledged), AND
+    //   • its text is still empty (nothing streamed in), AND
+    //   • either no turn runs right now (!isActive) or a
+    //     DIFFERENT turn is running (runningCorr mismatch).
+    //
+    // A tool is considered orphaned ONLY when the bubble carrying
+    // it is the CURRENT in-flight bubble (_currentMsg) — never
+    // historical rows, because a completed tool may legitimately
+    // have transient states that look "started" during replay.
+    final cur = _currentMsg;
+    final curIsProvisional = cur != null &&
+        cur.daemonSeq == null &&
+        cur.text.isEmpty;
+    final curBelongsToDifferentTurn = cur != null &&
+        runningCorr != null &&
+        cur.correlationId != null &&
+        cur.correlationId != runningCorr;
+    final shouldFinalizeCurrent =
+        curIsProvisional && (!isActive || curBelongsToDifferentTurn);
+
+    final activeToolInFlight =
+        cur != null && cur.hasOpenToolStart && !isActive;
+
+    if (!shouldFinalizeCurrent && !activeToolInFlight) return;
+
+    _reconcileInterruptedState(
+      reason: isActive ? 'stale' : 'interrupted',
+      finalizeCurrent: shouldFinalizeCurrent,
+      closeToolOn: activeToolInFlight ? cur : null,
     );
-    setState(() => _messages.add(msg));
-    _scrollToBottom();
+  }
+
+  /// Narrow, evidence-driven reconciliation. Unlike the first pass,
+  /// this does NOT iterate `_messages` — historical rows are
+  /// left alone. Callers pass explicit flags so the function is
+  /// a pure transform of state it was asked to touch.
+  ///
+  /// [reason] = `'stale'` (new turn took over) or `'interrupted'`
+  /// (daemon is idle but we still think something's running).
+  void _reconcileInterruptedState({
+    required String reason,
+    required bool finalizeCurrent,
+    ChatMessage? closeToolOn,
+  }) {
+    if (!mounted) return;
+    setState(() {
+      if (finalizeCurrent) {
+        final cur = _currentMsg;
+        if (cur != null) {
+          // No text injected — silent finalize. The previous
+          // '(interrupted — reconnect detected)' marker was
+          // noisy and fired on every app open.
+          cur.pending = false;
+          _currentMsg = null;
+          _statusPhase = '';
+          _hadTokens = false;
+          if (_isSending) _isSending = false;
+        }
+      }
+      // Close open tool_start ONLY on the passed-in in-flight
+      // bubble. Historical tools stay untouched.
+      closeToolOn?.markToolStartsInterrupted();
+    });
+  }
+
+  void _openAskUserContent(ApprovalRequest req) {
+    final md = req.content ?? '';
+    if (md.isEmpty) return;
+    // The inline approval card already renders the markdown; simply
+    // surface the workspace panel for visibility.
+    final appState = context.read<AppState>();
+    if (!appState.isWorkspaceVisible) appState.showWorkspace();
   }
 
   void _onTextChanged() {
@@ -804,8 +3252,8 @@ class _ChatPanelState extends State<ChatPanel> {
   }
 
   void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted && _scroll.hasClients) {
         _scroll.animateTo(
           _scroll.position.maxScrollExtent,
           duration: const Duration(milliseconds: 260),
@@ -820,35 +3268,85 @@ class _ChatPanelState extends State<ChatPanel> {
   @override
   Widget build(BuildContext context) {
     final activeApp = context.watch<AppState>().activeApp;
-    final workspace = context.watch<AppState>().workspace;
     final session = context.watch<SessionService>().activeSession;
 
-    final workspaceRequired =
-        activeApp?.workspaceMode == 'required' && workspace.isEmpty;
-
     return DropTarget(
-      onDragDone: (details) {
-        final paths = details.files.map((f) => f.path).join('\n');
-        if (paths.isNotEmpty) {
-          _ctrl.text = '${_ctrl.text}${_ctrl.text.isEmpty ? '' : '\n'}$paths';
-          _ctrl.selection = TextSelection.collapsed(offset: _ctrl.text.length);
-          _focus.requestFocus();
+      onDragEntered: (_) {
+        if (!_isDragOver && mounted) {
+          setState(() => _isDragOver = true);
         }
       },
-      child: CallbackShortcuts(
+      onDragExited: (_) {
+        if (_isDragOver && mounted) {
+          setState(() => _isDragOver = false);
+        }
+      },
+      onDragDone: (details) {
+        setState(() {
+          _isDragOver = false;
+          for (final f in details.files) {
+            if (f.path.isEmpty) continue;
+            final name = f.name.isNotEmpty
+                ? f.name
+                : f.path.split(RegExp(r'[\\/]')).last;
+            final isImg = attach_helpers.isImagePath(f.path);
+            _attachments.add((
+              name: name,
+              path: f.path,
+              isImage: isImg,
+            ));
+            // Record for the Recents list — drop is a durable local
+            // path, same as the file-picker flow.
+            unawaited(RecentAttachmentsService()
+                .record(name: name, path: f.path, isImage: isImg));
+          }
+        });
+        _focus.requestFocus();
+      },
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: CallbackShortcuts(
       bindings: {
+        // ── Chat-only shortcuts ──
+        // Generic navigation shortcuts (Ctrl+K, Ctrl+P, Ctrl+T,
+        // Ctrl+/) are owned by `_GlobalShortcuts` in main.dart so
+        // they fire from anywhere in the app. The bindings below
+        // are the ones that only make sense inside an active chat
+        // session.
         const SingleActivator(LogicalKeyboardKey.escape): () {
-          if (_isSending) _abort();
-        },
-        const SingleActivator(LogicalKeyboardKey.keyN, control: true): () {
-          final app = context.read<AppState>().activeApp;
-          if (app != null) {
-            SessionService().createAndSetSession(app.appId);
-            if (context.mounted) showToast(context, 'New session created');
+          if (_showFind) {
+            setState(() {
+              _showFind = false;
+              _findQuery = '';
+              _findCtrl.clear();
+            });
+          } else if (_isSending) {
+            _abort();
           }
         },
-        const SingleActivator(LogicalKeyboardKey.keyK, control: true): () {
-          CommandPalette.show(context);
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+          setState(() {
+            _showFind = true;
+          });
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _findFocus.requestFocus();
+          });
+        },
+        const SingleActivator(LogicalKeyboardKey.keyF, meta: true): () {
+          setState(() {
+            _showFind = true;
+          });
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _findFocus.requestFocus();
+          });
+        },
+        const SingleActivator(LogicalKeyboardKey.keyN, control: true): () async {
+          final app = context.read<AppState>().activeApp;
+          if (app != null) {
+            await SessionService().createAndSetSession(app.appId);
+            if (context.mounted) showToast(context, 'New session created');
+          }
         },
         const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
           setState(() {
@@ -858,15 +3356,96 @@ class _ChatPanelState extends State<ChatPanel> {
           });
           if (context.mounted) showToast(context, 'Chat cleared');
         },
+        // Ctrl+↑ — edit the last user message when the input is
+        // empty. Standard TUI affordance (also in ChatGPT). The
+        // user can rephrase and resend without retyping.
+        const SingleActivator(LogicalKeyboardKey.arrowUp, control: true):
+            () {
+          if (_ctrl.text.isNotEmpty) return;
+          for (var i = _messages.length - 1; i >= 0; i--) {
+            final m = _messages[i];
+            if (m.role == MessageRole.user && m.text.isNotEmpty) {
+              _ctrl.text = m.text;
+              _ctrl.selection = TextSelection.collapsed(
+                  offset: _ctrl.text.length);
+              _focus.requestFocus();
+              break;
+            }
+          }
+        },
       },
-      child: Focus(
+      child: FocusScope(
         autofocus: true,
-        child: Container(
+        child: ListenableBuilder(
+          listenable: ArtifactService(),
+          builder: (ctxA, _) {
+            final svc = ArtifactService();
+            final panelOpen = svc.isOpen && svc.selected != null;
+            final screen = MediaQuery.sizeOf(ctxA).width;
+            // Artifact panel width is clamped so the chat keeps a
+            // usable column next to it — never hides the chat.
+            final panelW = screen < 720
+                ? screen.clamp(320.0, screen * 0.5)
+                : (screen * 0.42).clamp(420.0, 560.0);
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: Stack(
+                    children: [
+                      _buildChatStack(activeApp, session),
+                      _ArtifactsFloatingChip(),
+                    ],
+                  ),
+                ),
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.centerLeft,
+                  child: panelOpen
+                      ? SizedBox(
+                          width: panelW,
+                          child: ArtifactPanel(width: panelW),
+                        )
+                      : const SizedBox(width: 0),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+      ),
+          ),
+          if (_isDragOver)
+            const Positioned.fill(
+              child: IgnorePointer(child: _DropOverlay()),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// The chat column itself — extracted so the layout above can wrap
+  /// it in a Row without drowning in indentation. Everything between
+  /// the header and the composer lives in here.
+  Widget _buildChatStack(AppSummary? activeApp, AppSession? session) {
+    final appState = context.watch<AppState>();
+    final workspace = appState.workspace;
+    final workspaceRequired =
+        appState.manifest.workspaceMode == WorkspaceMode.required &&
+            workspace.isEmpty;
+    return Container(
       color: context.colors.bg,
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           // ── Header (full width) ──────────────────────────────────────────
-          _buildHeader(activeApp, session?.displayTitle),
+          _buildHeader(activeApp, session),
+
+          // ── Replay / status strip ───────────────────────────────────────
+          _buildStatusStrip(),
+          // ── Find bar (Ctrl+F) ───────────────────────────────────────────
+          if (_showFind) _buildFindBar(),
 
           // ── Workspace warning banner ──────────────────────────────────────
           if (workspaceRequired)
@@ -880,33 +3459,34 @@ class _ChatPanelState extends State<ChatPanel> {
               ),
             ),
 
-          // ── Approval banners — centered ───────────────────────────────────
-          ..._pendingApprovals.map((r) => Center(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
-                  ),
-                  child: _ApprovalBanner(
-                    request: r,
-                    onApprove: () => _approve(r, true),
-                    onDeny: () => _approve(r, false),
-                  ),
-                ),
-              )),
-
           // ── Messages, empty state, or history skeleton ──────────────────
+          // Keyed by session id so Flutter treats a session switch as
+          // a widget swap: AnimatedSwitcher can cross-fade and the
+          // inner message list is rebuilt cleanly instead of flashing.
           Expanded(
-            child: _messages.isEmpty && !context.watch<SessionService>().isLoadingHistory
-                // Empty state: centered greeting + input
-                ? _buildEmptyState(activeApp, workspace, workspaceRequired)
-                // Messages or loading
-                : _buildMessageArea(
-                    activeApp: activeApp,
-                    workspace: workspace,
-                    workspaceRequired: workspaceRequired,
-                    isLoadingHistory: context.watch<SessionService>().isLoadingHistory,
-                  ),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 140),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              child: KeyedSubtree(
+                key: ValueKey(_currentSessionId ?? '__no_session__'),
+                child: _messages.isEmpty
+                    ? _buildEmptyState(
+                        activeApp, workspace, workspaceRequired)
+                    // The chat never renders a loading animation of
+                    // its own — history-fetch feedback belongs in the
+                    // session drawer (see [_SessionTile] for the
+                    // per-tile loading dot on the active entry).
+                    // Showing a fake-conversation shimmer inside the
+                    // chat looked like the agent was already writing
+                    // a response on session open.
+                    : _buildMessageArea(
+                        activeApp: activeApp,
+                        workspace: workspace,
+                        workspaceRequired: workspaceRequired,
+                      ),
+              ),
+            ),
           ),
 
           // ── Spinner + Goal/Todo inline + Input bar ──────────────────────
@@ -938,6 +3518,157 @@ class _ChatPanelState extends State<ChatPanel> {
                   ),
                 ),
               ),
+            // ── Error banner (highest priority) ────────────────────────
+            if (_activeError != null)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity : 720,
+                  ),
+                  child: _ErrorBanner(
+                    error: _activeError!,
+                    onDismiss: () => setState(() {
+                      _activeError = null;
+                      _isSending = false;
+                      _statusPhase = '';
+                    }),
+                    onRetry: _activeError!.retry ? () {
+                      setState(() {
+                        _activeError = null;
+                        _isSending = false;
+                        _statusPhase = '';
+                      });
+                      if (_lastUserText.isNotEmpty) {
+                        _ctrl.text = _lastUserText;
+                        _send();
+                      }
+                    } : null,
+                  ),
+                ),
+              ),
+            // ── Approval banner (above input) ───────────────────────────
+            if (_activeError == null && _pendingApprovals.isNotEmpty)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity : 720,
+                  ),
+                  child: _ApprovalBanner(
+                    request: _pendingApprovals.first,
+                    onApprove: (msg) => _handleApproval(_pendingApprovals.first, true, msg),
+                    onDeny: (msg) => _handleApproval(_pendingApprovals.first, false, msg),
+                    onDismiss: () => setState(() => _pendingApprovals.removeAt(0)),
+                  ),
+                ),
+              ),
+            // ── Inline panels (above input, mutually exclusive) ────────
+            if (_showContextPanel)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity : 720,
+                  ),
+                  child: ContextPanel(
+                    onClose: () => setState(() => _showContextPanel = false),
+                  ),
+                ),
+              ),
+            if (_showToolsPanel)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity : 720,
+                  ),
+                  child: ToolsPanel(
+                    appId: context.read<AppState>().activeApp?.appId ?? '',
+                    onClose: () => setState(() => _showToolsPanel = false),
+                  ),
+                ),
+              ),
+            if (_showTasksPanel)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity : 720,
+                  ),
+                  child: TasksPanel(
+                    onClose: () => setState(() => _showTasksPanel = false),
+                  ),
+                ),
+              ),
+            if (_showSnippetsPanel)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity : 720,
+                  ),
+                  child: SnippetsPanel(
+                    onClose: () =>
+                        setState(() => _showSnippetsPanel = false),
+                    onInsert: (rendered) {
+                      final sel = _ctrl.selection;
+                      final start =
+                          sel.start.clamp(0, _ctrl.text.length);
+                      final end = sel.end.clamp(0, _ctrl.text.length);
+                      _ctrl.value = _ctrl.value.copyWith(
+                        text: _ctrl.text
+                            .replaceRange(start, end, rendered),
+                        selection: TextSelection.collapsed(
+                            offset: start + rendered.length),
+                      );
+                      _focus.requestFocus();
+                    },
+                  ),
+                ),
+              ),
+            // ── Attachments bar (above input) ──────────────────────
+            if (_attachments.isNotEmpty)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity : 720,
+                  ),
+                  child: attach_bar.AttachmentsBar(
+                    attachments: _attachments,
+                    onRemove: (i) => setState(() => _attachments.removeAt(i)),
+                  ),
+                ),
+              ),
+            // ── Queue panel (fixed above input) ─────────────────────
+            if (SessionService().activeSession != null)
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width < 600
+                        ? double.infinity
+                        : 720,
+                  ),
+                  child: _QueuePanel(
+                    appId: context.read<AppState>().activeApp?.appId ??
+                        DigitornApiClient().appId,
+                    sessionId:
+                        SessionService().activeSession!.sessionId,
+                    onEditTail: _editTailMessage,
+                  ),
+                ),
+              ),
+            // Recording overlay — sits above the composer while the
+            // mic is listening. Handles Stop (consumes the output
+            // via the same paths the mic button would) and Cancel.
+            RecordingOverlay(
+              onStop: () => _handleRecordingStop(),
+              onCancel: () => VoiceInputService().cancel(),
+            ),
+            // Composer — background apps never reach this code path
+            // (main.dart routes them to BackgroundDashboard), so no
+            // special guard needed here.
             Center(
               child: ConstrainedBox(
                 constraints: BoxConstraints(
@@ -947,137 +3678,282 @@ class _ChatPanelState extends State<ChatPanel> {
                 child: _ChatInput(
                   controller: _ctrl,
                   focusNode: _focus,
-                  isActive: _isSending,
+                  isActive: _isSending && _activeError == null,
                   disabled: workspaceRequired,
-                  inTokens: _inTokens,
-                  contextMax: _contextMax,
+                  queuedCount: SessionService().activeSession == null
+                      ? 0
+                      : QueueService().pendingCountFor(
+                          SessionService().activeSession!.sessionId),
                   onSend: _send,
                   onAbort: _abort,
+                  onContextTap: () => setState(() {
+                    _showContextPanel = !_showContextPanel;
+                    _showToolsPanel = false;
+                    _showTasksPanel = false;
+                    _showSnippetsPanel = false;
+                  }),
+                  onToolsTap: () => setState(() {
+                    _showToolsPanel = !_showToolsPanel;
+                    _showContextPanel = false;
+                    _showTasksPanel = false;
+                    _showSnippetsPanel = false;
+                  }),
+                  onTasksTap: () => setState(() {
+                    _showTasksPanel = !_showTasksPanel;
+                    _showContextPanel = false;
+                    _showToolsPanel = false;
+                    _showSnippetsPanel = false;
+                  }),
+                  onSnippetsTap: () => setState(() {
+                    _showSnippetsPanel = !_showSnippetsPanel;
+                    _showContextPanel = false;
+                    _showToolsPanel = false;
+                    _showTasksPanel = false;
+                  }),
+                  onAttach: (name, path, isImage) => setState(() {
+                    _attachments.add((name: name, path: path, isImage: isImage));
+                  }),
+                  onImagePaste: (name, path, isImage) => setState(() {
+                    _attachments.add((name: name, path: path, isImage: isImage));
+                  }),
                 ),
               ),
             ),
+            // ── Status line (workspace path + model) ────────────────────
+            _buildStatusLine(),
           ],
         ],
       ),
-    ),
-    ),
-    ),
+    );
+  }
+
+  Widget _buildStatusLine() {
+    final m = context.watch<SessionMetrics>();
+    final workspace = context.watch<AppState>().workspace;
+    final isSmall = MediaQuery.of(context).size.width < 600;
+
+    if (workspace.isEmpty && m.model.isEmpty) return const SizedBox.shrink();
+
+    // Shorten workspace path
+    String shortPath = workspace;
+    if (shortPath.length > 50) {
+      final parts = shortPath.replaceAll('\\', '/').split('/');
+      shortPath = parts.length > 2
+          ? '~/${parts.sublist(parts.length - 2).join('/')}'
+          : shortPath;
+    }
+
+    final c = context.colors;
+    return Center(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: isSmall ? double.infinity : 720,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 6, 18, 14),
+          child: Row(
+            children: [
+              if (workspace.isNotEmpty) ...[
+                Icon(Icons.folder_outlined,
+                    size: 11, color: c.textMuted),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: Text(
+                    shortPath,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.firaCode(
+                      fontSize: 11,
+                      color: c.textMuted,
+                    ),
+                  ),
+                ),
+              ] else
+                const Spacer(),
+              if (m.model.isNotEmpty) ...[
+                const SizedBox(width: 12),
+                Text(
+                  m.model,
+                  style: GoogleFonts.firaCode(
+                    fontSize: 11,
+                    color: c.textMuted,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 
   Widget _buildEmptyState(AppSummary? app, String workspace, bool workspaceRequired) {
     final isSmall = MediaQuery.of(context).size.width < 600;
+    final c = context.colors;
+    final manifest = context.watch<AppState>().manifest;
+    final accent = manifest.accent ?? c.accentPrimary;
+    final name = manifest.name.isNotEmpty ? manifest.name : (app?.name ?? 'Digitorn');
+    final greeting =
+        manifest.greeting.isNotEmpty ? manifest.greeting : (app?.greeting ?? '');
+    final emoji = manifest.icon.isNotEmpty ? manifest.icon : app?.icon ?? '';
+    final tags = app?.tags ?? const <String>[];
     return Center(
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: isSmall ? double.infinity : 720),
+        constraints: BoxConstraints(maxWidth: isSmall ? double.infinity : 760),
         child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: isSmall ? 16 : 24),
+          padding: EdgeInsets.symmetric(horizontal: isSmall ? 16 : 28),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               const Spacer(),
-              // App icon
-              Container(
-                width: 48, height: 48,
-                decoration: BoxDecoration(
-                  color: context.colors.surfaceAlt,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: context.colors.border),
-                ),
-                child: Icon(Icons.hexagon_outlined,
-                    color: context.colors.textDim, size: 22),
+              ChatEmptyStateHero(
+                emoji: emoji,
+                name: name,
+                greeting: greeting,
+                accent: accent,
+                tags: tags,
               ),
-              const SizedBox(height: 16),
-              // App name
-              Text(
-                app?.name ?? 'Digitorn',
-                style: GoogleFonts.inter(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                  color: context.colors.textMuted,
-                ),
-              ),
-              // Greeting
-              if (app?.greeting.isNotEmpty == true) ...[
-                const SizedBox(height: 8),
-                Text(
-                  app!.greeting,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(
-                    fontSize: 13,
-                    color: context.colors.textDim,
-                    height: 1.6,
-                  ),
+              if (manifest.quickPrompts.isNotEmpty) ...[
+                const SizedBox(height: 32),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    for (final qp in manifest.quickPrompts)
+                      ChatQuickPromptCard(
+                        prompt: qp,
+                        accent: accent,
+                        onTap: () {
+                          _ctrl.text = qp.message.endsWith(' ')
+                              ? qp.message
+                              : '${qp.message} ';
+                          _ctrl.selection = TextSelection.collapsed(
+                              offset: _ctrl.text.length);
+                          _focus.requestFocus();
+                        },
+                      ),
+                  ],
                 ),
               ],
-              // Workspace warning
-              if (workspaceRequired) ...[
+              if (!workspaceRequired && workspace.isNotEmpty) ...[
                 const SizedBox(height: 14),
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: () async {
-                      final dir = await pickWorkspace(context);
-                      if (dir != null && context.mounted) {
-                        _saveRecentWorkspace(dir);
-                        context.read<AppState>().setWorkspace(dir);
-                      }
-                    },
-                    child: Builder(builder: (ctx) {
-                      final c = ctx.colors;
-                      return Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: c.red.withValues(alpha: 0.3)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.folder_open_outlined,
-                              size: 14, color: c.red),
-                          const SizedBox(width: 8),
-                          Text('Select Workspace...',
-                            style: GoogleFonts.inter(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: c.red,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                    }),
-                  ),
-                ),
-              ] else if (workspace.isNotEmpty) ...[
-                const SizedBox(height: 10),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.folder_outlined, size: 11, color: context.colors.textDim),
+                    Icon(Icons.folder_outlined,
+                        size: 11, color: c.textMuted),
                     const SizedBox(width: 5),
                     Flexible(
-                      child: Text(workspace,
-                        style: GoogleFonts.firaCode(fontSize: 11, color: context.colors.borderHover),
+                      child: Text(
+                        workspace,
+                        style: GoogleFonts.firaCode(
+                            fontSize: 11, color: c.textMuted),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
                   ],
                 ),
               ],
-              const SizedBox(height: 32),
-              // Input bar — centered in the middle
+              const SizedBox(height: 36),
+              // Slash command menu (also in empty state)
+              if (_slashCommands.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: SlashCommandMenu(
+                    commands: _slashCommands,
+                    onSelect: (cmd) {
+                      _ctrl.text = '${cmd.command} ';
+                      _ctrl.selection = TextSelection.collapsed(
+                          offset: _ctrl.text.length);
+                      _focus.requestFocus();
+                      setState(() => _slashCommands = []);
+                    },
+                  ),
+                ),
+              // Recording overlay (empty-state path). Same UX as
+              // inside the conversation view.
+              RecordingOverlay(
+                onStop: () => _handleRecordingStop(),
+                onCancel: () => VoiceInputService().cancel(),
+              ),
+              // Composer-side inline panels — shown here too so they
+              // work BEFORE the first message is sent. Without this
+              // branch, Tools / Tasks / Snippets / Context clicks
+              // toggled the flag but rendered nothing until the
+              // conversation had started.
+              if (_showContextPanel)
+                ContextPanel(
+                  onClose: () => setState(() => _showContextPanel = false),
+                ),
+              if (_showToolsPanel)
+                ToolsPanel(
+                  appId: context.read<AppState>().activeApp?.appId ?? '',
+                  onClose: () => setState(() => _showToolsPanel = false),
+                ),
+              if (_showTasksPanel)
+                TasksPanel(
+                  onClose: () => setState(() => _showTasksPanel = false),
+                ),
+              if (_showSnippetsPanel)
+                SnippetsPanel(
+                  onClose: () => setState(() => _showSnippetsPanel = false),
+                  onInsert: (rendered) {
+                    final sel = _ctrl.selection;
+                    final start =
+                        sel.start.clamp(0, _ctrl.text.length);
+                    final end = sel.end.clamp(0, _ctrl.text.length);
+                    _ctrl.value = _ctrl.value.copyWith(
+                      text:
+                          _ctrl.text.replaceRange(start, end, rendered),
+                      selection: TextSelection.collapsed(
+                          offset: start + rendered.length),
+                    );
+                    _focus.requestFocus();
+                  },
+                ),
+              // Input bar — centered in the middle.
               _ChatInput(
                 controller: _ctrl,
                 focusNode: _focus,
                 isActive: _isSending,
                 disabled: workspaceRequired,
-                inTokens: _inTokens,
-                contextMax: _contextMax,
+                queuedCount: SessionService().activeSession == null
+                      ? 0
+                      : QueueService().pendingCountFor(
+                          SessionService().activeSession!.sessionId),
                 onSend: _send,
                 onAbort: _abort,
+                onContextTap: () => setState(() {
+                    _showContextPanel = !_showContextPanel;
+                    _showToolsPanel = false;
+                    _showTasksPanel = false;
+                    _showSnippetsPanel = false;
+                  }),
+                onToolsTap: () => setState(() {
+                    _showToolsPanel = !_showToolsPanel;
+                    _showContextPanel = false;
+                    _showTasksPanel = false;
+                    _showSnippetsPanel = false;
+                  }),
+                onTasksTap: () => setState(() {
+                    _showTasksPanel = !_showTasksPanel;
+                    _showContextPanel = false;
+                    _showToolsPanel = false;
+                    _showSnippetsPanel = false;
+                  }),
+                onSnippetsTap: () => setState(() {
+                    _showSnippetsPanel = !_showSnippetsPanel;
+                    _showContextPanel = false;
+                    _showToolsPanel = false;
+                    _showTasksPanel = false;
+                  }),
+                onAttach: (name, path, isImage) => setState(() {
+                    _attachments.add((name: name, path: path, isImage: isImage));
+                  }),
+                onImagePaste: (name, path, isImage) => setState(() {
+                    _attachments.add((name: name, path: path, isImage: isImage));
+                  }),
               ),
               const Spacer(flex: 2),
             ],
@@ -1091,36 +3967,36 @@ class _ChatPanelState extends State<ChatPanel> {
     required AppSummary? activeApp,
     required String workspace,
     required bool workspaceRequired,
-    required bool isLoadingHistory,
   }) {
     final isSmall = MediaQuery.of(context).size.width < 600;
     final maxW = isSmall ? double.infinity : 720.0;
     final hPad = isSmall ? 8.0 : 0.0;
 
-    // Loading skeleton while history loads
-    if (isLoadingHistory && _messages.isEmpty) {
-      return Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxW),
-          child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: hPad),
-            child: const _HistorySkeleton(),
-          ),
-        ),
-      );
-    }
+    // History loading indicator lives in the session drawer now —
+    // deliberately no chat-area placeholder.
 
-    // Messages list with checkpoint rail
-    final showRail = _messages.length > 3 && MediaQuery.of(context).size.width > 900;
+    // Messages list.
     return Stack(
       children: [
         Row(
           children: [
             Expanded(
               child: SelectionArea(
-                child: ListView.builder(
+                onSelectionChanged: (content) {
+                  // Auto-copy selected text to clipboard (Flutter web workaround)
+                  if (content != null && content.plainText.isNotEmpty) {
+                    Clipboard.setData(ClipboardData(text: content.plainText));
+                  }
+                },
+                child: Scrollbar(
+                  controller: _scroll,
+                  thumbVisibility: false,
+                  interactive: true,
+                  thickness: 8,
+                  radius: const Radius.circular(4),
+                  child: ListView.builder(
         controller: _scroll,
-        padding: EdgeInsets.only(top: 20, bottom: 8, left: hPad, right: hPad),
+        padding: EdgeInsets.only(top: 20, bottom: 24, left: hPad, right: hPad),
         itemCount: _messages.length,
         itemBuilder: (_, i) {
           final msg = _messages[i];
@@ -1136,6 +4012,11 @@ class _ChatPanelState extends State<ChatPanel> {
               _send();
             };
           }
+          // Grouping: true when the previous rendered message has the
+          // same role — used by ChatBubble to collapse the vertical
+          // gap so consecutive same-role turns read as a thread.
+          final isGroupedWithPrev =
+              i > 0 && _messages[i - 1].role == msg.role;
           // Ensure a GlobalKey exists for scroll-to navigation
           _messageKeys.putIfAbsent(msg.id, () => GlobalKey());
           final mKey = _messageKeys[msg.id]!;
@@ -1154,23 +4035,21 @@ class _ChatPanelState extends State<ChatPanel> {
             ),
             child: Center(
               key: mKey,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: maxW),
-                child: ChatBubble(message: msg, onRetry: onRetry),
+              child: SizedBox(
+                width: maxW,
+                child: ChatBubble(
+                  message: msg,
+                  onRetry: onRetry,
+                  isGroupedWithPrev: isGroupedWithPrev,
+                ),
               ),
             ),
           );
         },
       ),
+                ),
     ),
             ),
-            // Checkpoint rail (only on wide screens with enough messages)
-            if (showRail)
-              CheckpointRail(
-                messages: _messages,
-                scrollController: _scroll,
-                messageKeys: _messageKeys,
-              ),
           ],
         ),
       // Scroll-to-bottom FAB
@@ -1178,20 +4057,26 @@ class _ChatPanelState extends State<ChatPanel> {
         Positioned(
           bottom: 12,
           right: 16,
-          child: GestureDetector(
-            onTap: _scrollToBottom,
-            child: Container(
-              width: 32, height: 32,
-              decoration: BoxDecoration(
-                color: context.colors.surfaceAlt,
-                shape: BoxShape.circle,
-                border: Border.all(color: context.colors.borderHover),
-                boxShadow: const [
-                  BoxShadow(color: Colors.black38, blurRadius: 8, offset: Offset(0, 2)),
-                ],
+          child: Tooltip(
+            message: 'chat.scroll_to_bottom'.tr(),
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: _scrollToBottom,
+                child: Container(
+                  width: 32, height: 32,
+                  decoration: BoxDecoration(
+                    color: context.colors.surfaceAlt,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: context.colors.borderHover),
+                    boxShadow: [
+                      BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 8, offset: const Offset(0, 2)),
+                    ],
+                  ),
+                  child: Icon(Icons.keyboard_arrow_down_rounded,
+                      size: 18, color: context.colors.textMuted),
+                ),
               ),
-              child: Icon(Icons.keyboard_arrow_down_rounded,
-                  size: 18, color: context.colors.textMuted),
             ),
           ),
         ),
@@ -1199,95 +4084,79 @@ class _ChatPanelState extends State<ChatPanel> {
     );
   }
 
-  Widget _buildHeader(AppSummary? app, String? sessionId) {
+  Widget _buildHeader(AppSummary? app, AppSession? session) {
     final c = context.colors;
+    final manifest = context.watch<AppState>().manifest;
+    context.watch<SessionPrefsService>();
+    final appName =
+        manifest.name.isNotEmpty ? manifest.name : (app?.name ?? 'Chat');
+    final accent = manifest.accent ?? c.accentPrimary;
+    final localTitle = session == null
+        ? null
+        : SessionPrefsService().localTitle(session.sessionId);
+    final daemonTitle = (session?.title ?? '').trim();
+    final sessionTitle = (localTitle != null && localTitle.isNotEmpty)
+        ? localTitle
+        : (daemonTitle.isNotEmpty ? daemonTitle : 'New conversation');
+
     return Container(
-      height: 44,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      height: 52,
+      padding: const EdgeInsets.fromLTRB(18, 0, 18, 0),
       decoration: BoxDecoration(
-        color: c.surface,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            c.surface,
+            Color.lerp(c.surface, accent, 0.03) ?? c.surface,
+          ],
+        ),
         border: Border(bottom: BorderSide(color: c.border)),
       ),
       child: Row(
         children: [
-          Icon(Icons.chat_bubble_outline_rounded,
-              color: c.textMuted, size: 13),
-          const SizedBox(width: 10),
-          Text(
-            app?.name ?? 'Chat',
-            style: GoogleFonts.inter(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: c.text),
-          ),
-          if (sessionId != null) ...[
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: context.colors.surfaceAlt,
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: context.colors.border),
-              ),
-              child: Text(
-                sessionId,
-                style: GoogleFonts.firaCode(
-                    fontSize: 10, color: context.colors.textMuted),
-              ),
-            ),
-          ],
-          const Spacer(),
-          // Export conversation
-          if (_messages.isNotEmpty)
-            PopupMenuButton<String>(
-              tooltip: 'Export conversation',
-              onSelected: (value) => _exportChat(value, app?.name),
-              offset: const Offset(0, 36),
-              color: c.surface,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-                side: BorderSide(color: c.border),
-              ),
-              padding: EdgeInsets.zero,
-              itemBuilder: (_) => [
-                PopupMenuItem(
-                  value: 'clipboard',
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.copy_rounded, size: 15, color: c.textMuted),
-                      const SizedBox(width: 8),
-                      Text('Copy to clipboard',
-                          style: GoogleFonts.inter(fontSize: 12, color: c.text)),
-                    ],
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  sessionTitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: c.textBright,
+                    letterSpacing: -0.2,
+                    height: 1.15,
                   ),
                 ),
-                PopupMenuItem(
-                  value: 'markdown',
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.save_alt_rounded, size: 15, color: c.textMuted),
-                      const SizedBox(width: 8),
-                      Text('Download as Markdown',
-                          style: GoogleFonts.inter(fontSize: 12, color: c.text)),
-                    ],
-                  ),
+                const SizedBox(height: 2),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        appName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.inter(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w500,
+                          color: c.textMuted,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    _ModeBadge(mode: manifest.mode, accent: accent),
+                  ],
                 ),
               ],
-              child: Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(7),
-                ),
-                child: Icon(Icons.download_rounded,
-                    size: 15, color: c.textMuted),
-              ),
             ),
-          const SizedBox(width: 4),
-          // Connection status
-          _ConnectionDot(),
+          ),
         ],
       ),
     );
@@ -1325,6 +4194,29 @@ class _ChatPanelState extends State<ChatPanel> {
     }
 
     return buf.toString();
+  }
+
+  /// Handler registered with [ChatAttachBridge] so widgets outside
+  /// the chat (Monaco header "Add to chat" button, command palette,
+  /// future drag-drop from explorer, …) can push a file into the
+  /// composer without coupling to `_ChatPanelState` directly.
+  ///
+  /// Mirrors the normal `_attachments.add(...)` path: on send, the
+  /// file is uploaded to the daemon like any other attachment. Shows
+  /// a toast so the user knows it landed.
+  void _addAttachmentExternal(attach_helpers.AttachmentEntry entry) {
+    if (!mounted) return;
+    setState(() {
+      _attachments.add((
+        name: entry.name,
+        path: entry.path,
+        isImage: entry.isImage,
+      ));
+    });
+    showToast(context, 'Added to chat: ${entry.name}');
+    // Pull focus into the composer so the user can type their prompt
+    // right away without another click.
+    _focus.requestFocus();
   }
 
   Future<void> _exportChat(String mode, String? sessionTitle) async {
@@ -1425,18 +4317,36 @@ class _ChatPanelState extends State<ChatPanel> {
 
   Widget _buildDiffStatsBar() {
     final ws = context.watch<WorkspaceService>();
-    final edited = ws.buffers.where((b) => b.isEdited).toList();
-    if (edited.isEmpty) return const SizedBox.shrink();
+
+    // Prefer daemon-provided stats if available
+    final daemonStats = ws.fileStats;
+    final edited = ws.buffers.where((b) =>
+        b.isEdited && !b.path.startsWith('_approval/') && !b.path.startsWith('_ask_user/')).toList();
+    final useDaemon = daemonStats.isNotEmpty;
+
+    if (!useDaemon && edited.isEmpty) return const SizedBox.shrink();
 
     final c = context.colors;
     final isSmall = MediaQuery.of(context).size.width < 600;
 
     // Calculate total insertions/deletions
     int totalIns = 0, totalDel = 0;
-    for (final b in edited) {
-      final stats = b.diffStats;
-      totalIns += stats.insertions;
-      totalDel += stats.deletions;
+    int fileCount = 0;
+    if (useDaemon) {
+      totalIns = daemonStats.totalInsertions;
+      totalDel = daemonStats.totalDeletions;
+      fileCount = daemonStats.modifiedFiles;
+    } else {
+      for (final b in edited) {
+        final stats = b.diffStats;
+        totalIns += stats.insertions;
+        totalDel += stats.deletions;
+      }
+      fileCount = edited.length;
+    }
+
+    if (fileCount == 0 && totalIns == 0 && totalDel == 0) {
+      return const SizedBox.shrink();
     }
 
     return Center(
@@ -1461,7 +4371,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 const SizedBox(width: 8),
                 // File count
                 Text(
-                  '${edited.length} file${edited.length > 1 ? 's' : ''} changed',
+                  '$fileCount file${fileCount > 1 ? 's' : ''} changed',
                   style: GoogleFonts.inter(
                     fontSize: 12, fontWeight: FontWeight.w500, color: c.text),
                 ),
@@ -1479,25 +4389,49 @@ class _ChatPanelState extends State<ChatPanel> {
                     style: GoogleFonts.firaCode(
                       fontSize: 11, fontWeight: FontWeight.w600, color: c.red)),
                 const Spacer(),
-                // File names (compact)
-                ...edited.take(3).map((b) => Padding(
-                  padding: const EdgeInsets.only(left: 6),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: c.surfaceAlt,
-                      borderRadius: BorderRadius.circular(4),
+                // File names (compact) — use daemon tracked files or buffer list
+                if (useDaemon) ...[
+                  ...ws.trackedFiles
+                      .where((f) => !f.isDir && f.badge.isNotEmpty)
+                      .take(3)
+                      .map((f) => Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: c.surfaceAlt,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(f.filename,
+                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
                     ),
-                    child: Text(b.filename,
-                      style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                  ),
-                )),
-                if (edited.length > 3)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 4),
-                    child: Text('+${edited.length - 3}',
-                      style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                  ),
+                  )),
+                  if (fileCount > 3)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: Text('+${fileCount - 3}',
+                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
+                    ),
+                ] else ...[
+                  ...edited.take(3).map((b) => Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: c.surfaceAlt,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(b.filename,
+                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
+                    ),
+                  )),
+                  if (edited.length > 3)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: Text('+${edited.length - 3}',
+                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
+                    ),
+                ],
                 const SizedBox(width: 8),
                 // Open workspace arrow
                 Icon(Icons.open_in_new_rounded, size: 12, color: c.textMuted),
@@ -1509,65 +4443,332 @@ class _ChatPanelState extends State<ChatPanel> {
     );
   }
 
-  Widget _buildSuggestions() {
+  /// Thin status strip rendered below the chat header. Shows replay
+  /// progress while rebuilding from history, a connection pill (Live /
+  /// Reconnecting), and an interrupted banner where applicable. Every
+  /// piece disappears when there's nothing to say so the strip is
+  /// invisible during normal live operation.
+  Widget _buildStatusStrip() {
     final c = context.colors;
-    final isSmall = MediaQuery.of(context).size.width < 600;
+    final manifest = context.watch<AppState>().manifest;
+    final accent = manifest.accent ?? c.accentPrimary;
+
+    // Replay bar wins — it's transient and the most important.
+    if (_isReplaying && _replayTotal > 0) {
+      final progress = _replayTotal > 0
+          ? (_replayDone / _replayTotal).clamp(0.0, 1.0)
+          : 0.0;
+      return Container(
+        color: c.surface.withValues(alpha: 0.6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            LinearProgressIndicator(
+              value: progress,
+              minHeight: 2,
+              backgroundColor: c.surfaceAlt,
+              valueColor: AlwaysStoppedAnimation(accent),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 10,
+                    height: 10,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.5,
+                      valueColor: AlwaysStoppedAnimation(c.textDim),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Loading history — $_replayDone / $_replayTotal events',
+                    style: GoogleFonts.inter(
+                        fontSize: 10.5, color: c.textMuted),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final pills = <Widget>[];
+
+    // A live/running turn always wins over "interrupted" — the
+    // interrupted flag can be stale when the daemon recovered and
+    // is already streaming again.
+    final anyActivity = _isSending || _turnInProgress;
+
+    if (anyActivity) {
+      if (_turnInProgress && !_isSending) {
+        pills.add(_StatusPill(
+          label: 'chat.turn_in_progress'.tr(),
+          icon: Icons.sync_rounded,
+          fg: accent,
+          bg: accent.withValues(alpha: 0.08),
+          pulse: true,
+        ));
+      }
+    } else if (_isInterrupted) {
+      pills.add(_StatusPill(
+        label: 'chat.session_interrupted'.tr(),
+        icon: Icons.pause_circle_filled_rounded,
+        fg: c.red,
+        bg: c.red.withValues(alpha: 0.08),
+        tooltip: 'chat.session_interrupted_hint'.tr(),
+      ));
+    }
+
+    // Disconnected state is surfaced by the actionable phase bar
+    // (_buildDisconnectedBar) under the header — adding a pill here
+    // too would duplicate the info without adding value.
+
+    // Context pressure bar — thin, always visible once we have data.
+    // `displayPressure` is `raw / threshold`; 1.0 means "compaction
+    // imminent" (the actionable mark). Colors: < 0.67 calm, 0.67–0.85
+    // watching, ≥ 0.85 close to trigger.
+    final cs = context.watch<ContextState>();
+    Widget? pressureBar;
+    if (cs.hasData && cs.pressure > 0) {
+      final d = cs.displayPressure.clamp(0.0, 1.2);
+      final color = d >= 0.85
+          ? c.red
+          : d >= 0.67
+              ? c.orange
+              : accent;
+      final thrPct = (cs.threshold * 100).round();
+      pressureBar = Tooltip(
+        message:
+            '${(d * 100).round()}% of compaction (fires at $thrPct%) '
+            '· ${cs.totalEstimatedTokens}/${cs.effectiveMax} tokens',
+        child: LinearProgressIndicator(
+          value: d.clamp(0.0, 1.0),
+          minHeight: 2,
+          backgroundColor: c.surfaceAlt.withValues(alpha: 0.6),
+          valueColor: AlwaysStoppedAnimation(color),
+        ),
+      );
+    }
+
+    // Tool activity bar — live view of what the agent is doing right now.
+    Widget? toolBar;
+    if (_activeToolName != null && _activeToolStartedAt != null) {
+      final elapsed =
+          DateTime.now().difference(_activeToolStartedAt!).inMilliseconds;
+      toolBar = _ToolActivityBar(
+        toolName: _activeToolName!,
+        elapsedMs: elapsed,
+        accent: accent,
+        onAbort: _isSending ? _abort : null,
+      );
+    }
+
+    if (pills.isEmpty && pressureBar == null && toolBar == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ?pressureBar,
+        ?toolBar,
+        if (pills.isNotEmpty)
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                for (var i = 0; i < pills.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 6),
+                  pills[i],
+                ],
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Compact find-in-chat bar. Counts how many messages contain the
+  /// query (case-insensitive) so the user sees matches live as they
+  /// type. Esc dismisses, empty query dismisses via the close button.
+  Widget _buildFindBar() {
+    final c = context.colors;
+    final q = _findQuery.toLowerCase();
+    int hits = 0;
+    if (q.isNotEmpty) {
+      for (final m in _messages) {
+        if (m.text.toLowerCase().contains(q)) hits++;
+      }
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: c.surface,
+        border: Border(bottom: BorderSide(color: c.border)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.search_rounded, size: 14, color: c.textMuted),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: _findCtrl,
+              focusNode: _findFocus,
+              onChanged: (v) => setState(() => _findQuery = v),
+              style: GoogleFonts.firaCode(fontSize: 12, color: c.text),
+              decoration: InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                hintText: 'chat.find_in_conversation'.tr(),
+                hintStyle:
+                    GoogleFonts.firaCode(fontSize: 12, color: c.textMuted),
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          ),
+          if (q.isNotEmpty)
+            Text(
+              '$hits ${hits == 1 ? "match" : "matches"}',
+              style: GoogleFonts.firaCode(fontSize: 10.5, color: c.textMuted),
+            ),
+          const SizedBox(width: 8),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () => setState(() {
+                _showFind = false;
+                _findQuery = '';
+                _findCtrl.clear();
+              }),
+              child: Icon(Icons.close_rounded,
+                  size: 14, color: c.textMuted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Minimalist status bar — replaces the old always-on "responding"
+  /// spinner with a surgical, purpose-built bar.
+  ///
+  /// Visibility rules — the bar is **invisible** unless one of these
+  /// is true:
+  ///   * A tool has been running ≥ 2 s → show tool name + live duration.
+  ///   * The status phase is unusual / actionable: `rate_limited`,
+  ///     `compacting`, `interrupted`, `aborting`, `resuming`. Short-
+  ///     lived phases like `requesting`/`responding`/`generating`
+  ///     stay hidden — the send button's rotating ring already
+  ///     communicates "loop in progress".
+  ///
+  /// Tokens and turn counters previously shown here have moved to
+  /// the per-message token footer (on each completed assistant
+  /// bubble) so the composer area stays quiet.
+  Widget _buildSpinnerBar() {
+    final c = context.colors;
+
+    // ── 1. Long-running tool ─────────────────────────────────────
+    final tool = _activeToolName;
+    final startedAt = _activeToolStartedAt;
+    if (tool != null && startedAt != null) {
+      final elapsed = DateTime.now().difference(startedAt);
+      if (elapsed.inMilliseconds >= 1800) {
+        return _buildToolBar(c, tool, elapsed);
+      }
+    }
+
+    // ── 2. Disconnected — rendered with a Retry action, not the
+    //       plain phase bar, so the user can force a manual attempt
+    //       if the 5 auto-retries have been exhausted.
+    if (_statusPhase == 'disconnected') {
+      return _buildDisconnectedBar(c);
+    }
+
+    // ── 3. Actionable phases ─────────────────────────────────────
+    if (_statusPhase.isNotEmpty) {
+      final (color, label, icon) = _actionablePhase(c, _statusPhase);
+      if (color != null) {
+        return _buildPhaseBar(c, color, label, icon);
+      }
+    }
+
+    // Nothing worth showing — stay invisible so the composer sits
+    // flush against the messages.
+    return const SizedBox.shrink();
+  }
+
+  Widget _buildDisconnectedBar(AppColors c) {
     return Center(
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: isSmall ? double.infinity : 720),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width < 600
+              ? double.infinity
+              : 720,
+        ),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 4,
-            children: _suggestions.map((s) => GestureDetector(
-              onTap: () {
-                _ctrl.text = s;
-                _send();
-                setState(() => _suggestions = []);
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: c.surface,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: c.border),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+            decoration: BoxDecoration(
+              color: c.red.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: c.red.withValues(alpha: 0.25)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.cloud_off_rounded, size: 12, color: c.red),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text('chat.daemon_offline_reconnecting'.tr(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(
+                          fontSize: 11.5,
+                          color: c.red,
+                          fontWeight: FontWeight.w500)),
                 ),
-                child: Text(s,
-                  style: GoogleFonts.inter(fontSize: 12, color: c.text)),
-              ),
-            )).toList(),
+                const SizedBox(width: 8),
+                _RetrySocketButton(),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildSpinnerBar() {
-    final m = context.watch<SessionMetrics>();
-    final hasMetrics = m.totalTokens > 0 || m.toolCallsTotal > 0;
+  /// Convert a status phase into UI intent, or return (null, '', …)
+  /// for short-lived phases the send button already covers.
+  (Color?, String, IconData) _actionablePhase(AppColors c, String phase) {
+    if (phase.startsWith('rate_limited:')) {
+      return (c.orange,
+          'chat.rate_limited_with'.tr(namedArgs: {'reason': phase.substring(13)}),
+          Icons.speed_rounded);
+    }
+    return switch (phase) {
+      'rate_limited'  => (c.orange, 'chat.rate_limited'.tr(), Icons.speed_rounded),
+      'compacting'    => (c.purple, 'chat.compacting_context'.tr(), Icons.compress_rounded),
+      'interrupted'   => (c.orange, 'chat.interrupted_resume_hint'.tr(), Icons.pause_circle_outline_rounded),
+      'aborting'      => (c.red, 'chat.aborting'.tr(), Icons.stop_circle_outlined),
+      'resuming'      => (c.orange, 'chat.resuming'.tr(), Icons.play_circle_outline_rounded),
+      // 'disconnected' is handled by _buildDisconnectedBar (actionable).
+      // Everything else (requesting, responding, thinking, generating,
+      // waiting, turn_start, tool_use…) is covered by the send-button
+      // ring — no duplicate indicator.
+      _ => (null, '', Icons.circle),
+    };
+  }
 
-    // Nothing to show
-    if (_statusPhase.isEmpty && !hasMetrics) return const SizedBox.shrink();
-
-    // Phase → icon + color
-    final c = context.colors;
-    final (Color color, String label) = _statusPhase.isNotEmpty
-        ? switch (_statusPhase) {
-            'thinking'     => (c.purple, 'thinking'),
-            'requesting'   => (c.textMuted, 'requesting'),
-            'responding'   => (c.green, 'responding'),
-            'turn_start'   => (c.textMuted, 'starting'),
-            'turn_end'     => (c.green, 'done'),
-            'tool_use'     => (c.blue, 'tool'),
-            'rate_limited' => (c.orange, 'rate limited'),
-            'resuming'     => (c.orange, 'resuming...'),
-            'aborting'     => (c.red, 'aborting...'),
-            'interrupted'  => (c.orange, 'interrupted — send a message to resume'),
-            _              => (c.blue, _statusPhase),
-          }
-        : (c.textMuted, '');
-
+  Widget _buildToolBar(AppColors c, String tool, Duration elapsed) {
+    final secs = elapsed.inMilliseconds / 1000.0;
+    final pretty = secs < 60
+        ? '${secs.toStringAsFixed(1)}s'
+        : '${(secs / 60).floor()}m ${(secs % 60).floor()}s';
     return Center(
       child: ConstrainedBox(
         constraints: BoxConstraints(
@@ -1575,104 +4776,78 @@ class _ChatPanelState extends State<ChatPanel> {
               ? double.infinity : 720,
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 400),
-              padding: const EdgeInsets.fromLTRB(10, 5, 10, 5),
-              decoration: BoxDecoration(
-                color: _statusPhase.isNotEmpty
-                    ? color.withValues(alpha: 0.06)
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(8),
-              ),
-          child: Row(
-            children: [
-              // Spinner icon + label (only when active)
-              if (_statusPhase.isNotEmpty) ...[
-                _PulsingText(text: '', color: color),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: c.orange.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: c.orange.withValues(alpha: 0.18)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.build_rounded, size: 11, color: c.orange),
                 const SizedBox(width: 6),
-                Text(label,
-                  style: GoogleFonts.inter(
-                    fontSize: 12, color: color, fontWeight: FontWeight.w500)),
-                const SizedBox(width: 12),
-              ],
-              // Session stats (always visible when available)
-              if (hasMetrics) ...[
-                // Model
-                if (m.model.isNotEmpty) ...[
-                  Text(m.model,
-                    style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                  const SizedBox(width: 8),
-                ],
-                // Turn
-                if (m.turnNumber > 0) ...[
-                  Icon(Icons.replay_rounded, size: 10, color: c.textMuted),
-                  const SizedBox(width: 2),
-                  Text('${m.turnNumber}',
-                    style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                  const SizedBox(width: 8),
-                ],
-                // Tokens
-                if (m.totalTokens > 0) ...[
-                  Text('↑${m.fmt(m.promptTokens)}',
-                    style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                  const SizedBox(width: 4),
-                  Text('↓${m.fmt(m.completionTokens)}',
-                    style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                  const SizedBox(width: 8),
-                ],
-                // Tools
-                if (m.toolCallsTotal > 0) ...[
-                  Icon(Icons.build_rounded, size: 10, color: c.textMuted),
-                  const SizedBox(width: 2),
-                  Text('${m.toolCallsTotal}',
-                    style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                  if (m.toolCallsFailed > 0) ...[
-                    Text(' (${m.toolCallsFailed}✗)',
-                      style: GoogleFonts.firaCode(fontSize: 10, color: c.red)),
-                  ],
-                  const SizedBox(width: 8),
-                ],
-                // Context pressure
-                if (m.contextPressure > 0) ...[
-                  Text(m.pressurePercent,
-                    style: GoogleFonts.firaCode(
-                      fontSize: 10,
-                      color: m.contextPressure < 0.6
-                          ? c.textMuted
-                          : m.contextPressure < 0.85
-                              ? c.orange
-                              : c.red,
-                    )),
-                  const SizedBox(width: 8),
-                ],
-                // Cost
-                if (m.costUsd > 0) ...[
-                  Text('\$${m.costUsd.toStringAsFixed(4)}',
-                    style: GoogleFonts.firaCode(
-                      fontSize: 10, color: c.textMuted)),
-                ],
-              ],
-              const Spacer(),
-              // Heartbeat dot
-              if (_heartbeat)
-                Container(
-                  width: 5, height: 5,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: c.green,
-                    boxShadow: [BoxShadow(
-                      color: c.green.withValues(alpha: 0.4),
-                      blurRadius: 5,
-                    )],
-                  ),
+                Flexible(
+                  child: Text(tool,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(
+                          fontSize: 11.5,
+                          color: c.orange,
+                          fontWeight: FontWeight.w600)),
                 ),
-            ],
+                const SizedBox(width: 8),
+                Text('·',
+                    style: GoogleFonts.firaCode(
+                        fontSize: 10, color: c.orange.withValues(alpha: 0.5))),
+                const SizedBox(width: 8),
+                Text(pretty,
+                    style: GoogleFonts.firaCode(
+                        fontSize: 11,
+                        color: c.orange,
+                        fontFeatures: const [FontFeature.tabularFigures()])),
+              ],
+            ),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildPhaseBar(
+      AppColors c, Color color, String label, IconData icon) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width < 600
+              ? double.infinity : 720,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: color.withValues(alpha: 0.2)),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, size: 12, color: color),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(
+                          fontSize: 11.5,
+                          color: color,
+                          fontWeight: FontWeight.w500)),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -1681,58 +4856,6 @@ class _ChatPanelState extends State<ChatPanel> {
   /// Synthesize workbench events from tool_call results.
   /// When the daemon doesn't emit separate workbench_* events, we extract
   /// file content from tool_call results and open them in the workspace.
-  void _synthesizeWorkbench(String toolName, Map<String, dynamic> data) {
-    final lower = toolName.toLowerCase().split(RegExp(r'[.__]')).last;
-    final result = data['result'];
-    if (result is! Map) return;
-    final r = result as Map<String, dynamic>;
-    final path = r['path'] as String? ?? data['params']?['path'] as String? ?? '';
-    if (path.isEmpty) return;
-
-    final content = r['content'] as String? ?? '';
-    final wsSvc = WorkspaceService();
-
-    switch (lower) {
-      case 'read':
-      case 'glob':
-      case 'find':
-        if (content.isNotEmpty) {
-          wsSvc.handleEvent('workbench_read', {
-            'buffer': path,
-            'content': content,
-            'type': 'text',
-          });
-        }
-        break;
-      case 'write':
-      case 'create':
-        wsSvc.handleEvent('workbench_write', {
-          'buffer': path,
-          'content': content,
-          'type': 'text',
-        });
-        break;
-      case 'edit':
-      case 'patch':
-      case 'replace':
-        final prev = r['previous_content'] as String? ?? '';
-        wsSvc.handleEvent('workbench_edit', {
-          'buffer': path,
-          'content': content,
-          'previous_content': prev,
-          'type': 'text',
-        });
-        break;
-    }
-
-    // Auto-open workspace if a file was opened
-    if (const {'read', 'write', 'create', 'edit', 'patch', 'replace'}.contains(lower)) {
-      final appState = context.read<AppState>();
-      if (!appState.isWorkspaceVisible) appState.showWorkspace();
-    }
-  }
-
-  /// Tools hidden from chat — shown only in spinner/sidebar
   static bool _isHiddenTool(String name) {
     final lower = name.toLowerCase();
     return _hiddenToolNames.contains(lower) ||
@@ -1757,8 +4880,19 @@ class _ChatPanelState extends State<ChatPanel> {
     'search_tools', 'get_tool', 'list_categories', 'browse_category',
   };
 
-  /// Convert internal tool names to user-friendly spinner labels
-  static String _friendlySpinnerLabel(String shortName, String verb) {
+  /// Convert internal tool names to user-friendly spinner labels.
+  ///
+  /// Priority order (most authoritative first):
+  ///   1. `display.verb` from the daemon (when [hasDisplay] is true)
+  ///      — the daemon's tool-contract v2 block carries curated copy
+  ///      ("Read", "Search", …). We trust it verbatim.
+  ///   2. Legacy hardcoded phrases for plumbing tool names — only
+  ///      used when the daemon didn't ship a display block (old
+  ///      daemons, custom apps).
+  ///   3. Fallback to the raw verb / tool name.
+  static String _friendlySpinnerLabel(String shortName, String verb,
+      {bool hasDisplay = false}) {
+    if (hasDisplay && verb.isNotEmpty) return verb;
     final lower = shortName.toLowerCase();
     if (lower == 'agentwaitall' || lower == 'agent_wait_all') return 'Waiting for agents…';
     if (lower == 'agent_wait') return 'Waiting for agent…';
@@ -1774,251 +4908,6 @@ class _ChatPanelState extends State<ChatPanel> {
     return verb;
   }
 
-  /// Generate smart follow-up suggestions based on the last turn
-  static List<String> _generateSuggestions(Map<String, dynamic> data, String content) {
-    final suggestions = <String>[];
-    final tc = data['tool_calls_count'] as int? ?? 0;
-    final error = data['error'] as String?;
-    final lower = content.toLowerCase();
-
-    if (error != null && error.isNotEmpty) {
-      suggestions.add('Fix this error');
-      suggestions.add('Explain what went wrong');
-      return suggestions;
-    }
-
-    // Based on content patterns
-    if (lower.contains('created') || lower.contains('wrote') || lower.contains('written')) {
-      suggestions.add('Run the tests');
-      suggestions.add('Review the changes');
-    }
-    if (lower.contains('error') || lower.contains('bug') || lower.contains('fix')) {
-      suggestions.add('Run the tests again');
-    }
-    if (lower.contains('file') || lower.contains('read')) {
-      suggestions.add('Edit this file');
-      suggestions.add('Search for related files');
-    }
-    if (tc > 3) {
-      suggestions.add('Summarize what you did');
-    }
-    if (lower.contains('test') || lower.contains('spec')) {
-      suggestions.add('Run the test suite');
-    }
-    if (lower.contains('commit') || lower.contains('change')) {
-      suggestions.add('Create a commit');
-    }
-
-    // Generic fallbacks
-    if (suggestions.isEmpty) {
-      suggestions.add('Continue');
-      suggestions.add('Explain your approach');
-    }
-
-    return suggestions.take(3).toList();
-  }
-
-  static String _formatTokens(int n) {
-    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}k';
-    return n.toString();
-  }
-}
-
-// ─── History loading skeleton ─────────────────────────────────────────────────
-
-class _HistorySkeleton extends StatelessWidget {
-  const _HistorySkeleton();
-
-  @override
-  Widget build(BuildContext context) {
-    return Shimmer.fromColors(
-      baseColor: context.colors.surfaceAlt,
-      highlightColor: context.colors.borderHover,
-      child: ListView(
-        padding: const EdgeInsets.only(top: 28, bottom: 8),
-        children: [
-          _skelRow(right: true, widthFactor: 0.55),
-          const SizedBox(height: 10),
-          _skelRow(right: false, widthFactor: 0.75),
-          const SizedBox(height: 4),
-          _skelRow(right: false, widthFactor: 0.5),
-          const SizedBox(height: 18),
-          _skelRow(right: true, widthFactor: 0.4),
-          const SizedBox(height: 10),
-          _skelRow(right: false, widthFactor: 0.65),
-          const SizedBox(height: 4),
-          _skelRow(right: false, widthFactor: 0.45),
-        ],
-      ),
-    );
-  }
-
-  Widget _skelRow({required bool right, required double widthFactor}) {
-    return Padding(
-      padding: right
-          ? const EdgeInsets.fromLTRB(80, 2, 16, 2)
-          : const EdgeInsets.fromLTRB(16, 2, 60, 2),
-      child: Align(
-        alignment: right ? Alignment.centerRight : Alignment.centerLeft,
-        child: FractionallySizedBox(
-          widthFactor: widthFactor,
-          child: Container(
-            height: 13,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(6),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Empty / centered state (input embedded vertically centered) ──────────────
-// Layout (Claude-style):
-//
-//   ┌──────────────────────────────────────────────────────────┐
-//   │                                                          │
-//   │                    ⬡  App name                          │
-//   │               App greeting text here                     │
-//   │                                                          │
-//   │  ┌───────────────────────────────────────────────────┐   │
-//   │  │  Message…                                         │   │
-//   │  ├───────────────────────────────────────────────────┤   │
-//   │  │  [+] [⎘]                              [↑ Send]    │   │
-//   │  └───────────────────────────────────────────────────┘   │
-//   │                                                          │
-//   └──────────────────────────────────────────────────────────┘
-
-class _EmptyCenteredState extends StatelessWidget {
-  final AppSummary? app;
-  final String workspace;
-  const _EmptyCenteredState({
-    required this.app,
-    required this.workspace,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final workspaceRequired = app?.workspaceMode == 'required';
-    final missingWorkspace = workspaceRequired && workspace.isEmpty;
-    final isSmall = MediaQuery.of(context).size.width < 600;
-
-    return Center(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: isSmall ? double.infinity : 720,
-        ),
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: isSmall ? 12 : 16),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              const Spacer(),
-
-              // ── App icon + name ──────────────────────────────────────────
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: context.colors.surfaceAlt,
-                  borderRadius: BorderRadius.circular(11),
-                  border: Border.all(color: context.colors.border),
-                ),
-                child: Icon(Icons.hexagon_outlined,
-                    color: context.colors.textDim, size: 20),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                app?.name ?? 'Digitorn',
-                style: GoogleFonts.inter(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: context.colors.textMuted),
-              ),
-              if (app?.greeting.isNotEmpty == true) ...[
-                const SizedBox(height: 8),
-                Text(
-                  app!.greeting,
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(
-                      fontSize: 13,
-                      color: context.colors.textDim,
-                      height: 1.65),
-                ),
-              ],
-
-              // ── Workspace missing warning ──────────────────────────────
-              if (missingWorkspace) ...[
-                const SizedBox(height: 14),
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: () async {
-                      final dir = await pickWorkspace(context);
-                      if (dir != null && context.mounted) {
-                        _saveRecentWorkspace(dir);
-                        context.read<AppState>().setWorkspace(dir);
-                      }
-                    },
-                    child: Builder(builder: (ctx) {
-                      final c = ctx.colors;
-                      return Container(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: c.red.withValues(alpha: 0.3)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.folder_open_outlined,
-                              size: 14, color: c.red),
-                          const SizedBox(width: 8),
-                          Text(
-                            'Select Workspace...',
-                            style: GoogleFonts.inter(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: c.red),
-                          ),
-                        ],
-                      ),
-                    );
-                    }),
-                  ),
-                ),
-              ] else if (workspace.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.folder_outlined,
-                        size: 11, color: context.colors.textDim),
-                    const SizedBox(width: 5),
-                    Flexible(
-                      child: Text(
-                        workspace,
-                        style: GoogleFonts.firaCode(
-                            fontSize: 11, color: context.colors.borderHover),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-
-              const Spacer(flex: 2),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ─── Workspace missing banner ─────────────────────────────────────────────────
@@ -2039,7 +4928,8 @@ class _WorkspaceBanner extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '$appName requires a workspace to operate properly.',
+              'chat.workspace_banner_message'
+                  .tr(namedArgs: {'appName': appName}),
               style: GoogleFonts.inter(fontSize: 12, color: c.red),
             ),
           ),
@@ -2049,7 +4939,6 @@ class _WorkspaceBanner extends StatelessWidget {
               onTap: () async {
                 final dir = await pickWorkspace(context);
                 if (dir != null && context.mounted) {
-                  _saveRecentWorkspace(dir);
                   context.read<AppState>().setWorkspace(dir);
                 }
               },
@@ -2060,7 +4949,7 @@ class _WorkspaceBanner extends StatelessWidget {
                   borderRadius: BorderRadius.circular(5),
                   border: Border.all(color: c.red.withValues(alpha: 0.3)),
                 ),
-                child: Text('Select',
+                child: Text('chat.select_short'.tr(),
                     style: GoogleFonts.inter(fontSize: 11, color: c.red)),
               ),
             ),
@@ -2073,25 +4962,505 @@ class _WorkspaceBanner extends StatelessWidget {
 
 // ─── Approval banner ──────────────────────────────────────────────────────────
 
-class _ApprovalBanner extends StatelessWidget {
+class _ApprovalBanner extends StatefulWidget {
   final ApprovalRequest request;
-  final VoidCallback onApprove;
-  final VoidCallback onDeny;
+  final void Function(String message) onApprove;
+  final void Function(String message) onDeny;
+  final VoidCallback? onDismiss;
   const _ApprovalBanner(
-      {required this.request, required this.onApprove, required this.onDeny});
+      {required this.request, required this.onApprove, required this.onDeny, this.onDismiss});
+
+  @override
+  State<_ApprovalBanner> createState() => _ApprovalBannerState();
+}
+
+class _ApprovalBannerState extends State<_ApprovalBanner>
+    with SingleTickerProviderStateMixin {
+  final TextEditingController _inputCtrl = TextEditingController();
+  bool _showDenyInput = false;
+  int _remainingSeconds = 300;
+  Timer? _timer;
+  late AnimationController _pulseCtrl;
+
+  // ── Enhanced ask_user state ───────────────────────────────────────────
+  final Set<String> _selectedChoices = {};
+  final Map<String, dynamic> _formValues = {};
+  bool _formSubmitted = false; // for validation display
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    );
+    // Always pulse — either continuously for high risk, or a short
+    // 3-cycle attention grabber for medium/low. The daemon doesn't
+    // emit a dedicated "new approval" sound, so the visual cue does
+    // the work. Stops automatically after ~3.6s for non-critical.
+    if (widget.request.riskLevel == 'high') {
+      _pulseCtrl.repeat(reverse: true);
+    } else {
+      _pulseCtrl.repeat(reverse: true);
+      Future.delayed(const Duration(milliseconds: 3600), () {
+        if (mounted) _pulseCtrl.stop();
+      });
+    }
+    _updateRemaining();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _updateRemaining();
+    });
+  }
+
+  void _updateRemaining() {
+    final elapsed =
+        DateTime.now().millisecondsSinceEpoch / 1000 - widget.request.createdAt;
+    final remaining = (300 - elapsed).clamp(0, 300).toInt();
+    if (remaining != _remainingSeconds) {
+      setState(() => _remainingSeconds = remaining);
+    }
+    if (remaining <= 0) {
+      _timer?.cancel();
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _pulseCtrl.dispose();
+    _inputCtrl.dispose();
+    super.dispose();
+  }
+
+  /// Find the "main" param key — the one most likely shown in description.
+  static String? _mainParamKey(Map<String, dynamic> params) {
+    for (final k in ['command', 'cmd', 'query', 'question', 'content',
+                     'path', 'file_path', 'url', 'script']) {
+      if (params.containsKey(k)) return k;
+    }
+    return null;
+  }
+
+  /// Strip module prefix from tool names for display.
+  /// "shell.bash" → "Bash", "filesystem.write" → "Write",
+  /// "workspace.ws_write" → "Write"
+  static String _simplifyToolName(String name) {
+    final segs = name
+        .split(RegExp(r'[._\-/:]+'))
+        .where((s) => s.isNotEmpty && s.toLowerCase() != 'mcp')
+        .toList();
+    if (segs.isEmpty) return name;
+    var last = segs.last;
+    // Strip ws_ prefix
+    if (last.toLowerCase().startsWith('ws')) {
+      last = last.substring(2);
+      if (last.startsWith('_')) last = last.substring(1);
+    }
+    if (last.isEmpty) last = segs.last;
+    return last[0].toUpperCase() + last.substring(1);
+  }
+
+  String get _timerText {
+    final m = _remainingSeconds ~/ 60;
+    final s = _remainingSeconds % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
 
   @override
   Widget build(BuildContext context) {
     final ac = context.colors;
-    final riskColor = switch (request.riskLevel) {
-      'high'   => ac.red,
+    final isAsk = widget.request.isAskUser;
+
+    final riskColor = switch (widget.request.riskLevel) {
+      'high' => ac.red,
       'medium' => ac.orange,
-      _        => ac.green,
+      _ => ac.green,
     };
 
+    final borderColor =
+        widget.request.riskLevel == 'high' ? ac.red : ac.border;
+
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeInOut,
+      alignment: Alignment.bottomCenter,
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: ac.surface,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: borderColor,
+            width: widget.request.riskLevel == 'high' ? 1.5 : 1,
+          ),
+        ),
+        child: isAsk ? _buildAskUser(ac) : _buildToolApproval(ac, riskColor),
+      ),
+    );
+  }
+
+  // ── Tool approval layout ────────────────────────────────────────────────
+
+  Widget _buildToolApproval(AppColors ac, Color riskColor) {
+    final toolLabel = _simplifyToolName(widget.request.toolName);
+    // Compute the effective description once: prefer the top-level
+    // `request.description` (the daemon's canonical intent string),
+    // fall back to `params.description` only if the top one is
+    // empty. Never surface both — they're redundant by contract.
+    final description = _effectiveDescription();
+    // Pick the primary action block (command, query, file preview,
+    // url…) based on tool type. Null when the tool has no "main"
+    // param — then the description alone carries the intent.
+    final primary = _buildPrimaryActionBlock(ac);
+    // Params that should appear as a small secondary block. Excludes
+    // description + every key already consumed by the primary block
+    // so nothing appears twice.
+    final secondary = _secondaryParams();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 1. META BAR — compact chrome: risk pill, tool, timer,
+        //    close. Small so the description below can dominate.
+        _buildApprovalMetaBar(ac, riskColor, toolLabel),
+
+        // 2. INTENT DESCRIPTION — the most important line on the
+        //    card. Big, readable, bright — this is what the user
+        //    reads to decide Approve / Deny.
+        if (description.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          Text(
+            description,
+            style: GoogleFonts.inter(
+              fontSize: 15,
+              color: ac.textBright,
+              height: 1.55,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0,
+            ),
+          ),
+        ],
+
+        // 3. PRIMARY ACTION — tool-specific. Bash = command in a
+        //    code block, Read = path + small preview, Edit = path +
+        //    diff, etc. Kept tight so tall previews don't shove the
+        //    Allow / Deny buttons below the fold.
+        if (primary != null) ...[
+          const SizedBox(height: 12),
+          primary,
+        ],
+
+        // 4. SECONDARY PARAMS — only the bits that didn't already
+        //    land in the description or the primary block. Rendered
+        //    as a calm key-value list.
+        if (secondary.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _buildSecondaryParamsBlock(ac, secondary),
+        ],
+        const SizedBox(height: 14),
+        // Buttons or deny-reason input
+        if (_showDenyInput)
+          _buildDenyInput(ac)
+        else
+          Row(
+            children: [
+              _ABtn(
+                  label: 'chat.allow'.tr(),
+                  bg: ac.green.withValues(alpha: 0.1),
+                  border: ac.green.withValues(alpha: 0.3),
+                  fg: ac.green,
+                  onTap: () => widget.onApprove('')),
+              const SizedBox(width: 8),
+              _ABtn(
+                  label: 'chat.deny'.tr(),
+                  bg: ac.red.withValues(alpha: 0.1),
+                  border: ac.red.withValues(alpha: 0.3),
+                  fg: ac.red,
+                  onTap: () => setState(() => _showDenyInput = true)),
+            ],
+          ),
+      ],
+    );
+  }
+
+  // ── Premium approval building blocks ────────────────────────────────────
+
+  /// The canonical intent description shown at the top of the
+  /// approval card. We prefer the top-level `request.description`
+  /// (the daemon's explicit intent string) and only fall back to
+  /// `params.description` when the top-level is empty. The two are
+  /// never concatenated — that's how the "description appears twice"
+  /// bug used to happen.
+  String _effectiveDescription() {
+    final topDesc = widget.request.description.trim();
+    if (topDesc.isNotEmpty) return topDesc;
+    final paramDesc =
+        (widget.request.params['description'] as String? ?? '').trim();
+    return paramDesc;
+  }
+
+  /// Compact meta bar: risk dot + tool name + risk badge + timer +
+  /// close. Sits above the description so the description has the
+  /// visual weight it deserves.
+  Widget _buildApprovalMetaBar(
+      AppColors ac, Color riskColor, String toolLabel) {
+    return Row(
+      children: [
+        _riskDot(riskColor),
+        const SizedBox(width: 8),
+        Text(
+          toolLabel,
+          style: GoogleFonts.inter(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w700,
+            color: ac.textBright,
+            letterSpacing: 0,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+          decoration: BoxDecoration(
+            color: riskColor.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: riskColor.withValues(alpha: 0.4)),
+          ),
+          child: Text(
+            widget.request.riskLevel.toUpperCase(),
+            style: GoogleFonts.inter(
+              fontSize: 9.5,
+              color: riskColor,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.2,
+            ),
+          ),
+        ),
+        const Spacer(),
+        _timerBadge(ac),
+        if (widget.onDismiss != null) ...[
+          const SizedBox(width: 6),
+          InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: widget.onDismiss,
+            child: Padding(
+              padding: const EdgeInsets.all(5),
+              child:
+                  Icon(Icons.close_rounded, size: 15, color: ac.textDim),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Build the tool-specific "primary action" block. For bash/shell
+  /// this is the command rendered as a proper code block; for file
+  /// ops it's the existing file preview / "View in workspace"
+  /// affordance; for everything else it's the main param's value in
+  /// a code block. Returns null when the tool has no main param —
+  /// in which case the description alone carries the intent and we
+  /// fall through to the secondary params section.
+  Widget? _buildPrimaryActionBlock(AppColors ac) {
+    // File operations keep their existing rich preview (path + content
+    // or diff or "View in workspace" CTA). Unchanged behaviour so we
+    // don't regress the edit/write/read cases.
+    if (_isFileOp && _filePath != null) {
+      return _buildFileOpBlock(ac);
+    }
+
+    final mainKey = _mainParamKey(widget.request.params);
+    if (mainKey == null) return null;
+    final rawVal = widget.request.params[mainKey];
+    final valStr = rawVal?.toString().trim() ?? '';
+    if (valStr.isEmpty) return null;
+
+    // Detect shell-ish tools so we can prefix the command with "$"
+    // and pick a "shell" language hint for eventual syntax
+    // highlighting.
+    final toolLower = widget.request.toolName.toLowerCase();
+    final isShell = mainKey == 'command' ||
+        mainKey == 'cmd' ||
+        toolLower.contains('bash') ||
+        toolLower.contains('shell') ||
+        toolLower.contains('zsh');
+
+    return _ApprovalCodeBlock(
+      label: _labelForMainParam(mainKey),
+      content: valStr,
+      shellPrefix: isShell,
+    );
+  }
+
+  /// Human label for the main-param block header. Keeps the UI
+  /// grounded by naming what the block represents.
+  String _labelForMainParam(String key) => switch (key) {
+        'command' || 'cmd' => 'Command',
+        'query' => 'Query',
+        'question' => 'Question',
+        'script' => 'Script',
+        'sql' => 'SQL',
+        'url' => 'URL',
+        'content' => 'Content',
+        'path' || 'file_path' => 'Path',
+        _ => key,
+      };
+
+  /// File-op primary block — kept close to the legacy rendering so
+  /// the edit/write/read flows stay familiar. The path and preview
+  /// are surfaced together; large files route to the workspace.
+  Widget _buildFileOpBlock(AppColors ac) {
+    final path = _filePath!;
+    final content = _fileContent ?? '';
+    final isSmall = content.length <= 500;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: ac.codeBlockHeader,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: ac.border),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                _isEditOp
+                    ? Icons.edit_outlined
+                    : Icons.add_circle_outline,
+                size: 14,
+                color: _isEditOp ? ac.orange : ac.green,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  path,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.jetBrainsMono(
+                    fontSize: 12.5,
+                    color: ac.textBright,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              if (content.isNotEmpty)
+                Text(
+                  '${content.split('\n').length} lines',
+                  style: GoogleFonts.jetBrainsMono(
+                    fontSize: 11,
+                    color: ac.textMuted,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+            ],
+          ),
+        ),
+        if (isSmall && content.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 180),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: ac.codeBlockBg,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: ac.border),
+              ),
+              child: SingleChildScrollView(
+                child: Text(
+                  content,
+                  style: GoogleFonts.jetBrainsMono(
+                    fontSize: 12,
+                    color: ac.text,
+                    height: 1.55,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+        if (!isSmall) ...[
+          const SizedBox(height: 6),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: _openFileInWorkspace,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: ac.blue.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: ac.blue.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      _isEditOp
+                          ? Icons.compare_arrows_rounded
+                          : Icons.visibility_outlined,
+                      size: 14,
+                      color: ac.blue,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _isEditOp
+                          ? 'View diff in workspace  →'
+                          : 'Preview file in workspace  →',
+                      style: GoogleFonts.inter(
+                        fontSize: 12.5,
+                        color: ac.blue,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Returns params that should appear in the secondary block —
+  /// everything EXCEPT:
+  ///   * `description` (already at the top)
+  ///   * the `mainParamKey` (shown in the primary block)
+  ///   * `path` / `file_path` (shown in the file op block)
+  ///   * empty / null values
+  Map<String, dynamic> _secondaryParams() {
+    final original = widget.request.params;
+    final mainKey = _mainParamKey(original);
+    final out = <String, dynamic>{};
+    for (final entry in original.entries) {
+      final key = entry.key.toLowerCase();
+      if (key == 'description') continue;
+      if (_isFileOp && (key == 'path' || key == 'file_path')) continue;
+      if (mainKey != null && entry.key == mainKey) continue;
+      final v = entry.value;
+      if (v == null) continue;
+      if (v is String && v.trim().isEmpty) continue;
+      out[entry.key] = v;
+    }
+    return out;
+  }
+
+  /// Compact secondary-param listing. Each entry renders a small
+  /// label + value row — not a giant code block. Meant for things
+  /// like `timeout: 30`, `max_results: 10`, `cwd: /tmp` that
+  /// accompany the primary action without dominating it.
+  Widget _buildSecondaryParamsBlock(
+      AppColors ac, Map<String, dynamic> params) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-      padding: const EdgeInsets.all(14),
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: ac.surface,
         borderRadius: BorderRadius.circular(8),
@@ -2099,90 +5468,802 @@ class _ApprovalBanner extends StatelessWidget {
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // Header
-          Row(
-            children: [
-              Icon(Icons.security_outlined, size: 13, color: riskColor),
-              const SizedBox(width: 7),
-              Text(
-                'Approval Required',
-                style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: riskColor),
-              ),
-              const SizedBox(width: 6),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                  color: riskColor.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(request.riskLevel,
-                    style: GoogleFonts.inter(
-                        fontSize: 10, color: riskColor)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // Tool name
-          Row(
-            children: [
-              Text('● ', style: TextStyle(color: riskColor, fontSize: 10)),
-              Text(request.toolName,
-                  style: GoogleFonts.firaCode(
-                      fontSize: 13, color: context.colors.textBright)),
-            ],
-          ),
-          // Description
-          if (request.description.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(request.description,
-                style: GoogleFonts.inter(
-                    fontSize: 12, color: context.colors.textMuted,
-                    height: 1.5)),
+          for (final e in params.entries) ...[
+            _secondaryParamRow(ac, e.key, e.value),
+            if (e.key != params.keys.last) const SizedBox(height: 4),
           ],
-          // Params preview
-          if (request.params.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: context.colors.bg,
-                borderRadius: BorderRadius.circular(5),
+        ],
+      ),
+    );
+  }
+
+  Widget _secondaryParamRow(AppColors ac, String key, Object? value) {
+    final str = value?.toString() ?? '';
+    final isLong = str.length > 80;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 96,
+          child: Text(
+            key,
+            style: GoogleFonts.inter(
+              fontSize: 11.5,
+              color: ac.textMuted,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            isLong ? '${str.substring(0, 77)}…' : str,
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 12,
+              color: ac.textBright,
+              height: 1.4,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Ask user layout — mode router ────────────────────────────────────────
+
+  Widget _buildAskUser(AppColors ac) {
+    final req = widget.request;
+    if (req.isForm) return _buildFormMode(ac);
+    if (req.isChoices) return _buildChoicesMode(ac);
+    if (req.isContentReview) return _buildContentReviewMode(ac);
+    return _buildSimpleQuestionMode(ac);
+  }
+
+  /// Header row shared by all ask_user modes.
+  Widget _askHeader(AppColors ac) {
+    return Row(
+      children: [
+        Icon(Icons.help_outline, size: 14, color: ac.blue),
+        const SizedBox(width: 7),
+        Text(
+          'chat.agent_has_question'.tr(),
+          style: GoogleFonts.inter(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: ac.blue),
+        ),
+        const Spacer(),
+        _timerBadge(ac),
+      ],
+    );
+  }
+
+  /// Scrollable question text shared by all modes.
+  Widget _questionText(AppColors ac) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 160),
+      child: SingleChildScrollView(
+        child: ChatMarkdown(text: widget.request.question),
+      ),
+    );
+  }
+
+  // ── Mode 1: Simple Question ──────────────────────────────────────────
+
+  Widget _buildSimpleQuestionMode(AppColors ac) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _askHeader(ac),
+        const SizedBox(height: 8),
+        _questionText(ac),
+        const SizedBox(height: 10),
+        Container(
+          decoration: BoxDecoration(
+            color: ac.bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: ac.border),
+          ),
+          child: TextField(
+            controller: _inputCtrl,
+            style: GoogleFonts.inter(fontSize: 13, color: ac.textBright),
+            decoration: InputDecoration(
+              hintText: 'chat.type_response_hint'.tr(),
+              hintStyle: GoogleFonts.inter(fontSize: 13, color: ac.textDim),
+              border: InputBorder.none,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              isDense: true,
+            ),
+            maxLines: 3,
+            minLines: 1,
+            onSubmitted: (_) => _submitResponse(),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _ABtn(
+                label: 'chat.respond'.tr(),
+                bg: ac.green.withValues(alpha: 0.1),
+                border: ac.green.withValues(alpha: 0.3),
+                fg: ac.green,
+                onTap: _submitResponse),
+            const SizedBox(width: 8),
+            _ABtn(
+                label: 'chat.skip'.tr(),
+                bg: ac.textDim.withValues(alpha: 0.1),
+                border: ac.textDim.withValues(alpha: 0.3),
+                fg: ac.textMuted,
+                onTap: () => widget.onDeny('')),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ── Mode 2: Choices ──────────────────────────────────────────────────
+
+  Widget _buildChoicesMode(AppColors ac) {
+    final req = widget.request;
+    final choices = req.choices!;
+    final multi = req.allowMultiple;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _askHeader(ac),
+        const SizedBox(height: 8),
+        _questionText(ac),
+        const SizedBox(height: 10),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 200),
+          child: SingleChildScrollView(
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: choices.map((choice) {
+                final selected = _selectedChoices.contains(choice);
+                return _ChoicePill(
+                  label: choice,
+                  selected: selected,
+                  showCheckbox: multi,
+                  colors: ac,
+                  onTap: () {
+                    if (multi) {
+                      setState(() {
+                        if (selected) {
+                          _selectedChoices.remove(choice);
+                        } else {
+                          _selectedChoices.add(choice);
+                        }
+                      });
+                    } else {
+                      // Single select: immediately approve
+                      widget.onApprove(choice);
+                    }
+                  },
+                );
+              }).toList(),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            if (multi)
+              _ABtn(
+                  label: 'chat.confirm_count'.tr(namedArgs: {'n': '${_selectedChoices.length}'}),
+                  bg: _selectedChoices.isNotEmpty
+                      ? ac.green.withValues(alpha: 0.1)
+                      : ac.textDim.withValues(alpha: 0.05),
+                  border: _selectedChoices.isNotEmpty
+                      ? ac.green.withValues(alpha: 0.3)
+                      : ac.border,
+                  fg: _selectedChoices.isNotEmpty ? ac.green : ac.textDim,
+                  onTap: _selectedChoices.isNotEmpty
+                      ? () => widget.onApprove(_selectedChoices.join(','))
+                      : () {}),
+            if (multi) const SizedBox(width: 8),
+            _ABtn(
+                label: 'chat.skip'.tr(),
+                bg: ac.textDim.withValues(alpha: 0.1),
+                border: ac.textDim.withValues(alpha: 0.3),
+                fg: ac.textMuted,
+                onTap: () => widget.onDeny('')),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ── Mode 3: Content Review ───────────────────────────────────────────
+
+  Widget _buildContentReviewMode(AppColors ac) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _askHeader(ac),
+        const SizedBox(height: 8),
+        _questionText(ac),
+        const SizedBox(height: 6),
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: () => _openGenericInWorkspace(),
+            child: Text(
+              'chat.view_in_panel'.tr(),
+              style: GoogleFonts.inter(
+                  fontSize: 12,
+                  color: ac.blue,
+                  decoration: TextDecoration.underline,
+                  decorationColor: ac.blue),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Container(
+          decoration: BoxDecoration(
+            color: ac.bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: ac.border),
+          ),
+          child: TextField(
+            controller: _inputCtrl,
+            style: GoogleFonts.inter(fontSize: 13, color: ac.textBright),
+            decoration: InputDecoration(
+              hintText: 'chat.feedback_optional_hint'.tr(),
+              hintStyle: GoogleFonts.inter(fontSize: 13, color: ac.textDim),
+              border: InputBorder.none,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              isDense: true,
+            ),
+            maxLines: 3,
+            minLines: 1,
+            onSubmitted: (_) => widget.onApprove(_inputCtrl.text.trim()),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _ABtn(
+                label: 'chat.approve'.tr(),
+                bg: ac.green.withValues(alpha: 0.1),
+                border: ac.green.withValues(alpha: 0.3),
+                fg: ac.green,
+                onTap: () => widget.onApprove(_inputCtrl.text.trim())),
+            const SizedBox(width: 8),
+            _ABtn(
+                label: 'chat.reject'.tr(),
+                bg: ac.red.withValues(alpha: 0.1),
+                border: ac.red.withValues(alpha: 0.3),
+                fg: ac.red,
+                onTap: () => widget.onDeny(_inputCtrl.text.trim())),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ── Mode 4: Form ─────────────────────────────────────────────────────
+
+  Widget _buildFormMode(AppColors ac) {
+    final req = widget.request;
+    final fields = req.formFields!;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _askHeader(ac),
+        const SizedBox(height: 8),
+        _questionText(ac),
+        const SizedBox(height: 10),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 400),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: fields.map((f) => _buildFormField(ac, f)).toList(),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            _ABtn(
+                label: 'chat.submit'.tr(),
+                bg: ac.green.withValues(alpha: 0.1),
+                border: ac.green.withValues(alpha: 0.3),
+                fg: ac.green,
+                onTap: () => _submitForm(fields)),
+            const SizedBox(width: 8),
+            _ABtn(
+                label: 'chat.cancel'.tr(),
+                bg: ac.textDim.withValues(alpha: 0.1),
+                border: ac.textDim.withValues(alpha: 0.3),
+                fg: ac.textMuted,
+                onTap: () => widget.onDeny('')),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFormField(AppColors ac, Map<String, dynamic> field) {
+    final name = field['name'] as String? ?? '';
+    final label = field['label'] as String? ?? name;
+    final type = field['type'] as String? ?? 'text';
+    final required_ = field['required'] as bool? ?? false;
+    final options = (field['options'] as List?)?.cast<String>() ?? [];
+    final hint = field['hint'] as String? ?? '';
+    final showError = _formSubmitted && required_ && _isFieldEmpty(name, type);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text.rich(
+            TextSpan(
+              text: label,
+              children: [
+                if (required_)
+                  TextSpan(
+                      text: ' *',
+                      style: TextStyle(color: ac.red)),
+              ],
+            ),
+            style: GoogleFonts.inter(
+                fontSize: 12, fontWeight: FontWeight.w500, color: ac.text),
+          ),
+          const SizedBox(height: 4),
+          _buildFieldWidget(ac, name, type, options, hint),
+          if (showError) ...[
+            const SizedBox(height: 2),
+            Text('chat.required_field'.tr(),
+                style: GoogleFonts.inter(fontSize: 10, color: ac.red)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  bool _isFieldEmpty(String name, String type) {
+    final val = _formValues[name];
+    if (val == null) return true;
+    if (val is String && val.isEmpty) return true;
+    if (val is List && val.isEmpty) return true;
+    return false;
+  }
+
+  Widget _buildFieldWidget(
+      AppColors ac, String name, String type, List<String> options, String hint) {
+    switch (type) {
+      case 'select':
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: ac.bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: ac.border),
+          ),
+          child: DropdownButton<String>(
+            value: _formValues[name] as String?,
+            isExpanded: true,
+            dropdownColor: ac.surface,
+            underline: const SizedBox.shrink(),
+            hint: Text(hint.isNotEmpty ? hint : 'chat.select_hint'.tr(),
+                style: GoogleFonts.inter(fontSize: 13, color: ac.textDim)),
+            style: GoogleFonts.inter(fontSize: 13, color: ac.textBright),
+            items: options
+                .map((o) => DropdownMenuItem(value: o, child: Text(o)))
+                .toList(),
+            onChanged: (v) => setState(() => _formValues[name] = v),
+          ),
+        );
+      case 'textarea':
+        return Container(
+          decoration: BoxDecoration(
+            color: ac.bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: ac.border),
+          ),
+          child: TextField(
+            style: GoogleFonts.inter(fontSize: 13, color: ac.textBright),
+            decoration: InputDecoration(
+              hintText: hint.isNotEmpty ? hint : 'Enter text...',
+              hintStyle: GoogleFonts.inter(fontSize: 13, color: ac.textDim),
+              border: InputBorder.none,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              isDense: true,
+            ),
+            maxLines: 3,
+            minLines: 3,
+            onChanged: (v) => _formValues[name] = v,
+          ),
+        );
+      case 'checkbox':
+        final selected =
+            (_formValues[name] as List<String>?) ?? <String>[];
+        return Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: options.map((o) {
+            final checked = selected.contains(o);
+            return MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: () {
+                  setState(() {
+                    final list = List<String>.from(selected);
+                    if (checked) {
+                      list.remove(o);
+                    } else {
+                      list.add(o);
+                    }
+                    _formValues[name] = list;
+                  });
+                },
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      checked
+                          ? Icons.check_box
+                          : Icons.check_box_outline_blank,
+                      size: 16,
+                      color: checked ? ac.blue : ac.textMuted,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(o,
+                        style: GoogleFonts.inter(
+                            fontSize: 12, color: ac.text)),
+                  ],
+                ),
               ),
-              child: Text(
-                request.params.entries
-                    .take(4)
-                    .map((e) => '${e.key}: ${e.value}')
-                    .join('\n'),
-                style: GoogleFonts.firaCode(
-                    fontSize: 11,
-                    color: context.colors.textMuted,
-                    height: 1.5),
-              ),
+            );
+          }).toList(),
+        );
+      case 'toggle':
+        return Row(
+          children: [
+            Switch(
+              value: _formValues[name] as bool? ?? false,
+              onChanged: (v) => setState(() => _formValues[name] = v),
+              activeTrackColor: ac.blue.withValues(alpha: 0.5),
+              activeThumbColor: ac.blue,
             ),
           ],
-          const SizedBox(height: 10),
-          // Buttons
-          Row(
-            children: [
-              _ABtn(
-                  label: 'Allow',
-                  bg: ac.green.withValues(alpha: 0.1),
-                  border: ac.green.withValues(alpha: 0.3),
-                  fg: ac.green,
-                  onTap: onApprove),
-              const SizedBox(width: 8),
-              _ABtn(
-                  label: 'Deny',
-                  bg: ac.red.withValues(alpha: 0.1),
-                  border: ac.red.withValues(alpha: 0.3),
-                  fg: ac.red,
-                  onTap: onDeny),
+        );
+      case 'number':
+        return Container(
+          decoration: BoxDecoration(
+            color: ac.bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: ac.border),
+          ),
+          child: TextField(
+            style: GoogleFonts.inter(fontSize: 13, color: ac.textBright),
+            keyboardType: TextInputType.number,
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.\-]')),
             ],
+            decoration: InputDecoration(
+              hintText: hint.isNotEmpty ? hint : 'Enter number...',
+              hintStyle: GoogleFonts.inter(fontSize: 13, color: ac.textDim),
+              border: InputBorder.none,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              isDense: true,
+            ),
+            onChanged: (v) => _formValues[name] = v,
+          ),
+        );
+      default: // 'text'
+        return Container(
+          decoration: BoxDecoration(
+            color: ac.bg,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: ac.border),
+          ),
+          child: TextField(
+            style: GoogleFonts.inter(fontSize: 13, color: ac.textBright),
+            decoration: InputDecoration(
+              hintText: hint.isNotEmpty ? hint : 'Enter text...',
+              hintStyle: GoogleFonts.inter(fontSize: 13, color: ac.textDim),
+              border: InputBorder.none,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              isDense: true,
+            ),
+            onChanged: (v) => _formValues[name] = v,
+          ),
+        );
+    }
+  }
+
+  void _submitForm(List<Map<String, dynamic>> fields) {
+    setState(() => _formSubmitted = true);
+    // Validate required fields
+    for (final f in fields) {
+      final name = f['name'] as String? ?? '';
+      final type = f['type'] as String? ?? 'text';
+      final required_ = f['required'] as bool? ?? false;
+      if (required_ && _isFieldEmpty(name, type)) return;
+    }
+    widget.onApprove(jsonEncode(_formValues));
+  }
+
+  /// Detect if tool is a file write/edit operation
+  bool get _isFileOp {
+    final lower = widget.request.toolName.toLowerCase();
+    return lower.contains('write') || lower.contains('edit') ||
+        lower.contains('create') || lower.contains('patch') ||
+        lower.contains('replace');
+  }
+
+  bool get _isEditOp {
+    final lower = widget.request.toolName.toLowerCase();
+    return lower.contains('edit') || lower.contains('patch') || lower.contains('replace');
+  }
+
+  String? get _filePath {
+    final p = widget.request.params;
+    return p['path'] as String? ?? p['file'] as String? ?? p['file_path'] as String?;
+  }
+
+  String? get _fileContent {
+    final p = widget.request.params;
+    return p['content'] as String? ?? p['new_content'] as String? ?? p['new_string'] as String?;
+  }
+
+  /// Open file write/edit in workspace — with diff for edits
+  void _openFileInWorkspace() {
+    final path = _filePath;
+    if (path == null) return;
+    // Diff preview lives inline inside the approval card; just
+    // surface the workspace panel for context.
+    final appState = context.read<AppState>();
+    if (!appState.isWorkspaceVisible) appState.showWorkspace();
+  }
+
+  /// Open generic content in workspace
+  void _openGenericInWorkspace() {
+    // Content is already displayed inline in the approval card;
+    // this action just surfaces the workspace panel.
+    final appState = context.read<AppState>();
+    if (!appState.isWorkspaceVisible) appState.showWorkspace();
+  }
+
+  void _submitResponse() {
+    final text = _inputCtrl.text.trim();
+    if (text.isEmpty) return;
+    widget.onApprove(text);
+  }
+
+  // ── Deny reason input ───────────────────────────────────────────────────
+
+  Widget _buildDenyInput(AppColors ac) {
+    return Row(
+      children: [
+        Expanded(
+          child: Container(
+            decoration: BoxDecoration(
+              color: ac.bg,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: ac.red.withValues(alpha: 0.3)),
+            ),
+            child: TextField(
+              controller: _inputCtrl,
+              autofocus: true,
+              style: GoogleFonts.inter(fontSize: 12, color: ac.textBright),
+              decoration: InputDecoration(
+                hintText: 'chat.reason_optional_hint'.tr(),
+                hintStyle: GoogleFonts.inter(fontSize: 12, color: ac.textDim),
+                border: InputBorder.none,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                isDense: true,
+              ),
+              onSubmitted: (_) => widget.onDeny(_inputCtrl.text.trim()),
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        _ABtn(
+            label: 'chat.send_short'.tr(),
+            bg: ac.red.withValues(alpha: 0.1),
+            border: ac.red.withValues(alpha: 0.3),
+            fg: ac.red,
+            onTap: () => widget.onDeny(_inputCtrl.text.trim())),
+        const SizedBox(width: 4),
+        _ABtn(
+            label: 'chat.cancel'.tr(),
+            bg: ac.surface,
+            border: ac.border,
+            fg: ac.textMuted,
+            onTap: () => setState(() {
+                  _showDenyInput = false;
+                  _inputCtrl.clear();
+                })),
+      ],
+    );
+  }
+
+  // ── Risk dot (pulsing for high) ─────────────────────────────────────────
+
+  Widget _riskDot(Color color) {
+    final dot = Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: color,
+      ),
+    );
+    if (widget.request.riskLevel == 'high') {
+      return FadeTransition(
+        opacity: Tween<double>(begin: 0.5, end: 1.0).animate(_pulseCtrl),
+        child: dot,
+      );
+    }
+    return dot;
+  }
+
+  // ── Timer badge ─────────────────────────────────────────────────────────
+
+  Widget _timerBadge(AppColors ac) {
+    final isLow = _remainingSeconds < 60;
+    final color = isLow ? ac.red : ac.textMuted;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('\u23F1 ',
+            style: GoogleFonts.inter(fontSize: 11, color: color)),
+        Text(_timerText,
+            style: GoogleFonts.firaCode(
+                fontSize: 11,
+                color: color,
+                fontWeight: isLow ? FontWeight.w600 : FontWeight.normal)),
+      ],
+    );
+  }
+}
+
+/// Compact code block used inside the tool-approval card. Renders
+/// the main-param value (command, query, script, …) in JetBrains
+/// Mono with a subtle header (label + optional Copy) and a shell
+/// prefix `$ ` when the param represents a shell command. Kept
+/// lightweight — no syntax highlighting — so it loads instantly
+/// in the approval overlay without competing with the chat's
+/// regular code-block styling.
+class _ApprovalCodeBlock extends StatefulWidget {
+  final String label;
+  final String content;
+  final bool shellPrefix;
+
+  const _ApprovalCodeBlock({
+    required this.label,
+    required this.content,
+    this.shellPrefix = false,
+  });
+
+  @override
+  State<_ApprovalCodeBlock> createState() => _ApprovalCodeBlockState();
+}
+
+class _ApprovalCodeBlockState extends State<_ApprovalCodeBlock> {
+  bool _copied = false;
+
+  void _copy() {
+    Clipboard.setData(ClipboardData(text: widget.content));
+    setState(() => _copied = true);
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final lines = widget.content.split('\n');
+    final preview = widget.shellPrefix
+        ? lines.map((l) => '\$ $l').join('\n')
+        : widget.content;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: c.codeBlockBg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Thin header — no traffic lights, just the param name + Copy.
+          Container(
+            height: 30,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              color: c.codeBlockHeader,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(9),
+                topRight: Radius.circular(9),
+              ),
+              border: Border(
+                bottom:
+                    BorderSide(color: c.border.withValues(alpha: 0.6)),
+              ),
+            ),
+            child: Row(
+              children: [
+                Text(
+                  widget.label.toUpperCase(),
+                  style: GoogleFonts.inter(
+                    fontSize: 10,
+                    color: c.textMuted,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.3,
+                  ),
+                ),
+                const Spacer(),
+                MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: _copy,
+                    behavior: HitTestBehavior.opaque,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _copied
+                              ? Icons.check_rounded
+                              : Icons.copy_rounded,
+                          size: 12,
+                          color: _copied ? c.green : c.textMuted,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          _copied ? 'chat.copied_short'.tr() : 'chat.copy_short'.tr(),
+                          style: GoogleFonts.inter(
+                            fontSize: 11,
+                            color: _copied ? c.green : c.textMuted,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220),
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  preview,
+                  style: GoogleFonts.jetBrainsMono(
+                    fontSize: 13,
+                    color: c.textBright,
+                    height: 1.55,
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -2219,7 +6300,7 @@ class _ABtnState extends State<_ABtn> {
                 const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
             decoration: BoxDecoration(
               color: _h
-                  ? widget.bg.withValues(alpha: 1.6)
+                  ? widget.bg.withValues(alpha: 0.25)
                   : widget.bg,
               borderRadius: BorderRadius.circular(6),
               border: Border.all(color: widget.border),
@@ -2234,6 +6315,81 @@ class _ABtnState extends State<_ABtn> {
       );
 }
 
+// ─── Choice pill for ask_user choices mode ──────────────────────────────────
+
+class _ChoicePill extends StatefulWidget {
+  final String label;
+  final bool selected;
+  final bool showCheckbox;
+  final AppColors colors;
+  final VoidCallback onTap;
+  const _ChoicePill({
+    required this.label,
+    required this.selected,
+    required this.showCheckbox,
+    required this.colors,
+    required this.onTap,
+  });
+  @override
+  State<_ChoicePill> createState() => _ChoicePillState();
+}
+
+class _ChoicePillState extends State<_ChoicePill> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ac = widget.colors;
+    final isOn = widget.selected;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: isOn
+                ? ac.blue.withValues(alpha: 0.15)
+                : _hover
+                    ? ac.textDim.withValues(alpha: 0.08)
+                    : ac.bg,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isOn
+                  ? ac.blue.withValues(alpha: 0.4)
+                  : ac.border,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.showCheckbox) ...[
+                Icon(
+                  isOn ? Icons.check_box : Icons.check_box_outline_blank,
+                  size: 14,
+                  color: isOn ? ac.blue : ac.textMuted,
+                ),
+                const SizedBox(width: 5),
+              ],
+              Text(
+                widget.label,
+                style: GoogleFonts.inter(
+                  fontSize: 12,
+                  fontWeight: isOn ? FontWeight.w600 : FontWeight.w400,
+                  color: isOn ? ac.blue : ac.text,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ─── Chat Input — main input bar ──────────────────────────────────────────────
 // Layout (identical to old web client):
 //   ┌─────────────────────────────────────────────────────────┐
@@ -2242,42 +6398,132 @@ class _ABtnState extends State<_ABtn> {
 //   │ [+] [⎘]  [context ring]           [■ Stop] / [↑ Send]  │
 //   └─────────────────────────────────────────────────────────┘
 
-class _ChatInput extends StatelessWidget {
+class _ChatInput extends StatefulWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool isActive;
   final bool disabled;
-  final int inTokens;
-  final int contextMax;
+  final int queuedCount;
   final VoidCallback onSend;
   final VoidCallback onAbort;
+  final VoidCallback? onContextTap;
+  final VoidCallback? onToolsTap;
+  final VoidCallback? onTasksTap;
+  final VoidCallback? onSnippetsTap;
+  final void Function(String name, String path, bool isImage)? onAttach;
+  /// Fired when the user pastes (Ctrl/Cmd+V) with an image on the
+  /// clipboard. The PasteTextIntent handler writes the bytes to a
+  /// tmp PNG and hands off the same (name, path, true) tuple as
+  /// `onAttach` — the composer doesn't need to differentiate the
+  /// source of the attachment.
+  final void Function(String name, String path, bool isImage)? onImagePaste;
 
   const _ChatInput({
     required this.controller,
     required this.focusNode,
     required this.isActive,
     required this.disabled,
-    required this.inTokens,
-    required this.contextMax,
     required this.onSend,
     required this.onAbort,
+    this.queuedCount = 0,
+    this.onContextTap,
+    this.onAttach,
+    this.onToolsTap,
+    this.onTasksTap,
+    this.onSnippetsTap,
+    this.onImagePaste,
   });
+
+  @override
+  State<_ChatInput> createState() => _ChatInputState();
+}
+
+class _ChatInputState extends State<_ChatInput> {
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild when the text changes so the send button can flip
+    // between enabled/disabled and between `Send` / `Abort` icons.
+    widget.controller.addListener(_onTextChanged);
+    widget.focusNode.addListener(_onFocusChanged);
+  }
+
+  @override
+  void didUpdateWidget(_ChatInput old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      old.controller.removeListener(_onTextChanged);
+      widget.controller.addListener(_onTextChanged);
+    }
+    if (old.focusNode != widget.focusNode) {
+      old.focusNode.removeListener(_onFocusChanged);
+      widget.focusNode.addListener(_onFocusChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTextChanged);
+    widget.focusNode.removeListener(_onFocusChanged);
+    super.dispose();
+  }
+
+  void _onTextChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onFocusChanged() {
+    if (mounted) setState(() {});
+  }
+
+  // Expose the widget's fields under the same names the existing
+  // build method used so the 400-line body below doesn't need
+  // wholesale rewrites.
+  TextEditingController get controller => widget.controller;
+  FocusNode get focusNode => widget.focusNode;
+  bool get isActive => widget.isActive;
+  bool get disabled => widget.disabled;
+  int get queuedCount => widget.queuedCount;
+  VoidCallback get onSend => widget.onSend;
+  VoidCallback get onAbort => widget.onAbort;
+  VoidCallback? get onContextTap => widget.onContextTap;
+  VoidCallback? get onToolsTap => widget.onToolsTap;
+  VoidCallback? get onTasksTap => widget.onTasksTap;
+  VoidCallback? get onSnippetsTap => widget.onSnippetsTap;
+  void Function(String, String, bool)? get onAttach => widget.onAttach;
+  void Function(String, String, bool)? get onImagePaste =>
+      widget.onImagePaste;
+
+  /// True when the composer has content we could send or queue.
+  bool get hasText => controller.text.trim().isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
       child: Builder(builder: (context) {
       final c = context.colors;
-      return Container(
+      final manifest = context.watch<AppState>().manifest;
+      final accent = manifest.accent ?? c.accentPrimary;
+      final focused = focusNode.hasFocus;
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOutCubic,
         decoration: BoxDecoration(
           color: c.inputBg,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: c.inputBorder),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: focused
+                ? accent.withValues(alpha: 0.3)
+                : c.inputBorder,
+          ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.1),
-              blurRadius: 16,
+              color: focused
+                  ? accent.withValues(alpha: 0.08)
+                  : c.shadow.withValues(alpha: 0.35),
+              blurRadius: focused ? 14 : 16,
+              spreadRadius: -4,
               offset: const Offset(0, 4),
             ),
           ],
@@ -2295,7 +6541,67 @@ class _ChatInput extends StatelessWidget {
                   actions: {
                     _SendIntent: CallbackAction<_SendIntent>(
                       onInvoke: (_) {
-                        if (!isActive && !disabled) onSend();
+                        // `onSend` handles queueing when a turn is
+                        // running (see ChatPanel._send). Only block
+                        // the hard `disabled` state — e.g. missing
+                        // workspace — not the "busy" state.
+                        if (!disabled) onSend();
+                        return null;
+                      },
+                    ),
+                    PasteTextIntent: CallbackAction<PasteTextIntent>(
+                      onInvoke: (intent) {
+                        // Paste priority:
+                        //   1. Image on clipboard → attach as file
+                        //      (covers Win+Shift+S / Cmd+Shift+4 → V).
+                        //   2. Text → smart-paste (JSON / code wrapper).
+                        () async {
+                          final imagePath = await attach_helpers
+                              .clipboardImageToTempFile();
+                          if (imagePath != null) {
+                            final name =
+                                imagePath.split(RegExp(r'[\\/]')).last;
+                            widget.onImagePaste?.call(name, imagePath, true);
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('chat.image_pasted_clipboard'.tr()),
+                                  duration: const Duration(seconds: 2),
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            }
+                            return;
+                          }
+                          final data = await Clipboard.getData('text/plain');
+                          final raw = data?.text;
+                          if (raw == null || raw.isEmpty) return;
+                          final result = transformPaste(raw);
+                          final selection = controller.selection;
+                          final start =
+                              selection.start.clamp(0, controller.text.length);
+                          final end =
+                              selection.end.clamp(0, controller.text.length);
+                          controller.value = controller.value.copyWith(
+                            text: controller.text.replaceRange(
+                                start, end, result.text),
+                            selection: TextSelection.collapsed(
+                                offset: start + result.text.length),
+                          );
+                          if (result.hint != null && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('chat.smart_paste'
+                                    .tr(namedArgs: {
+                                  'hint': result.hint ?? ''
+                                })),
+                                backgroundColor:
+                                    accent.withValues(alpha: 0.9),
+                                duration: const Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        }();
                         return null;
                       },
                     ),
@@ -2308,13 +6614,15 @@ class _ChatInput extends StatelessWidget {
                     maxLines: 8,
                     maxLength: 32000,
                     keyboardType: TextInputType.multiline,
-                    // Shift+Enter inserts newline naturally via multiline
+                    cursorColor: accent,
+                    cursorWidth: 1.4,
+                    cursorRadius: const Radius.circular(1),
                     style: GoogleFonts.inter(
                         fontSize: 14, color: c.text, height: 1.55),
                     decoration: InputDecoration(
                       hintText: disabled
-                          ? 'Select a workspace first'
-                          : 'Message… (Enter to send, Shift+Enter for new line)',
+                          ? 'chat.placeholder_no_workspace'.tr()
+                          : 'chat.placeholder'.tr(),
                       hintStyle: GoogleFonts.inter(
                           fontSize: 14,
                           color: c.textMuted),
@@ -2335,94 +6643,104 @@ class _ChatInput extends StatelessWidget {
             ),
 
             // ── Bottom bar ────────────────────────────────────────────────
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Row(
-                children: [
-                  // New session button
-                  _IconBtn(
-                    icon: Icons.add,
-                    tooltip: 'New session',
-                    disabled: disabled,
-                    onTap: () {
-                      final app = context.read<AppState>().activeApp;
-                      if (app != null) {
-                        SessionService().createAndSetSession(app.appId);
-                      }
-                    },
-                  ),
-                  const SizedBox(width: 4),
-                  // Paste
-                  _IconBtn(
-                    icon: Icons.content_paste_outlined,
-                    tooltip: 'Paste clipboard',
-                    disabled: disabled,
-                    onTap: () async {
-                      final data = await Clipboard.getData(Clipboard.kTextPlain);
-                      if (data?.text != null) {
-                        controller.text =
-                            controller.text + data!.text!;
-                        controller.selection =
-                            TextSelection.collapsed(
-                                offset: controller.text.length);
-                      }
-                    },
-                  ),
-                  const SizedBox(width: 4),
-                  // Sessions (history)
-                  _IconBtn(
-                    icon: Icons.history_rounded,
-                    tooltip: 'Sessions',
-                    disabled: disabled,
-                    onTap: () {
-                      final state = context.read<AppState>();
-                      state.setPanel(
-                        state.panel == ActivePanel.sessions
-                            ? ActivePanel.chat
-                            : ActivePanel.sessions,
-                      );
-                    },
-                  ),
-                  const SizedBox(width: 4),
-                  // Tools browser (modal)
-                  _IconBtn(
-                    icon: Icons.build_outlined,
-                    tooltip: 'Tools',
-                    disabled: disabled,
-                    onTap: () {
-                      final app = context.read<AppState>().activeApp;
-                      if (app != null) {
-                        ToolsModal.show(context, app.appId);
-                      }
-                    },
-                  ),
-
-                  const SizedBox(width: 4),
-                  // Background tasks (modal)
-                  _IconBtn(
-                    icon: Icons.sync_rounded,
-                    tooltip: 'Background tasks',
-                    disabled: disabled,
-                    onTap: () => TasksModal.show(context),
-                  ),
-
-                  // Context pressure ring
-                  if (inTokens > 0) ...[
-                    const SizedBox(width: 8),
-                    _ContextRing(current: inTokens, max: contextMax),
+            // Every control here is conditional on the manifest's
+            // feature flags. Apps that don't need tools / mic /
+            // attachments hide them — the bar shrinks to just the
+            // send button.
+            Builder(builder: (ctx) {
+              final features = ctx.watch<AppState>().manifest.features;
+              // We still watch ContextState so the ring repaints when
+              // data lands, but we no longer GATE the ring on it —
+              // rendering it at 0% from turn zero keeps the
+              // affordance clickable and lets the user inspect the
+              // (already populated on session-create) context
+              // straight away. Panel itself handles the "no data
+              // yet" edge case gracefully.
+              ctx.watch<ContextState>();
+              return Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Row(
+                  children: [
+                    if (features.attachments) ...[
+                      AttachMenuButton(
+                        disabled: disabled,
+                        controller: controller,
+                        focusNode: focusNode,
+                        onAttach: onAttach,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    // Browse-only affordances — always clickable, even
+                    // before the session has a workspace / first send.
+                    // The `disabled` flag here governs SENDING, not
+                    // opening read-only panels.
+                    if (features.toolsPanel && onToolsTap != null) ...[
+                      _IconBtn(
+                        icon: Icons.build_outlined,
+                        tooltip: 'chat.tools_short'.tr(),
+                        disabled: false,
+                        onTap: onToolsTap!,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    if (features.snippets && onSnippetsTap != null) ...[
+                      _IconBtn(
+                        icon: Icons.bookmark_border_rounded,
+                        tooltip: 'chat.snippets_short'.tr(),
+                        disabled: false,
+                        onTap: onSnippetsTap!,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    if (features.tasksPanel && onTasksTap != null)
+                      _TasksButton(
+                        disabled: false,
+                        onTap: onTasksTap!,
+                      ),
+                    if (features.contextRing) ...[
+                      const SizedBox(width: 8),
+                      _ContextRing(onTap: onContextTap),
+                    ],
+                    const Spacer(),
+                    if (features.voice) ...[
+                      _MicButton(
+                        disabled: disabled,
+                        onTranscript: (text) {
+                          controller.value = controller.value.copyWith(
+                            text: text,
+                            selection: TextSelection.collapsed(
+                                offset: text.length),
+                          );
+                        },
+                        onAudioRecorded: (path) {
+                          onAttach?.call(
+                              path.split(RegExp(r'[\\/]')).last, path, false);
+                        },
+                        onError: (err) {
+                          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                            SnackBar(
+                              content: Text(err),
+                              duration: const Duration(seconds: 3),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    _SendButton(
+                      disabled: disabled,
+                      isActive: isActive,
+                      hasText: hasText,
+                      isOneshot: ctx.watch<AppState>().manifest.isOneshot,
+                      queuedCount: queuedCount,
+                      onTap: onSend,
+                    ),
                   ],
-
-                  const Spacer(),
-
-                  // Stop or Send
-                  if (isActive)
-                    _StopButton(onTap: onAbort)
-                  else
-                    _SendButton(disabled: disabled, onTap: onSend),
-                ],
-              ),
-            ),
+                ),
+              );
+            }),
           ],
         ),
       );
@@ -2451,82 +6769,333 @@ class _IconBtn extends StatefulWidget {
 class _IconBtnState extends State<_IconBtn> {
   bool _h = false;
   @override
-  Widget build(BuildContext context) => Tooltip(
-        message: widget.tooltip,
-        child: MouseRegion(
-          onEnter: (_) => setState(() => _h = true),
-          onExit: (_) => setState(() => _h = false),
-          cursor: widget.disabled
-              ? SystemMouseCursors.forbidden
-              : SystemMouseCursors.click,
-          child: GestureDetector(
-            onTap: widget.disabled ? null : widget.onTap,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 100),
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Tooltip(
+      message: widget.tooltip,
+      waitDuration: const Duration(milliseconds: 400),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _h = true),
+        onExit: (_) => setState(() => _h = false),
+        cursor: widget.disabled
+            ? SystemMouseCursors.forbidden
+            : SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.disabled ? null : widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOutCubic,
+            width: 34,
+            height: 34,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _h && !widget.disabled
+                  ? c.surfaceAlt
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
                 color: _h && !widget.disabled
-                    ? context.colors.surfaceAlt
+                    ? c.borderHover
                     : Colors.transparent,
-                borderRadius: BorderRadius.circular(7),
               ),
-              child: Icon(
-                widget.icon,
-                size: 15,
-                color: widget.disabled
-                    ? context.colors.borderHover
-                    : (_h
-                        ? context.colors.textMuted
-                        : context.colors.textMuted),
-              ),
+            ),
+            child: Icon(
+              widget.icon,
+              size: 18,
+              color: widget.disabled
+                  ? c.borderHover
+                  : (_h ? c.textBright : c.text),
             ),
           ),
         ),
-      );
+      ),
+    );
+  }
+}
+
+/// Background-tasks button — same shape as [_IconBtn] plus a live
+/// coral badge rendered on top-right when at least one background
+/// task is running. The badge pulses gently so it catches the eye
+/// when a task kicks off without being loud about it.
+class _TasksButton extends StatefulWidget {
+  final bool disabled;
+  final VoidCallback onTap;
+  const _TasksButton({required this.disabled, required this.onTap});
+
+  @override
+  State<_TasksButton> createState() => _TasksButtonState();
+}
+
+class _TasksButtonState extends State<_TasksButton>
+    with SingleTickerProviderStateMixin {
+  bool _h = false;
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final bg = context.watch<BackgroundService>();
+    final running = bg.activeCount;
+    final hasBadge = running > 0;
+    return Tooltip(
+      message: hasBadge
+          ? 'chat.background_tasks_running'.tr(namedArgs: {'n': '$running'})
+          : 'chat.background_tasks'.tr(),
+      waitDuration: const Duration(milliseconds: 400),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _h = true),
+        onExit: (_) => setState(() => _h = false),
+        cursor: widget.disabled
+            ? SystemMouseCursors.forbidden
+            : SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.disabled ? null : widget.onTap,
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  curve: Curves.easeOutCubic,
+                  width: 34,
+                  height: 34,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: hasBadge
+                        ? c.accentPrimary.withValues(alpha: _h ? 0.14 : 0.08)
+                        : (_h && !widget.disabled
+                            ? c.surfaceAlt
+                            : Colors.transparent),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: hasBadge
+                          ? c.accentPrimary.withValues(alpha: 0.35)
+                          : (_h && !widget.disabled
+                              ? c.borderHover
+                              : Colors.transparent),
+                    ),
+                  ),
+                  child: Icon(
+                    Icons.sync_rounded,
+                    size: 18,
+                    color: widget.disabled
+                        ? c.borderHover
+                        : hasBadge
+                            ? c.accentPrimary
+                            : (_h ? c.textBright : c.text),
+                  ),
+                ),
+                if (hasBadge)
+                  Positioned(
+                    top: -4,
+                    right: -4,
+                    child: AnimatedBuilder(
+                      animation: _pulse,
+                      builder: (_, child) {
+                        final glow = 0.5 + (0.4 * _pulse.value);
+                        return Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: c.accentPrimary
+                                    .withValues(alpha: glow * 0.55),
+                                blurRadius: 8,
+                                spreadRadius: 0,
+                              ),
+                            ],
+                          ),
+                          child: child,
+                        );
+                      },
+                      child: Container(
+                        constraints: const BoxConstraints(minWidth: 16),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: c.accentPrimary,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(color: c.bg, width: 1.4),
+                        ),
+                        child: Text(
+                          running > 99 ? '99+' : '$running',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.firaCode(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800,
+                            color: c.onAccent,
+                            height: 1.1,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ─── Context pressure ring ────────────────────────────────────────────────────
 // SVG-style ring (like the old web client) — filled proportionally
 
-class _ContextRing extends StatelessWidget {
-  final int current;
-  final int max;
-  const _ContextRing({required this.current, required this.max});
+class _ContextRing extends StatefulWidget {
+  final VoidCallback? onTap;
+  const _ContextRing({this.onTap});
+
+  @override
+  State<_ContextRing> createState() => _ContextRingState();
+}
+
+class _ContextRingState extends State<_ContextRing>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse;
+  double _shownRatio = 0;
+  Color? _shownColor;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final ratio = max > 0 ? (current / max).clamp(0.0, 1.5) : 0.0;
-    final pct = (ratio * 100).round();
-
+    final cs = context.watch<ContextState>();
     final cc = context.colors;
-    final color = ratio < 0.6
+    // `displayPressure` normalises raw pressure by the YAML-defined
+    // compaction threshold — 1.0 means "about to compact", which is
+    // the actionable frontier for the user. Clamp at 1.2 so an
+    // overdue state (pressure > threshold, daemon hasn't compacted
+    // yet) still renders but doesn't blow the ring out.
+    final ratio = cs.displayPressure.clamp(0.0, 1.2);
+    final pct = (ratio * 100).round();
+    final color = ratio < 0.67
         ? cc.green
         : ratio < 0.85
             ? cc.orange
             : cc.red;
-
-    return GestureDetector(
-      onTap: () => ContextModal.show(context),
-      child: Tooltip(
-      message: 'Context: $pct% used — click for details',
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CustomPaint(
-            size: const Size(18, 18),
-            painter: _RingPainter(ratio: ratio.clamp(0.0, 1.0), color: color, trackColor: cc.borderHover),
+    final alert = ratio >= 0.90;
+    _shownColor ??= color;
+    final thrPct = (cs.threshold * 100).round();
+    // Tween-animated ratio & color so a jump from 40% → 75% glides
+    // smoothly instead of snapping (Material spec for status meters).
+    return MouseRegion(
+      cursor: widget.onTap == null
+          ? SystemMouseCursors.basic
+          : SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Tooltip(
+          message:
+              'Context: $pct% of compaction threshold ($thrPct%)\n'
+              '${cs.totalEstimatedTokens}/${cs.effectiveMax} tokens — click for details',
+          waitDuration: const Duration(milliseconds: 400),
+          child: AnimatedBuilder(
+            animation: _pulse,
+            builder: (_, _) {
+              final pulse =
+                  alert ? 0.55 + (0.35 * _pulse.value) : 0.0;
+              return Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 6, vertical: 4),
+                constraints: const BoxConstraints(minHeight: 28),
+                decoration: alert
+                    ? BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        boxShadow: [
+                          BoxShadow(
+                            color: color.withValues(alpha: pulse * 0.5),
+                            blurRadius: 14,
+                            spreadRadius: 0,
+                          ),
+                        ],
+                      )
+                    : null,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TweenAnimationBuilder<double>(
+                      tween: Tween<double>(
+                        begin: _shownRatio,
+                        end: ratio.clamp(0.0, 1.0),
+                      ),
+                      duration: const Duration(milliseconds: 320),
+                      curve: Curves.easeOutCubic,
+                      onEnd: () => _shownRatio = ratio.clamp(0.0, 1.0),
+                      builder: (_, animRatio, _) {
+                        return TweenAnimationBuilder<Color?>(
+                          tween: ColorTween(
+                            begin: _shownColor,
+                            end: color,
+                          ),
+                          duration: const Duration(milliseconds: 320),
+                          curve: Curves.easeOut,
+                          onEnd: () => _shownColor = color,
+                          builder: (_, animColor, _) {
+                            return CustomPaint(
+                              size: const Size(20, 20),
+                              painter: _RingPainter(
+                                ratio: animRatio,
+                                color: animColor ?? color,
+                                trackColor: cc.borderHover,
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                    if (ratio >= 0.5) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '$pct%',
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 11.5,
+                          color: color,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              );
+            },
           ),
-          if (ratio >= 0.6) ...[
-            const SizedBox(width: 4),
-            Text(
-              '$pct%',
-              style: GoogleFonts.firaCode(fontSize: 10, color: color),
-            ),
-          ],
-        ],
+        ),
       ),
-    ),
     );
   }
 }
@@ -2577,121 +7146,442 @@ class _RingPainter extends CustomPainter {
 
 // ─── Send button ──────────────────────────────────────────────────────────────
 
+class _MicButton extends StatefulWidget {
+  final bool disabled;
+  /// Called with the transcribed text (live-STT path) whenever the
+  /// voice service emits — partial results included so the input
+  /// updates as the user speaks.
+  final void Function(String transcript)? onTranscript;
+  /// Called with the path to a locally recorded audio file on
+  /// platforms where live STT isn't available. Consumer attaches
+  /// the file to the next message.
+  final void Function(String audioPath)? onAudioRecorded;
+  /// User-facing error (permission denied, engine unavailable).
+  final void Function(String error)? onError;
+  const _MicButton({
+    required this.disabled,
+    this.onTranscript,
+    this.onAudioRecorded,
+    this.onError,
+  });
+
+  @override
+  State<_MicButton> createState() => _MicButtonState();
+}
+
+class _MicButtonState extends State<_MicButton> {
+  bool _h = false;
+  StreamSubscription<String>? _transcriptSub;
+
+  @override
+  void initState() {
+    super.initState();
+    // Subscribe once — the service is a singleton and emits the
+    // full transcript on each update.
+    _transcriptSub =
+        VoiceInputService().transcriptStream.listen((t) {
+      widget.onTranscript?.call(t);
+    });
+    // Probe for voice support in the background so the tooltip /
+    // disabled state is accurate by the time the user hovers.
+    VoiceInputService().ensureInitialised();
+  }
+
+  @override
+  void dispose() {
+    _transcriptSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _toggle() async {
+    final svc = VoiceInputService();
+    await svc.ensureInitialised();
+    if (svc.mode == VoiceMode.unavailable) {
+      widget.onError?.call(
+          'Voice input is not available on this platform yet.');
+      return;
+    }
+    if (svc.state == VoiceState.listening) {
+      final result = await svc.stop();
+      // Live STT / server transcribe both return the text directly.
+      // For server mode, a null result with a non-null audio path
+      // means the daemon refused — fall back to attaching the file.
+      if (result != null && result.isNotEmpty) {
+        widget.onTranscript?.call(result);
+        return;
+      }
+      final audio = svc.lastAudioPath;
+      if (audio != null && audio.isNotEmpty) {
+        widget.onAudioRecorded?.call(audio);
+      }
+    } else {
+      await svc.start();
+      final err = svc.lastError;
+      if (err != null) widget.onError?.call(err);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return ListenableBuilder(
+      listenable: VoiceInputService(),
+      builder: (_, _) {
+        final svc = VoiceInputService();
+        final isRec = svc.state == VoiceState.listening;
+        final isProcessing = svc.state == VoiceState.processing;
+        final unavailable = svc.mode == VoiceMode.unavailable;
+        final tooltip = isProcessing
+            ? (svc.mode == VoiceMode.serverTranscribe
+                ? 'chat.voice_transcribing'.tr()
+                : 'chat.voice_processing'.tr())
+            : isRec
+                ? (svc.mode == VoiceMode.liveTranscribe
+                    ? 'chat.voice_stop_dictation'.tr()
+                    : 'chat.voice_stop_recording'.tr())
+                : unavailable
+                    ? 'chat.voice_unsupported'.tr()
+                    : (svc.mode == VoiceMode.liveTranscribe
+                        ? 'chat.voice_dictate'.tr()
+                        : svc.mode == VoiceMode.serverTranscribe
+                            ? 'chat.voice_dictate_server'.tr()
+                            : 'chat.voice_record_audio'.tr());
+        return Tooltip(
+          message: tooltip,
+          child: MouseRegion(
+            onEnter: (_) {
+              if (!_h && mounted) setState(() => _h = true);
+            },
+            onExit: (_) {
+              if (_h && mounted) setState(() => _h = false);
+            },
+            cursor: (widget.disabled || unavailable)
+                ? SystemMouseCursors.forbidden
+                : SystemMouseCursors.click,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: (widget.disabled || unavailable || isProcessing)
+                  ? null
+                  : _toggle,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
+                width: 34,
+                height: 34,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: isRec
+                      ? c.red.withValues(alpha: 0.18)
+                      : isProcessing
+                          ? c.blue.withValues(alpha: 0.12)
+                          : _h
+                              ? c.surfaceAlt
+                              : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: isRec
+                        ? c.red.withValues(alpha: 0.5)
+                        : isProcessing
+                            ? c.blue.withValues(alpha: 0.4)
+                            : _h
+                                ? c.borderHover
+                                : Colors.transparent,
+                  ),
+                ),
+                child: isProcessing
+                    ? Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: CircularProgressIndicator(
+                            strokeWidth: 1.8, color: c.blue),
+                      )
+                    : Icon(
+                        isRec
+                            ? Icons.stop_rounded
+                            : Icons.mic_none_rounded,
+                        size: 18,
+                        color: (widget.disabled || unavailable)
+                            ? c.textDim
+                            : isRec
+                                ? c.red
+                                : (_h ? c.textBright : c.text),
+                      ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Single send / abort / queue button. The entire composer UX uses
+/// one affordance: you click it, something happens — the *what* is
+/// decided by the current state.
+///
+///   * Idle + composer has text → send (↑).
+///   * Idle + composer empty    → disabled.
+///   * Turn running + text      → queue the text (still shows ↑,
+///                                 the queue panel above the composer
+///                                 announces the addition).
+///   * Turn running + empty     → abort the current turn (✕).
+///
+/// During a running turn a rotating ring wraps the button so the
+/// user sees activity without a second stop button. The ring is the
+/// same colour family as the pulse pill in the header — visual echo.
 class _SendButton extends StatefulWidget {
   final bool disabled;
+  /// True iff the current app is in `oneshot` mode — label + icon
+  /// switch to a ▶ Play.
+  final bool isOneshot;
+  /// True while a turn is running. Drives the animated ring and
+  /// flips the icon to ✕ when the composer is empty.
+  final bool isActive;
+  /// Current composer text (trimmed). Used only to pick the right
+  /// icon / cursor — the actual send logic lives in the caller.
+  final bool hasText;
+  /// Number of messages waiting after the running turn. Rendered as
+  /// a badge so the user sees the queue depth.
+  final int queuedCount;
   final VoidCallback onTap;
-  const _SendButton({required this.disabled, required this.onTap});
+  const _SendButton({
+    required this.disabled,
+    required this.onTap,
+    required this.isActive,
+    required this.hasText,
+    this.isOneshot = false,
+    this.queuedCount = 0,
+  });
 
   @override
   State<_SendButton> createState() => _SendButtonState();
 }
 
-class _SendButtonState extends State<_SendButton> {
+class _SendButtonState extends State<_SendButton>
+    with SingleTickerProviderStateMixin {
   bool _h = false;
-  @override
-  Widget build(BuildContext context) => MouseRegion(
-        onEnter: (_) => setState(() => _h = true),
-        onExit: (_) => setState(() => _h = false),
-        child: GestureDetector(
-          onTap: widget.disabled ? null : widget.onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 100),
-            width: 28,
-            height: 28,
-            decoration: BoxDecoration(
-              color: widget.disabled
-                  ? context.colors.surfaceAlt
-                  : _h
-                      ? context.colors.textMuted
-                      : context.colors.borderHover,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              Icons.arrow_upward_rounded,
-              size: 14,
-              color: widget.disabled
-                  ? context.colors.borderHover
-                  : context.colors.textBright,
-            ),
-          ),
-        ),
-      );
-}
-
-// ─── Stop button ──────────────────────────────────────────────────────────────
-
-class _StopButton extends StatefulWidget {
-  final VoidCallback onTap;
-  const _StopButton({required this.onTap});
+  late final AnimationController _ring;
 
   @override
-  State<_StopButton> createState() => _StopButtonState();
-}
+  void initState() {
+    super.initState();
+    _ring = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    );
+    if (widget.isActive) _ring.repeat();
+  }
 
-class _StopButtonState extends State<_StopButton> {
-  bool _h = false;
   @override
-  Widget build(BuildContext context) => MouseRegion(
-        onEnter: (_) => setState(() => _h = true),
-        onExit: (_) => setState(() => _h = false),
-        child: GestureDetector(
-          onTap: widget.onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 100),
-            width: 28,
-            height: 28,
-            decoration: BoxDecoration(
-              color: _h
-                  ? context.colors.red.withValues(alpha: 0.2)
-                  : context.colors.red.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-              border: Border.all(color: context.colors.red.withValues(alpha: 0.3)),
-            ),
-            child: Icon(
-              Icons.stop_rounded,
-              size: 13,
-              color: context.colors.red,
-            ),
-          ),
-        ),
-      );
-}
+  void didUpdateWidget(_SendButton old) {
+    super.didUpdateWidget(old);
+    if (widget.isActive && !_ring.isAnimating) {
+      _ring.repeat();
+    } else if (!widget.isActive && _ring.isAnimating) {
+      _ring.stop();
+      _ring.value = 0;
+    }
+  }
 
-// ─── Connection status dot ───────────────────────────────────────────────────
+  @override
+  void dispose() {
+    _ring.dispose();
+    super.dispose();
+  }
 
-class _ConnectionDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    final sseConnected = context.watch<SessionService>().activeSession != null;
-    // Simple heuristic: if we have an active session, SSE should be connected
-    final color = sseConnected
-        ? context.colors.green
-        : context.colors.textMuted;
-    final label = sseConnected ? 'Connected' : 'Disconnected';
+    final c = context.colors;
+    // Effective disabled state — idle + empty composer = nothing to
+    // do. The `disabled` prop (workspace-required, etc.) still wins
+    // unconditionally.
+    final inertIdle = !widget.isActive && !widget.hasText;
+    final effectivelyDisabled = widget.disabled || inertIdle;
+
+    // Icon selection:
+    //   turn running + empty  → ✕ (abort)
+    //   turn running + text   → ↑ (queue)
+    //   idle + text           → ↑ (send) — or ▶ for oneshot
+    //   idle + empty          → ↑ (disabled)
+    final showAbort = widget.isActive && !widget.hasText;
+    final IconData icon;
+    if (showAbort) {
+      icon = Icons.close_rounded;
+    } else if (widget.isOneshot && !widget.isActive) {
+      icon = Icons.play_arrow_rounded;
+    } else {
+      icon = Icons.arrow_upward_rounded;
+    }
+
+    final tooltip = showAbort
+        ? (widget.queuedCount > 0
+            ? 'chat.abort_current_turn'.tr(namedArgs: {'n': '${widget.queuedCount}'})
+            : 'chat.abort'.tr())
+        : widget.isActive
+            ? 'chat.send_will_queue'.tr()
+            : widget.isOneshot
+                ? 'chat.run'.tr()
+                : 'chat.send'.tr();
+
+    // The send button always pulls from the active theme palette
+    // (Obsidian coral, Midnight cyan, OLED pink, …). We ignore any
+    // per-app manifest accent here so the button signs "your theme"
+    // rather than "this app's brand colour" — users asked for the
+    // CTA to stay consistent with whatever palette they picked.
+    final accent = c.accentPrimary;
+    final Gradient? gradient;
+    final Color bg;
+    final Color fg;
+    if (effectivelyDisabled) {
+      bg = c.surface;
+      fg = c.textDim;
+      gradient = null;
+    } else if (showAbort) {
+      bg = _h ? c.red.withValues(alpha: 0.22) : c.red.withValues(alpha: 0.14);
+      fg = c.red;
+      gradient = null;
+    } else {
+      bg = Colors.transparent;
+      fg = c.onAccent;
+      gradient = LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          c.accentPrimary,
+          Color.lerp(c.accentPrimary, c.accentSecondary, 0.55) ??
+              c.accentPrimary,
+        ],
+      );
+    }
 
     return Tooltip(
-      message: label,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6, height: 6,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: color,
-              boxShadow: sseConnected
-                  ? [BoxShadow(color: color.withValues(alpha: 0.4), blurRadius: 4)]
-                  : [],
+      message: tooltip,
+      child: MouseRegion(
+        onEnter: (_) {
+          if (!_h && mounted) setState(() => _h = true);
+        },
+        onExit: (_) {
+          if (_h && mounted) setState(() => _h = false);
+        },
+        cursor: effectivelyDisabled
+            ? SystemMouseCursors.forbidden
+            : SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: effectivelyDisabled ? null : widget.onTap,
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.center,
+              children: [
+                // Rotating ring while a turn is running. Drawn
+                // slightly larger than the button so it reads as a
+                // halo rather than a border colour.
+                if (widget.isActive)
+                  AnimatedBuilder(
+                    animation: _ring,
+                    builder: (_, _) => Transform.rotate(
+                      angle: _ring.value * 6.283185,
+                      child: CustomPaint(
+                        size: const Size(34, 34),
+                        painter: _ActiveRingPainter(
+                          color: showAbort ? c.red : accent,
+                        ),
+                      ),
+                    ),
+                  ),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  curve: Curves.easeOutCubic,
+                  width: 32,
+                  height: 32,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: bg,
+                    gradient: gradient,
+                    shape: BoxShape.circle,
+                    border: effectivelyDisabled
+                        ? Border.all(color: c.border)
+                        : null,
+                    boxShadow: gradient != null
+                        ? [
+                            BoxShadow(
+                              color: accent
+                                  .withValues(alpha: _h ? 0.6 : 0.35),
+                              blurRadius: _h ? 20 : 12,
+                              spreadRadius: -2,
+                              offset: const Offset(0, 4),
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Icon(icon, size: 18, color: fg),
+                ),
+                if (widget.queuedCount > 0)
+                  Positioned(
+                    top: -4,
+                    right: -4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 5, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: accent,
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: c.bg, width: 1.6),
+                      ),
+                      constraints: const BoxConstraints(minWidth: 18),
+                      child: Text(
+                        '${widget.queuedCount}',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          color: c.onAccent,
+                          height: 1.1,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
-          const SizedBox(width: 5),
-          Text(label,
-            style: GoogleFonts.inter(fontSize: 10, color: context.colors.textMuted),
-          ),
-        ],
+        ),
       ),
     );
   }
+}
+
+/// Painter for the rotating activity ring around the send button.
+/// Draws a 270° arc with a fading tail so it reads as motion.
+class _ActiveRingPainter extends CustomPainter {
+  final Color color;
+  _ActiveRingPainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Rect.fromCircle(
+      center: Offset(size.width / 2, size.height / 2),
+      radius: size.width / 2 - 1.5,
+    );
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..shader = SweepGradient(
+        colors: [
+          color.withValues(alpha: 0),
+          color.withValues(alpha: 0.2),
+          color.withValues(alpha: 0.6),
+          color,
+        ],
+        stops: const [0, 0.4, 0.8, 1],
+      ).createShader(rect);
+    canvas.drawArc(rect, -1.57, 4.7, false, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ActiveRingPainter old) =>
+      old.color != color;
 }
 
 // ─── Inline Todo Bar (compact, above input) ──────────────────────────────────
@@ -2855,133 +7745,6 @@ class _InlineAgents extends StatelessWidget {
   }
 }
 
-// ─── Workspace picker (desktop native picker, web text dialog) ───────────────
-
-Future<String?> pickWorkspace(BuildContext context) async {
-  if (!kIsWeb) {
-    return getDirectoryPath(confirmButtonText: 'Select Workspace');
-  }
-  // Web: show dialog with text field + recent workspaces
-  final prefs = await SharedPreferences.getInstance();
-  final recents = prefs.getStringList('recent_workspaces') ?? [];
-  final controller = TextEditingController();
-
-  return showDialog<String>(
-    context: context,
-    builder: (ctx) {
-      final c = ctx.colors;
-      return Dialog(
-        backgroundColor: c.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: BorderSide(color: c.border),
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 440),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Workspace Path',
-                  style: GoogleFonts.inter(
-                    fontSize: 15, fontWeight: FontWeight.w600, color: c.textBright)),
-                const SizedBox(height: 4),
-                Text('Enter the absolute path on the daemon server',
-                  style: GoogleFonts.inter(fontSize: 12, color: c.textMuted)),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: controller,
-                  autofocus: true,
-                  style: GoogleFonts.firaCode(fontSize: 13, color: c.text),
-                  decoration: InputDecoration(
-                    hintText: '/home/user/project or C:\\Users\\...',
-                    hintStyle: GoogleFonts.firaCode(fontSize: 13, color: c.textDim),
-                    filled: true,
-                    fillColor: c.bg,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: c.border),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: c.border),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: c.blue),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  ),
-                  onSubmitted: (v) {
-                    if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
-                  },
-                ),
-                if (recents.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text('Recent',
-                    style: GoogleFonts.inter(fontSize: 11, color: c.textMuted)),
-                  const SizedBox(height: 6),
-                  for (final r in recents.take(5))
-                    GestureDetector(
-                      onTap: () => Navigator.pop(ctx, r),
-                      child: Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        margin: const EdgeInsets.only(bottom: 4),
-                        decoration: BoxDecoration(
-                          color: c.surfaceAlt,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(r,
-                          style: GoogleFonts.firaCode(fontSize: 12, color: c.text),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ),
-                ],
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: Text('Cancel', style: GoogleFonts.inter(color: c.textMuted)),
-                    ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      onPressed: () {
-                        final v = controller.text.trim();
-                        if (v.isNotEmpty) Navigator.pop(ctx, v);
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: c.blue,
-                        foregroundColor: Colors.white,
-                      ),
-                      child: const Text('Select'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    },
-  );
-}
-
-/// Save workspace to recent list
-Future<void> _saveRecentWorkspace(String path) async {
-  final prefs = await SharedPreferences.getInstance();
-  final recents = prefs.getStringList('recent_workspaces') ?? [];
-  recents.remove(path);
-  recents.insert(0, path);
-  if (recents.length > 10) recents.removeRange(10, recents.length);
-  await prefs.setStringList('recent_workspaces', recents);
-}
-
 // ─── Enter to send intent ────────────────────────────────────────────────────
 
 class _SendIntent extends Intent {
@@ -2990,16 +7753,933 @@ class _SendIntent extends Intent {
 
 // ─── Spinner icon (uses SpinKit) ─────────────────────────────────────────────
 
-class _PulsingText extends StatelessWidget {
-  final String text;
-  final Color color;
-  const _PulsingText({required this.text, required this.color});
+// ─── Error Banner ────────────────────────────────────────────────────────────
+
+class _ErrorBanner extends StatefulWidget {
+  final DaemonError error;
+  final VoidCallback onDismiss;
+  final VoidCallback? onRetry;
+  const _ErrorBanner({
+    required this.error,
+    required this.onDismiss,
+    this.onRetry,
+  });
+
+  @override
+  State<_ErrorBanner> createState() => _ErrorBannerState();
+}
+
+class _ErrorBannerState extends State<_ErrorBanner> {
+  bool _showDetail = false;
+
+  Color _catColor(AppColors c) => switch (widget.error.category) {
+    'billing'    => c.orange,
+    'auth'       => c.red,
+    'rate_limit' => c.orange,
+    'provider'   => c.red,
+    'network'    => c.textMuted,
+    'security'   => c.red,
+    _ => c.red,
+  };
+
+  IconData _catIcon() => switch (widget.error.category) {
+    'billing'    => Icons.credit_card_rounded,
+    'auth'       => Icons.key_rounded,
+    'rate_limit' => Icons.timer_rounded,
+    'provider'   => Icons.cloud_off_rounded,
+    'network'    => Icons.wifi_off_rounded,
+    'security'   => Icons.lock_rounded,
+    _ => Icons.warning_amber_rounded,
+  };
+
+  String _catTitle() => switch (widget.error.category) {
+    'billing'    => 'chat.err_billing'.tr(),
+    'auth'       => 'chat.err_auth'.tr(),
+    'rate_limit' => 'chat.err_rate_limit'.tr(),
+    'provider'   => 'chat.err_provider'.tr(),
+    'network'    => 'chat.err_network'.tr(),
+    'security'   => 'chat.err_security'.tr(),
+    _ => 'chat.err_generic'.tr(),
+  };
 
   @override
   Widget build(BuildContext context) {
-    return SpinKitPulse(
-      color: color,
-      size: 16,
+    final c = context.colors;
+    final color = _catColor(c);
+
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeInOut,
+      alignment: Alignment.bottomCenter,
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Header
+            Row(
+              children: [
+                Icon(_catIcon(), size: 16, color: color),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(_catTitle(),
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: color)),
+                ),
+                if (widget.error.code.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(widget.error.code,
+                      style: GoogleFonts.firaCode(fontSize: 9, color: color)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            // Error message
+            Text(widget.error.error,
+              style: GoogleFonts.inter(
+                fontSize: 13, color: c.text, height: 1.5)),
+            // Detail (expandable)
+            if (widget.error.detail != null && widget.error.detail!.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              GestureDetector(
+                onTap: () => setState(() => _showDetail = !_showDetail),
+                child: Text(
+                  _showDetail ? 'chat.hide_details'.tr() : 'chat.show_details'.tr(),
+                  style: GoogleFonts.inter(
+                    fontSize: 11, color: c.textMuted,
+                    decoration: TextDecoration.underline,
+                    decorationColor: c.textMuted),
+                ),
+              ),
+              if (_showDetail) ...[
+                const SizedBox(height: 4),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: c.bg,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: SelectableText(
+                    widget.error.detail!,
+                    style: GoogleFonts.firaCode(
+                      fontSize: 10.5, color: c.textMuted, height: 1.5),
+                  ),
+                ),
+              ],
+            ],
+            const SizedBox(height: 10),
+            // Action buttons
+            Row(
+              children: [
+                if (widget.onRetry != null)
+                  _ABtn(
+                    label: 'chat.retry'.tr(),
+                    bg: c.blue.withValues(alpha: 0.1),
+                    border: c.blue.withValues(alpha: 0.3),
+                    fg: c.blue,
+                    onTap: widget.onRetry!,
+                  ),
+                if (widget.onRetry != null) const SizedBox(width: 8),
+                _ABtn(
+                  label: 'chat.dismiss'.tr(),
+                  bg: c.textDim.withValues(alpha: 0.1),
+                  border: c.textDim.withValues(alpha: 0.3),
+                  fg: c.textMuted,
+                  onTap: widget.onDismiss,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
+
+// ─── Queue Panel (fixed above input) ────────────────────────────────────────
+
+// ─── Attachments Bar ────────────────────────────────────────────────────────
+
+// ─── Drop overlay shown when a file is being dragged over the chat ──────────
+
+class _DropOverlay extends StatelessWidget {
+  const _DropOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      margin: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: c.accentPrimary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: c.accentPrimary.withValues(alpha: 0.55),
+          width: 2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: c.accentPrimary.withValues(alpha: 0.25),
+            blurRadius: 40,
+            spreadRadius: -4,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: c.accentPrimary.withValues(alpha: 0.18),
+                border: Border.all(
+                  color: c.accentPrimary.withValues(alpha: 0.45),
+                ),
+              ),
+              child: Icon(
+                Icons.file_download_outlined,
+                size: 30,
+                color: c.accentPrimary,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'chat.drop_to_attach'.tr(),
+              style: GoogleFonts.inter(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: c.accentPrimary,
+                letterSpacing: -0.2,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'chat.drop_multiple_files_hint'.tr(),
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(
+                fontSize: 12.5,
+                color: c.textMuted,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Queue Panel ────────────────────────────────────────────────────────────
+//
+// Reactive view over [QueueService] for the currently-active session.
+// Each pending row can be cancelled individually; "Clear all" purges
+// every queued entry (leaves the running turn alone — use abort for
+// that).
+
+class _QueuePanel extends StatefulWidget {
+  final String appId;
+  final String sessionId;
+  /// Invoked when the user taps the Edit icon on the tail queued
+  /// entry — the caller should pre-fill the composer and set the
+  /// "replace last" flag so the next Send overwrites this row.
+  final void Function(QueueEntry entry)? onEditTail;
+  const _QueuePanel({
+    required this.appId,
+    required this.sessionId,
+    this.onEditTail,
+  });
+
+  @override
+  State<_QueuePanel> createState() => _QueuePanelState();
+}
+
+class _QueuePanelState extends State<_QueuePanel> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: QueueService(),
+      builder: (context, _) {
+        final c = context.colors;
+        // Show ONLY pending entries. Once the daemon picks a
+        // message (status → running), the chat bubble for that
+        // turn lands via `message_started` and the queue chip
+        // MUST disappear — having the same turn visible both in
+        // the chat AND in the queue was the "stuck in queue after
+        // dispatch" bug. If we ever want a progress glimpse of the
+        // running turn, that belongs in the chat (spinner bar),
+        // not here.
+        final entries = QueueService().pendingFor(widget.sessionId);
+        if (entries.isEmpty) return const SizedBox.shrink();
+
+        final pendingCount = entries.length;
+        // No running entries ever end up in [entries] now — fixed at 0
+        // so the display logic stays simple.
+        const runningCount = 0;
+
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          decoration: BoxDecoration(
+            color: c.green.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: c.green.withValues(alpha: 0.15)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: () => setState(() => _expanded = !_expanded),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 5),
+                  child: Row(
+                    children: [
+                      Icon(Icons.queue_rounded, size: 11, color: c.green),
+                      const SizedBox(width: 5),
+                      Text(
+                        runningCount > 0 && pendingCount > 0
+                            ? '$runningCount running · $pendingCount queued'
+                            : runningCount > 0
+                                ? '$runningCount running'
+                                : '$pendingCount queued',
+                        style: GoogleFonts.firaCode(
+                            fontSize: 10,
+                            color: c.green,
+                            fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(width: 6),
+                      if (!_expanded)
+                        Expanded(
+                          child: Text(entries.first.message,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.inter(
+                                  fontSize: 10, color: c.textMuted)),
+                        ),
+                      if (_expanded) const Spacer(),
+                      if (_expanded && pendingCount > 0)
+                        GestureDetector(
+                          onTap: () => QueueService()
+                              .clear(widget.appId, widget.sessionId),
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: Text('chat.clear_short'.tr(),
+                                style: GoogleFonts.inter(
+                                    fontSize: 9, color: c.textDim)),
+                          ),
+                        ),
+                      Icon(
+                        _expanded
+                            ? Icons.keyboard_arrow_down_rounded
+                            : Icons.keyboard_arrow_up_rounded,
+                        size: 14,
+                        color: c.green,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_expanded)
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 120),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+                    itemCount: entries.length,
+                    itemBuilder: (_, i) {
+                      final e = entries[i];
+                      final isRunning = e.status.isRunning;
+                      final isTail = i == entries.length - 1;
+                      final canEdit = isTail &&
+                          !isRunning &&
+                          !e.optimistic &&
+                          widget.onEditTail != null;
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 3),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 16,
+                              height: 16,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: (isRunning ? c.orange : c.green)
+                                    .withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                              child: isRunning
+                                  ? SizedBox(
+                                      width: 9,
+                                      height: 9,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 1.2,
+                                        valueColor: AlwaysStoppedAnimation(
+                                            c.orange),
+                                      ),
+                                    )
+                                  : Text('${i + 1}',
+                                      style: GoogleFonts.firaCode(
+                                          fontSize: 8, color: c.green)),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(e.message,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: GoogleFonts.inter(
+                                      fontSize: 11, color: c.text)),
+                            ),
+                            if (canEdit) ...[
+                              const SizedBox(width: 2),
+                              Tooltip(
+                                message:
+                                    'Edit — replace this queued message',
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(3),
+                                  onTap: () => widget.onEditTail!(e),
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(2),
+                                    child: Icon(Icons.edit_outlined,
+                                        size: 11),
+                                  ),
+                                ),
+                              ),
+                            ],
+                            const SizedBox(width: 2),
+                            // Cancel button is hidden for the running
+                            // entry — use the composer's Stop button
+                            // to abort an in-flight turn.
+                            if (!isRunning)
+                              InkWell(
+                                borderRadius: BorderRadius.circular(3),
+                                onTap: e.optimistic
+                                    ? null
+                                    : () => QueueService().cancel(
+                                        widget.appId,
+                                        widget.sessionId,
+                                        e.id),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(2),
+                                  child: Icon(Icons.close_rounded,
+                                      size: 11,
+                                      color: e.optimistic
+                                          ? c.textDim
+                                              .withValues(alpha: 0.4)
+                                          : c.textDim),
+                                ),
+                              ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─── Retry button used by the offline bar ─────────────────────────────────
+
+class _RetrySocketButton extends StatefulWidget {
+  @override
+  State<_RetrySocketButton> createState() => _RetrySocketButtonState();
+}
+
+class _RetrySocketButtonState extends State<_RetrySocketButton> {
+  bool _h = false;
+  bool _busy = false;
+
+  Future<void> _retry() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await DigitornSocketService().connect(AuthService().baseUrl);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _h = true),
+      onExit: (_) => setState(() => _h = false),
+      child: GestureDetector(
+        onTap: _retry,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: _h ? c.red.withValues(alpha: 0.18) : c.red.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: c.red.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_busy)
+                SizedBox(
+                  width: 10,
+                  height: 10,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.4,
+                    valueColor: AlwaysStoppedAnimation(c.red),
+                  ),
+                )
+              else
+                Icon(Icons.refresh_rounded, size: 11, color: c.red),
+              const SizedBox(width: 5),
+              Text('chat.retry'.tr(),
+                  style: GoogleFonts.inter(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: c.red,
+                  )),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Status pill (Reconnecting / Interrupted / Turn in progress) ───
+
+class _StatusPill extends StatefulWidget {
+  final String label;
+  final IconData icon;
+  final Color fg;
+  final Color bg;
+  final String? tooltip;
+  final bool pulse;
+  const _StatusPill({
+    required this.label,
+    required this.icon,
+    required this.fg,
+    required this.bg,
+    this.tooltip,
+    this.pulse = false,
+  });
+
+  @override
+  State<_StatusPill> createState() => _StatusPillState();
+}
+
+class _StatusPillState extends State<_StatusPill>
+    with TickerProviderStateMixin {
+  AnimationController? _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.pulse) {
+      _ctrl = AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 900),
+      )..repeat(reverse: true);
+    }
+  }
+
+  @override
+  void didUpdateWidget(_StatusPill oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.pulse && _ctrl == null) {
+      _ctrl = AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 900),
+      )..repeat(reverse: true);
+    } else if (!widget.pulse && _ctrl != null) {
+      _ctrl!.dispose();
+      _ctrl = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final anim = _ctrl;
+    final body = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+      decoration: BoxDecoration(
+        color: widget.bg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: widget.fg.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          anim != null
+              ? AnimatedBuilder(
+                  animation: anim,
+                  builder: (_, _) => Icon(
+                    widget.icon,
+                    size: 9,
+                    color: widget.fg.withValues(alpha: 0.4 + 0.6 * anim.value),
+                  ),
+                )
+              : Icon(widget.icon, size: 9, color: widget.fg),
+          const SizedBox(width: 5),
+          Text(
+            widget.label,
+            style: GoogleFonts.inter(
+              fontSize: 10,
+              color: widget.fg,
+              fontWeight: FontWeight.w500,
+              height: 1.2,
+            ),
+          ),
+        ],
+      ),
+    );
+    if (widget.tooltip != null) {
+      return Tooltip(message: widget.tooltip!, child: body);
+    }
+    return body;
+  }
+}
+
+// ─── Header pieces ──────────────────────────────────────────────────────────
+
+class _ModeBadge extends StatelessWidget {
+  final ExecutionMode mode;
+  final Color accent;
+  const _ModeBadge({required this.mode, required this.accent});
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (mode) {
+      ExecutionMode.background => 'BG',
+      ExecutionMode.oneshot => 'ONE',
+      ExecutionMode.conversation => 'CHAT',
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: accent.withValues(alpha: 0.3)),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.firaCode(
+          fontSize: 9,
+          fontWeight: FontWeight.w800,
+          color: accent,
+          letterSpacing: 0.6,
+        ),
+      ),
+    );
+  }
+}
+
+class _ToolActivityBar extends StatefulWidget {
+  final String toolName;
+  final int elapsedMs;
+  final Color accent;
+  final VoidCallback? onAbort;
+  const _ToolActivityBar({
+    required this.toolName,
+    required this.elapsedMs,
+    required this.accent,
+    this.onAbort,
+  });
+
+  @override
+  State<_ToolActivityBar> createState() => _ToolActivityBarState();
+}
+
+class _ToolActivityBarState extends State<_ToolActivityBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _shimmer;
+  bool _abortHover = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _shimmer = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _shimmer.dispose();
+    super.dispose();
+  }
+
+  String _formatTool(String raw) {
+    final r = raw.replaceAll('tool_use:', '').trim();
+    if (r.isEmpty) return 'Tool';
+    return r;
+  }
+
+  String _formatElapsed(int ms) {
+    final s = ms / 1000;
+    if (s < 60) return '${s.toStringAsFixed(1)}s';
+    final m = (s / 60).floor();
+    final rest = (s % 60).floor();
+    return '${m}m ${rest}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      decoration: BoxDecoration(
+        color: Color.lerp(c.surface, widget.accent, 0.04) ?? c.surface,
+        border: Border(
+          bottom:
+              BorderSide(color: widget.accent.withValues(alpha: 0.2)),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AnimatedBuilder(
+            animation: _shimmer,
+            builder: (_, _) {
+              final t = _shimmer.value;
+              return SizedBox(
+                height: 2,
+                child: Stack(
+                  children: [
+                    Container(
+                        color:
+                            widget.accent.withValues(alpha: 0.15)),
+                    FractionallySizedBox(
+                      widthFactor: 0.25,
+                      alignment:
+                          Alignment(-1 + (t * 2.5).clamp(-1, 1.5), 0),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              widget.accent.withValues(alpha: 0),
+                              widget.accent,
+                              widget.accent.withValues(alpha: 0),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+          Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            child: Row(
+              children: [
+                Container(
+                  width: 18,
+                  height: 18,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: widget.accent.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(5),
+                    border: Border.all(
+                      color: widget.accent.withValues(alpha: 0.3),
+                    ),
+                  ),
+                  child: Icon(Icons.bolt_rounded,
+                      size: 11, color: widget.accent),
+                ),
+                const SizedBox(width: 9),
+                Text(
+                  'chat.running'.tr(),
+                  style: GoogleFonts.inter(
+                    fontSize: 11.5,
+                    color: c.textMuted,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    _formatTool(widget.toolName),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.firaCode(
+                      fontSize: 12,
+                      color: c.textBright,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  _formatElapsed(widget.elapsedMs),
+                  style: GoogleFonts.firaCode(
+                    fontSize: 11,
+                    color: widget.accent,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                if (widget.onAbort != null)
+                  MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    onEnter: (_) =>
+                        setState(() => _abortHover = true),
+                    onExit: (_) =>
+                        setState(() => _abortHover = false),
+                    child: GestureDetector(
+                      onTap: widget.onAbort,
+                      child: AnimatedContainer(
+                        duration:
+                            const Duration(milliseconds: 120),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: _abortHover
+                              ? c.red.withValues(alpha: 0.16)
+                              : c.red.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(5),
+                          border: Border.all(
+                            color: c.red
+                                .withValues(alpha: _abortHover ? 0.5 : 0.3),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.stop_rounded,
+                                size: 11, color: c.red),
+                            const SizedBox(width: 4),
+                            Text(
+                              'common.cancel'.tr(),
+                              style: GoogleFonts.inter(
+                                fontSize: 11,
+                                color: c.red,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Pill-shaped floating indicator that appears in the bottom-right
+/// of the chat area when the side panel is closed but the turn
+/// produced artifacts. Clicking opens the panel on the latest.
+class _ArtifactsFloatingChip extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Positioned(
+      bottom: 110,
+      right: 20,
+      child: ListenableBuilder(
+        listenable: ArtifactService(),
+        builder: (_, _) {
+          final service = ArtifactService();
+          if (service.isOpen || !service.hasAny) {
+            return const SizedBox.shrink();
+          }
+          final count = service.artifacts.length;
+          return MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: service.openFirst,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      c.accentPrimary,
+                      Color.lerp(c.accentPrimary, c.accentSecondary, 0.5) ??
+                          c.accentPrimary,
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(999),
+                  boxShadow: [
+                    BoxShadow(
+                      color: c.accentPrimary.withValues(alpha: 0.4),
+                      blurRadius: 24,
+                      spreadRadius: -4,
+                      offset: const Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.auto_awesome_rounded,
+                      color: c.onAccent,
+                      size: 14,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      count == 1
+                          ? '1 artifact'
+                          : '$count artifacts',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: c.onAccent,
+                        letterSpacing: 0.1,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+

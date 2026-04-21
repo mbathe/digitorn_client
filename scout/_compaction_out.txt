@@ -1,0 +1,367 @@
+
+=== Compaction scout — session=scout-compact-c537ece2 ===
+
+
+>>> sending follow-up turn #2
+
+>>> sending follow-up turn #3
+
+>>> sending follow-up turn #4
+
+>>> sending follow-up turn #5
+
+--- 7667 envelopes total ---
+
+--- timeline (ctx-relevant) ---
+[seq=111246] type=message_started  ctx=None
+[seq=111247] type=hook  pressure=0.0165 estimated_tokens=3225 max_tokens=195904
+[seq=111248] type=hook  pressure=0.0165 estimated_tokens=3225 max_tokens=195904
+[seq=111308] type=hook  pressure=0.1321 estimated_tokens=25877 max_tokens=195904
+[seq=111310] type=hook  pressure=0.1321 estimated_tokens=25877 max_tokens=195904
+[seq=111311] type=hook  pressure=0.1445 estimated_tokens=28316 max_tokens=195904
+[seq=111312] type=hook  pressure=0.1445 estimated_tokens=28316 max_tokens=195904
+[seq=111316] type=hook  pressure=0.0177 estimated_tokens=3474 max_tokens=195904   << ↓PRESS UNEXPLAINED (0.144→0.018) >>
+[seq=111319] type=hook  pressure=0.0177 estimated_tokens=3474 max_tokens=195904
+[seq=111320] type=hook  pressure=0.018 estimated_tokens=3517 max_tokens=195904
+[seq=111321] type=hook  pressure=0.018 estimated_tokens=3517 max_tokens=195904
+[seq=111326] type=hook  pressure=0.4403 estimated_tokens=86256 max_tokens=195904
+[seq=111334] type=hook  pressure=0.4403 estimated_tokens=86256 max_tokens=195904
+[seq=111335] type=hook  pressure=0.019 estimated_tokens=3726 max_tokens=195904   << ↓PRESS UNEXPLAINED (0.440→0.019) >>
+[seq=111337] type=hook  pressure=0.6338 estimated_tokens=124157 max_tokens=195904
+[seq=111339] type=hook  pressure=0.6338 estimated_tokens=124157 max_tokens=195904
+[seq=111341] type=hook  pressure=0.019 estimated_tokens=3726 max_tokens=195904   << ↓PRESS UNEXPLAINED (0.634→0.019) >>
+[seq=111362] type=hook  pressure=0.0194 estimated_tokens=3809 max_tokens=195904
+[seq=111363] type=hook  pressure=0.0194 estimated_tokens=3809 max_tokens=195904
+[seq=111367] type=hook  pressure=0.1457 estimated_tokens=28546 max_tokens=195904
+[seq=111370] type=hook  pressure=0.1457 estimated_tokens=28546 max_tokens=195904
+[seq=111371] type=hook  pressure=0.146 estimated_tokens=28601 max_tokens=195904
+[seq=118192] type=result  pressure=0.191 compactions=0 total_estimated_tokens=37329 effective_max=195904 max_tokens=200000 message_history_tokens=31829
+[seq=118198] type=message_done  ctx=None
+[seq=118221] type=message_started  ctx=None
+[seq=118222] type=hook  pressure=0.1932 estimated_tokens=37850 max_tokens=195904
+[seq=118223] type=hook  pressure=0.1932 estimated_tokens=37850 max_tokens=195904
+[seq=118435] type=hook  pressure=0.1944 estimated_tokens=38079 max_tokens=195904
+[seq=118440] type=hook  pressure=0.1944 estimated_tokens=38079 max_tokens=195904
+[seq=118441] type=hook  pressure=0.1946 estimated_tokens=38117 max_tokens=195904
+[seq=118442] type=hook  pressure=0.1946 estimated_tokens=38117 max_tokens=195904
+[seq=118816] type=hook  pressure=0.1962 estimated_tokens=38428 max_tokens=195904
+[seq=118861] type=hook  pressure=0.1962 estimated_tokens=38428 max_tokens=195904
+[seq=118862] type=hook  pressure=0.2154 estimated_tokens=42207 max_tokens=195904
+[seq=118863] type=hook  pressure=0.2154 estimated_tokens=42207 max_tokens=195904
+[seq=121702] type=result  pressure=0.288 compactions=0 total_estimated_tokens=56366 effective_max=195904 max_tokens=200000 message_history_tokens=50866
+[seq=121703] type=message_done  ctx=None
+[seq=121705] type=message_started  ctx=None
+[seq=121706] type=hook  pressure=0.2999 estimated_tokens=58747 max_tokens=195904
+[seq=121707] type=hook  pressure=0.2999 estimated_tokens=58747 max_tokens=195904
+[seq=121740] type=hook  pressure=0.3014 estimated_tokens=59045 max_tokens=195904
+[seq=121743] type=hook  pressure=0.3014 estimated_tokens=59045 max_tokens=195904
+[seq=121744] type=hook  pressure=0.3016 estimated_tokens=59082 max_tokens=195904
+[seq=121745] type=hook  pressure=0.3016 estimated_tokens=59082 max_tokens=195904
+[seq=121751] type=hook  pressure=0.3032 estimated_tokens=59391 max_tokens=195904
+[seq=121753] type=hook  pressure=0.3032 estimated_tokens=59391 max_tokens=195904
+[seq=121754] type=hook  pressure=0.3217 estimated_tokens=63013 max_tokens=195904
+[seq=121755] type=hook  pressure=0.3217 estimated_tokens=63013 max_tokens=195904
+[seq=121770] type=hook  pressure=0.3233 estimated_tokens=63343 max_tokens=195904
+[seq=121772] type=hook  pressure=0.3233 estimated_tokens=63343 max_tokens=195904
+[seq=121773] type=hook  pressure=0.396 estimated_tokens=77580 max_tokens=195904
+[seq=121774] type=hook  pressure=0.396 estimated_tokens=77580 max_tokens=195904
+[seq=121793] type=hook  pressure=0.397 estimated_tokens=77777 max_tokens=195904
+[seq=121795] type=hook  pressure=0.397 estimated_tokens=77777 max_tokens=195904
+[seq=121796] type=hook  pressure=0.401 estimated_tokens=78565 max_tokens=195904
+[seq=121797] type=hook  pressure=0.401 estimated_tokens=78565 max_tokens=195904
+[seq=123002] type=hook  pressure=0.4088 estimated_tokens=80089 max_tokens=195904
+[seq=123005] type=hook  pressure=0.4088 estimated_tokens=80089 max_tokens=195904
+[seq=123006] type=hook  pressure=0.4093 estimated_tokens=80186 max_tokens=195904
+[seq=123007] type=hook  pressure=0.4093 estimated_tokens=80186 max_tokens=195904
+[seq=123208] type=hook  pressure=0.4096 estimated_tokens=80236 max_tokens=195904
+[seq=123442] type=result  pressure=0.395 compactions=0 total_estimated_tokens=77328 effective_max=195904 max_tokens=200000 message_history_tokens=71828   << ↓PRESS UNEXPLAINED (0.410→0.395) >>
+[seq=123443] type=message_done  ctx=None
+[seq=123445] type=message_started  ctx=None
+[seq=123446] type=hook  pressure=0.4109 estimated_tokens=80489 max_tokens=195904
+[seq=123447] type=hook  pressure=0.4109 estimated_tokens=80489 max_tokens=195904
+[seq=123504] type=hook  pressure=0.4123 estimated_tokens=80776 max_tokens=195904
+[seq=123507] type=hook  pressure=0.4123 estimated_tokens=80776 max_tokens=195904
+[seq=123508] type=hook  pressure=0.4125 estimated_tokens=80809 max_tokens=195904
+[seq=123509] type=hook  pressure=0.4125 estimated_tokens=80809 max_tokens=195904
+[seq=123766] type=hook  pressure=0.4331 estimated_tokens=84842 max_tokens=195904
+[seq=123768] type=hook  pressure=0.4331 estimated_tokens=84842 max_tokens=195904
+[seq=123769] type=hook  pressure=0.5142 estimated_tokens=100728 max_tokens=195904
+[seq=123770] type=hook  pressure=0.5142 estimated_tokens=100728 max_tokens=195904
+[seq=123791] type=hook  pressure=0.5152 estimated_tokens=100926 max_tokens=195904
+[seq=123793] type=hook  pressure=0.5152 estimated_tokens=100926 max_tokens=195904
+[seq=123794] type=hook  pressure=0.5191 estimated_tokens=101695 max_tokens=195904
+[seq=123795] type=hook  pressure=0.5191 estimated_tokens=101695 max_tokens=195904
+[seq=125582] type=hook  pressure=0.5278 estimated_tokens=103402 max_tokens=195904
+[seq=125585] type=hook  pressure=0.5278 estimated_tokens=103402 max_tokens=195904
+[seq=125586] type=hook  pressure=0.5283 estimated_tokens=103492 max_tokens=195904
+[seq=125587] type=hook  pressure=0.5283 estimated_tokens=103492 max_tokens=195904
+[seq=125824] type=hook  pressure=0.5285 estimated_tokens=103543 max_tokens=195904
+[seq=126064] type=result  pressure=0.508 compactions=0 total_estimated_tokens=99453 effective_max=195904 max_tokens=200000 message_history_tokens=93953   << ↓PRESS UNEXPLAINED (0.528→0.508) >>
+[seq=126065] type=message_done  ctx=None
+[seq=126066] type=message_started  ctx=None
+[seq=126067] type=hook  pressure=0.5297 estimated_tokens=103775 max_tokens=195904
+[seq=126068] type=hook  pressure=0.5297 estimated_tokens=103775 max_tokens=195904
+[seq=126069] type=hook  pressure=0.53 estimated_tokens=103838 max_tokens=195904
+[seq=126070] type=result  pressure=0.508 compactions=0 total_estimated_tokens=99453 effective_max=195904 max_tokens=200000 message_history_tokens=93953   << ↓PRESS UNEXPLAINED (0.530→0.508) >>
+[seq=126072] type=message_done  ctx=None
+
+--- FULL context payloads (dedup by seq) ---
+
+[result.context] seq=118192:
+{
+  "max_tokens": 200000,
+  "output_reserved": 4096,
+  "effective_max": 195904,
+  "system_prompt_tokens": 3008,
+  "system_prompt_pct": 1.5,
+  "tools_schema_tokens": 2492,
+  "tools_schema_pct": 1.3,
+  "message_history_tokens": 31829,
+  "message_history_pct": 16.2,
+  "total_estimated_tokens": 37329,
+  "pressure": 0.191,
+  "available_tokens": 158575,
+  "compactions": 0
+}
+
+[result.context] seq=121702:
+{
+  "max_tokens": 200000,
+  "output_reserved": 4096,
+  "effective_max": 195904,
+  "system_prompt_tokens": 3008,
+  "system_prompt_pct": 1.5,
+  "tools_schema_tokens": 2492,
+  "tools_schema_pct": 1.3,
+  "message_history_tokens": 50866,
+  "message_history_pct": 26.0,
+  "total_estimated_tokens": 56366,
+  "pressure": 0.288,
+  "available_tokens": 139538,
+  "compactions": 0
+}
+
+[result.context] seq=123442:
+{
+  "max_tokens": 200000,
+  "output_reserved": 4096,
+  "effective_max": 195904,
+  "system_prompt_tokens": 3008,
+  "system_prompt_pct": 1.5,
+  "tools_schema_tokens": 2492,
+  "tools_schema_pct": 1.3,
+  "message_history_tokens": 71828,
+  "message_history_pct": 36.7,
+  "total_estimated_tokens": 77328,
+  "pressure": 0.395,
+  "available_tokens": 118576,
+  "compactions": 0
+}
+
+[result.context] seq=126064:
+{
+  "max_tokens": 200000,
+  "output_reserved": 4096,
+  "effective_max": 195904,
+  "system_prompt_tokens": 3008,
+  "system_prompt_pct": 1.5,
+  "tools_schema_tokens": 2492,
+  "tools_schema_pct": 1.3,
+  "message_history_tokens": 93953,
+  "message_history_pct": 48.0,
+  "total_estimated_tokens": 99453,
+  "pressure": 0.508,
+  "available_tokens": 96451,
+  "compactions": 0
+}
+
+[result.context] seq=126070:
+{
+  "max_tokens": 200000,
+  "output_reserved": 4096,
+  "effective_max": 195904,
+  "system_prompt_tokens": 3008,
+  "system_prompt_pct": 1.5,
+  "tools_schema_tokens": 2492,
+  "tools_schema_pct": 1.3,
+  "message_history_tokens": 93953,
+  "message_history_pct": 48.0,
+  "total_estimated_tokens": 99453,
+  "pressure": 0.508,
+  "available_tokens": 96451,
+  "compactions": 0
+}
+
+--- compaction-looking envelopes ---
+
+seq=111245 type=user_message
+{
+  "session_id": "scout-compact-c537ece2",
+  "role": "user",
+  "content": "Please explain in detail: 1) the history of the printing press, 2) the invention of the telephone, 3) the space race in the 1960s, 4) the origins of the internet, 5) the rise of smartphones. Give dates, people, places. Write at least 400 words total.",
+  "images": [],
+  "correlation_id": "fp-24fa8fcd3d64",
+  "client_message_id": "",
+  "pending": false
+}
+
+seq=111246 type=message_started
+{
+  "correlation_id": "fp-24fa8fcd3d64",
+  "session_id": "scout-compact-c537ece2",
+  "position": 0,
+  "fast_path": true
+}
+
+seq=118198 type=message_done
+{
+  "correlation_id": "fp-24fa8fcd3d64",
+  "session_id": "scout-compact-c537ece2",
+  "fast_path": true
+}
+
+seq=118220 type=user_message
+{
+  "session_id": "scout-compact-c537ece2",
+  "role": "user",
+  "content": "Great. Now do the same for: agriculture, the wheel, writing systems, the steam engine, electricity. 400 words.",
+  "images": [],
+  "correlation_id": "fp-2ba6a39a0524",
+  "client_message_id": "",
+  "pending": false
+}
+
+seq=118221 type=message_started
+{
+  "correlation_id": "fp-2ba6a39a0524",
+  "session_id": "scout-compact-c537ece2",
+  "position": 0,
+  "fast_path": true
+}
+
+seq=121703 type=message_done
+{
+  "correlation_id": "fp-2ba6a39a0524",
+  "session_id": "scout-compact-c537ece2",
+  "fast_path": true
+}
+
+seq=121704 type=user_message
+{
+  "session_id": "scout-compact-c537ece2",
+  "role": "user",
+  "content": "Now do the same for: vaccines, penicillin, DNA discovery, heart transplants, mRNA vaccines. 400 words.",
+  "images": [],
+  "correlation_id": "fp-ae0574c2ea49",
+  "client_message_id": "",
+  "pending": false
+}
+
+seq=121705 type=message_started
+{
+  "correlation_id": "fp-ae0574c2ea49",
+  "session_id": "scout-compact-c537ece2",
+  "position": 0,
+  "fast_path": true
+}
+
+seq=123443 type=message_done
+{
+  "correlation_id": "fp-ae0574c2ea49",
+  "session_id": "scout-compact-c537ece2",
+  "fast_path": true
+}
+
+seq=123444 type=user_message
+{
+  "session_id": "scout-compact-c537ece2",
+  "role": "user",
+  "content": "Now do the same for: jazz, rock n roll, hip hop, electronic music, K-pop. 400 words.",
+  "images": [],
+  "correlation_id": "fp-abd5ee7cf200",
+  "client_message_id": "",
+  "pending": false
+}
+
+seq=123445 type=message_started
+{
+  "correlation_id": "fp-abd5ee7cf200",
+  "session_id": "scout-compact-c537ece2",
+  "position": 0,
+  "fast_path": true
+}
+
+seq=126001 type=user_message
+{
+  "session_id": "scout-compact-c537ece2",
+  "role": "user",
+  "content": "Now do the same for: Ancient Egypt, Roman Empire, Tang Dynasty, Mongol Empire, Ottoman Empire. 400 words.",
+  "images": [],
+  "correlation_id": "0c31c43bbbee454c8d1c4e7357769707",
+  "client_message_id": "",
+  "pending": true
+}
+
+seq=126065 type=message_done
+{
+  "correlation_id": "fp-abd5ee7cf200",
+  "session_id": "scout-compact-c537ece2",
+  "fast_path": true
+}
+
+seq=126066 type=message_started
+{
+  "correlation_id": "0c31c43bbbee454c8d1c4e7357769707",
+  "session_id": "scout-compact-c537ece2",
+  "position": 1
+}
+
+seq=126070 type=result
+{
+  "content": "",
+  "session_id": "scout-compact-c537ece2",
+  "tool_calls_count": 0,
+  "turns_used": 0,
+  "truncated": false,
+  "error": "Error code: 402 - {'error': {'message': 'Insufficient Balance', 'type': 'unknown_error', 'param': None, 'code': 'invalid_request_error'}}",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_input_tokens": 1695036,
+    "total_output_tokens": 10235,
+    "total_tokens": 1705271,
+    "cost_usd": 1.396969
+  },
+  "turn_number": 0,
+  "context": {
+    "max_tokens": 200000,
+    "output_reserved": 4096,
+    "effective_max": 195904,
+    "system_prompt_tokens": 3008,
+    "system_prompt_pct": 1.5,
+    "tools_schema_tokens": 2492,
+    "tools_schema_pct": 1.3,
+    "message_history_tokens": 93953,
+    "message_history_pct": 48.0,
+    "total_estimated_tokens": 99453,
+    "pressure": 0.508,
+    "available_tokens": 96451,
+    "compactions": 0
+  }
+}
+
+seq=126071 type=error
+{
+  "error": "Insufficient balance or quota exceeded. Please check your API billing.",
+  "code": "insufficient_balance",
+  "category": "billing",
+  "retry": false,
+  "detail": "Error code: 402 - {'error': {'message': 'Insufficient Balance', 'type': 'unknown_error', 'param': None, 'code': 'invalid_request_error'}}",
+  "session_id": "scout-compact-c537ece2"
+}
+
+seq=126072 type=message_done
+{
+  "correlation_id": "0c31c43bbbee454c8d1c4e7357769707",
+  "session_id": "scout-compact-c537ece2"
+}

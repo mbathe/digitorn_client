@@ -1,0 +1,309 @@
+
+=== Replay scout — session=scout-replay-b116c8c2 ===
+
+> live turn: 141 envelopes
+
+--- rejoining with since=0 ---
+daemon reported replayed=139
+> replay: 177 envelopes
+
+live  types: ['assistant_stream_snapshot', 'connected', 'hook', 'in_token', 'message_done', 'message_started', 'out_token', 'queue:snapshot', 'result', 'stream_done', 'token', 'tool_call', 'tool_start', 'user_message']
+reply types: ['assistant_stream_snapshot', 'connected', 'hook', 'in_token', 'message_done', 'message_started', 'out_token', 'queue:snapshot', 'result', 'stream_done', 'token', 'tool_call', 'tool_start', 'user_message']
+types only in replay : []
+types only in live   : []
+
+--- replay head (non-token) ---
+
+[seq=125169] connected
+
+[seq=124609] user_message
+{
+  "session_id": "scout-replay-b116c8c2",
+  "role": "user",
+  "content": "Tell me a fun fact about octopuses in two sentences.",
+  "images": [],
+  "correlation_id": "fp-bbb6547338d2",
+  "client_message_id": "",
+  "pending": false
+}
+
+[seq=124610] message_started
+{
+  "correlation_id": "fp-bbb6547338d2",
+  "session_id": "scout-replay-b116c8c2",
+  "position": 0,
+  "fast_path": true
+}
+
+[seq=124611] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0162,
+    "estimated_tokens": 3176,
+    "max_tokens": 195904,
+    "threshold": 0.75,
+    "messages": 2
+  }
+}
+
+[seq=124612] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0162,
+    "estimated_tokens": 3176,
+    "max_tokens": 195904,
+    "threshold": 0.75,
+    "messages": 2
+  }
+}
+
+[seq=124666] assistant_stream_snapshot
+{
+  "content": "I'll search",
+  "chars": 11
+}
+
+[seq=124689] assistant_stream_snapshot
+{
+  "content": "I'll search for an interesting fun fact about octopuses to share",
+  "chars": 64
+}
+
+[seq=124712] stream_done
+
+[seq=124746] tool_start
+{
+  "id": "call_00_2Tx0pnwJKG2rspyuvfkbVgU7",
+  "name": "WebSearch",
+  "params": {
+    "query": "fun facts about octopuses interesting biology"
+  },
+  "label": "Websearch",
+  "detail": "fun facts about octopuses interesting biology",
+  "display": {
+    "verb": "Search",
+    "detail": "fun facts about octopuses interesting biology",
+    "icon": "search",
+    "channel": "chat",
+    "hidden": false,
+    "category": "action",
+    "group": "",
+    "visible_params": [
+      "query"
+    ]
+  }
+}
+
+[seq=124750] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0171,
+    "estimated_tokens": 3359,
+    "max_tokens": 195904,
+    "threshold": 0.75,
+    "messages": 3
+  }
+}
+
+[seq=124780] tool_call
+{
+  "id": "call_00_2Tx0pnwJKG2rspyuvfkbVgU7",
+  "name": "WebSearch",
+  "params": {
+    "query": "fun facts about octopuses interesting biology"
+  },
+  "success": true,
+  "error": "",
+  "label": "Websearch",
+  "detail": "fun facts about octopuses interesting biology",
+  "display": {
+    "verb": "Search",
+    "detail": "fun facts about octopuses interesting biology",
+    "icon": "search",
+    "channel": "chat",
+    "hidden": false,
+    "category": "action",
+    "group": "",
+    "visible_params": [
+      "query"
+    ]
+  },
+  "result": {
+    "query": "fun facts about octopuses interesting biology",
+    "results": [
+      {
+        "title": "50 Interesting Facts About Octopuses - The Fact File",
+        "url": "https://thefactfile.org/facts-about-octopuses/",
+        "snippet": "FactsaboutOctopuses: over 300 species of octopus roam every ocean on Earth. The lightest adult octopus weighs less than a gram. The largest recorded specimen is roughly 600 pounds."
+      },
+      {
+        "title": "20 Amazing Octopus Facts That Will Blow Your Mind",
+        "url": "https://www.wildlifenomads.com/blog/20-amazing-octopus-facts/",
+        "snippet": "In this blog, we'll dive into 15 amazing octopusfactsthat reveal just how strange, smart, and spectacular these eight-armed animals really are. Whether you're curious about how long they live, what they eat, or how they escape predators, this article is packed withfunfactsaboutoctopusesthat will deepen your appreciation for these ..."
+      },
+      {
+        "title": "52 Mind-Blowing Octopus Facts You Won't Believe Are Real",
+        "url": "https://www.factretriever.com/octopus-facts",
+        "snippet": "What is the plural of octopus? Is an octopus venomous? Discover the answers to these questions and more with ourfunlist of mind-blowing octopusfacts."
+      },
+      {
+        "title": "7 Interesting Facts About Octopuses - 33Science",
+        "url": "https://33science.com/2026/03/06/facts-about-octopuses/",
+        "snippet": "Curious aboutoctopuses? This post presents 7interestingfactsaboutoctopuses— from their problem-solving intelligence and camouflage to tool use and regeneration — and serves as a hub linking to deeper, science-backed articles for eachfact. Perfect for quick reading, teaching, or sharing fascinating marinebiologyinsights."
+      },
+      {
+        "title": "Octopuses keep surprising us - here are eight examples how",
+        "url": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-us-here-are-eight-examples-how.html",
+        "snippet": "An octopus has blue blood and three hearts. But these aren't even the most astonishing things scientists have discovered about these beguiling marine animals. Here are some additional waysoctopusesare keeping researchers on their toes."
+      }
+    ],
+    "count": 5,
+    "backend": "duckduckgo",
+    "sources": [
+      "https://thefactfile.org/facts-about-octopuses/",
+      "https://www.wildlifenomads.com/blog/20-amazing-octopus-facts/",
+      "https://www.factretriever.com/octopus-facts",
+      "https://33science.com/2026/03/06/facts-about-octopuses/",
+      "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-us-here-are-eight-examples-how.html"
+    ]
+  }
+}
+
+[seq=124782] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0171,
+    "estimated_tokens": 3359,
+    "max_tokens": 195904,
+    "threshold": 0.75,
+    "messages": 3
+  }
+}
+
+[seq=124783] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0202,
+    "estimated_tokens": 3964,
+    "max_tokens": 195904,
+    "threshold": 0.75,
+    "messages": 4
+  }
+}
+
+[seq=124784] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0202,
+    "estimated_tokens": 3964,
+    "max_tokens": 195904,
+    "threshold": 0.75,
+    "messages": 4
+  }
+}
+
+[seq=124828] assistant_stream_snapshot
+{
+  "content": "Let me fetch",
+  "chars": 12
+}
+
+[seq=124858] assistant_stream_snapshot
+{
+  "content": "Let me fetch one of these pages to get a specific, interesting fact about octop",
+  "chars": 79
+}
+
+[seq=124879] stream_done
+
+[seq=124932] tool_start
+{
+  "id": "call_00_MLzuvrhFvQTEgqNs88hyFw2c",
+  "name": "WebFetch",
+  "params": {
+    "url": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-us-here-are-eight-examples-how.html"
+  },
+  "label": "Webfetch",
+  "detail": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-...",
+  "display": {
+    "verb": "Fetch",
+    "detail": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-...",
+    "icon": "web",
+    "channel": "chat",
+    "hidden": false,
+    "category": "action",
+    "group": "",
+    "visible_params": [
+      "url",
+      "prompt",
+      "extract"
+    ]
+  }
+}
+
+[seq=124936] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0212,
+    "estimated_tokens": 4161,
+    "max_tokens": 195904,
+    "threshold": 0.75,
+    "messages": 5
+  }
+}
+
+[seq=124937] tool_call
+{
+  "id": "call_00_MLzuvrhFvQTEgqNs88hyFw2c",
+  "name": "WebFetch",
+  "params": {
+    "url": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-us-here-are-eight-examples-how.html"
+  },
+  "success": true,
+  "error": "",
+  "label": "Webfetch",
+  "detail": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-...",
+  "display": {
+    "verb": "Fetch",
+    "detail": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-...",
+    "icon": "web",
+    "channel": "chat",
+    "hidden": false,
+    "category": "action",
+    "group": "",
+    "visible_params": [
+      "url",
+      "prompt",
+      "extract"
+    ]
+  },
+  "result": {
+    "url": "https://www.nhm.ac.uk/discover/octopuses-keep-surprising-us-here-are-eight-examples-how.html",
+    "title": "Octopuses keep surprising us - here are eight examples how | Natural History Museum",
+    "content": "[](https://www.nhm.ac.uk/cdn-cgi/content?id=l_Gpc20RVlGoVhetoA712QSeV70aARNRGV7mR4QD8Wo-1776610002.930622-1.0.1.1-h4lZw7MV_eY2f6fKfAMcLGFZ33cV9WV6FGO94UoWKLo)\n\nA small octopus ready to hide between a coconut shell and a sea shell. © Nick Hobgood ([CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/deed.en)) via [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Octopus_shell.jpg)\n\n[Oceans](https://www.nhm.ac.uk/discover/oceans.html)\n\n# Octopuses keep surprising us – here are eight examples how\n\nBy Lisa Hendry\n\n[](https://www.facebook.com/sharer/sharer.php?u=https://www.nhm.ac.uk/discover/octopuses-keep-surprising-us-here-are-eight-examples-how.html)[](/cdn-cgi/l/email-protection#5d622e283f37383e2960332831317b3c302d663f323924603529292d786e1c72722a2a2a73333530733c3e7328367239342e3e322b382f72323e29322d282e382e703638382d702e282f2d2f342e34333a70282e7035382f38703c2f387038343a35297038253c302d31382e7035322a7335293031)\n\nOctopuses have blue blood, three hearts and a doughnut-shaped brain. But these aren’t even the most unusual things about them!\n\nKnown for their otherworldly look and remarkable intelligence, octopuses continue to reveal astonishing qualities, abilities and behaviour.\n\n## 1\\. More than one brain\n\nIt’s a well-known fact that octopuses have eight arms. But did you know that each arm contains its own ‘mini brain’?\n\nJon Ablett, who cares for the cephalopod collection at the Natural History Museum, which includes octopuses, tells us more:\n\nThis arrangement enables octopuses to complete tasks with their arms more quickly and effectively.\n\nMoreover, while each arm is capable of acting independently – able to taste, touch and move without direction – the centralised brain is also able to exert top-down control.\n\nThis was proven experimentally in 2011 when researchers tested whether an octopus could learn to guide one of its arms through a maze to reach food. The maze was designed so that the arm would have to leave water – and so not be able to use its chemical sensors to find the food. Transparent walls enabled the octopus to see the food. Most of the octopuses were eventually successful at guiding their arm to the food – proving that the central brain, which processed the visual information, could control the arm.\n\nThanks to their nine brains, it seems that octopuses have the benefit of both localised and centralised control over their actions.\n\n## 2\\. Seriously clever\n\nScientists use the size of an animal’s brain relative to its body as a rough guide to its intelligence, as it gives an indication of how much an animal is ‘investing’ in its brain.\n\nIt’s not a perfect measure, as other factors such as the degree of folding in the brain also play a role. But smarter animals tend to have a higher brain-to-body ratio.\n\nAn octopus’s brain-to-body ratio is the largest of any invertebrate. It’s also larger than many vertebrates, although not mammals.\n\nOctopuses have about as many neurons as a dog – the common octopus, _Octopus vulgaris_ , has around 500 million. About two thirds are in its arms. The rest are in the doughnut-shaped brain, which is wrapped around the oesophagus and located in the octopus’s head.\n\nOctopuses have demonstrated intelligence in a number of ways, says Jon. “In experiments they’ve solved mazes and completed tricky tasks to get food rewards. They’re also adept at getting themselves in and out of containers.”\n\nThis octopus squeezed itself into a broken bottle on the seafloor. © Richard Whitcombe/ Shutterstock\n\nThere are also intriguing anecdotes about octopuses’ abilities and mischievous behaviour.\n\n“I remember reading one about a lab where all the fish were going missing from their tank,” says Jon. “The staff set up a little video camera and it turned out that one of the octopuses was getting out of its tank, going to the other tank, opening it, eating the fish, closing the lid, going back to its own tank and hiding the evidence.”\n\nThere is footage of similar sneaky behaviour and ingenious problem-solving happening in the wild. For example, a BBC video shows a giant Pacific octopus, _Enteroctopus dofleini_ , poaching crabs from a fisherman’s pot.\n\n[Watch the octopus footage on BBC Earth’s YouTube channel](https://www.youtube.com/watch?v=abRPaXgJGQg).\n\nMeanwhile, the sneaky larger Pacific striped octopus uses scare tactics when hunting for its dinner.\n\nIt creeps up to its prey, such as a shrimp, and taps it on its shoulder. More often than not, the startled shrimp leaps away from the arm that touched it and darts into the clutches of the waiting octopus. It’s handy having seven additional arms.\n\n## 3\\. They can use tools\n\nTool use is relatively rare in the animal kingdom and is something we tend to associate with apes, monkeys, dolphins and some birds – particularly crows and parrots. It’s a good indicator of the ability to learn. Among invertebrates, only octopuses and a few insects are known to use tools.\n\nJon elaborates, “as well as solving tasks using tools to get food rewards in the lab, in the wild octopuses have been shown to build little dens, and to use stones to create sort of shields to protect the entrance”.\n\nThey pile up anything they can find – rocks, broken shells, even broken glass and bottle caps.\n\nSmall individuals of the common blanket octopus, _Tremoctopus violaceus,_ carry tentacles from the Portuguese man o’ war as a weapon. These tentacles carry a potent and painful venom – the common blanket octopus is immune but can inflict their effects on unwitting predators and prey.\n\nThe most impressive and convincing example of tool use by octopuses came in 2009, when a few [veined octopus, _Amphioctopus marginatus_ , individuals were observed collecting discarded coconut shells](https://www.sciencedirect.com/science/article/pii/S0960982209019149?via%3Dihub) in Indonesia.\n\nThe veined octopus, _Amphioctopus marginatus_ , has found an innovative use for both coconut and sea shells and collects them from the seafloor. © SergeUWPhoto/ Shutterstock\n\nAfter they dug up the shells, the octopuses gave them a good clean with jets of water. They then carried them to a new location and assembled them as a shelter. Travelling with the shells underneath their body resulted in a slow and ungainly ‘stilt walk’ along the sea floor.\n\nThis makes the octopuses more vulnerable to predators, but it seems they’re willing to accept the short-term risk for future protection. The scientists who discovered the behaviour argue that this, and the fact the shells are carried around to be used when needed, is conclusive evidence of genuine tool use.\n\n[Watch this behaviour in action and find out more from the team involved on YouTube](https://www.youtube.com/watch?v=Bz1G49er0bo).\n\n## 4\\. Ability to recognise people (and pick on them!)  \n\nOctopuses have large optic lobes, areas of the brain dedicated to vision, so we know it’s important to their lifestyles. \n\nJon adds, “octopuses appear to be able to recognise individuals outside of their own species, including human faces. It’s not unique behaviour – some mammals and crows can do it too – but it is rather unusual.”\n\n[Scientific American](https://www.scientificamerican.com/article/the-mind-of-an-octopus/) reported a story from the University of Otago in New Zealand where a captive octopus apparently took a dislike to one of the staff. Every time the person passed the tank, the octopus squirted a jet of water at her.\n\nIf you catch the eye of an octopus, you’d better hope it likes you. © Damsea/ Shutterstock\n\nBiologists at the Seattle Aquarium designed an experiment to test the [recognition abilities of the giant Pacific octopus](https://www.tandfonline.com/doi/full/10.1080/10888705.2010.483892?scroll=top&needAccess=true).\n\nOver the course of two weeks, one person fed a group of octopuses regularly, while another person touched them with a bristly stick. At the end of the experiment, the octopuses behaved differently to the ‘nice’ keeper and the ‘mean’ one, which confirmed the octopuses could distinguish the two individuals, despite the fact they wore identical uniforms.\n\n## 5\\. Unusual sexy time\n\nMany male octopuses lack external genitalia and instead use a modified arm, called a hectocotylus, to pass their sperm to the female.\n\nJon says “the appearance of the hectocotylus varies between species. Some look like a syringe, others more like a spoon and one – belonging to the North Atlantic octopus, _Bathypolypus arcticus_ – even looks like a little toast rack.”\n\nEach species has a slightly different method, adds Jon.\n\n“In [**argonauts**](https://www.nhm.ac.uk/discover/argonauts-worlds-weirdest-octopuses.html), also called paper nautiluses, the male octopus goes one step further in his attempts to reproduce – leaving his sexual appendage behind in the lady octopus when he jets away.”\n\nOnce a male has handed over his sperm, it’s game over. Most male octopuses die within a couple of months of mating.\n\n## 6\\. Self-sacrificing mums\n\nLife’s not easy for octopus mums either. They literally give their lives for their young ones.\n\n“In some octopus species, the females show parental care,” says Jon. “They guard their eggs, protecting them from predators, and waft water over them to oxygenate them.”\n\nThey keep up this behaviour until the eggs hatch. In shallow-water species it can last up to about three months, but some octopuses take their level of care to the extreme.\n\nAn octopus guarding its eggs. © scubadesign/ Shutterstock\n\nThe title of ‘mum of the year’ goes to _Graneledone boreopacifica_. This deep-sea octopus was [observed brooding her clutch of eggs for 53 months](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0103437) – that’s nearly four and a half years. It’s the longest brooding period known for any animal.\n\nDuring 18 dives to the depths of Monterey Canyon, California, the researchers never saw the female leave her eggs or eat anything, not even crabs or shrimp that wandered close by. Instead, the researchers saw the female fading away – she lost weight, her skin became loose and pale, and her eyes grew cloudy.\n\nHer astounding self-sacrifice gave her offspring time to reach an advanced stage of development. _G. boreopacifica_ hatchlings are like miniature adults by the time they emerge, giving them a good chance of survival.\n\nOn the researchers’ final visit, the eggs had hatched and the female was gone.\n\n[Find out more from the Monterey Bay Aquarium Research Institute on YouTube](https://www.youtube.com/watch?v=lFCQltYMLQk).\n\nAlthough no other octopus is known to look after their eggs for such a long time, virtually all share the same fate: inevitable death.\n\nSince male octopuses don’t survive for long after sex, the sea is full of little orphan octopuses.\n\nQuick quiz\n\n## What percentage of seawater is salt?\n\n3.5%12%\n\n## 7. Cunning disguises and escape techniques\n\nOctopuses are probably the world’s most skilled camouflage artists.\n\nJon explains, “thousands of specialised cells under their skin, called chromatophores, help them to change colour in an instant. In addition, they have papilli – tiny areas of skin that they can expand or retract to rapidly change the texture of their skin to match their surroundings.”\n\nOctopuses can change both their colour and skin texture. © Paul Vinten/ Shutterstock\n\nInspired by the phenomenal camouflage ability of octopuses and cuttlefishes, researchers have recently [engineered a synthetic skin](http://science.sciencemag.org/content/358/6360/210) that mimics the function and design of the papillae, creating a stretchy material that can be programmed to transform into 3D shapes.\n\nPerhaps the most impressive of all self-concealers is the mimic octopus, _Thaumoctopus mimicus_.\n\nDiscovered in 1998 in Indonesia, this octopus doesn’t copy surrounding rocks, reefs and seaweed like other octopuses, but instead disguises itself as other animals that predators tend to avoid.\n\nBy contorting its body, arranging its arms and modifying its behaviour, it can seemingly turn into a wide variety of venomous animals. Lionfish, banded sole and [**sea snakes**](https://www.nhm.ac.uk/discover/sea-snakes-sea-kraits-and-their-aquatic-adaptations.html) are among those it impersonates.\n\nThe mimic octopus, _Thaumoctopus mimicus_ , impersonates lots of different animals to keep itself safe from predators. © Luke Suen/ Shutterstock\n\nJon says “plenty of other creatures pretend to be other animals, but the mimic octopus is the only one that we know about that can impersonate so many different species. It’s a true shape-shifter.”\n\n“While camouflaging yourself as a rock means you need to stay still while the predator is around, disguising yourself as an animal means you can also move out of the danger zone.”\n\nMimic octopuses can flee from danger while disguised. This octopus is imitating a venomous banded sole. It even copies the swimming style of the flatfish. © Ethan Daniels/ Shutterstock\n\nScientists even suspect that the mimic octopus selects a creature to impersonate based on what’s living in the area, choosing one that represents the greatest threat to its potential predator. When a mimic octopus was attacked by territorial damselfishes, for example, it disguised itself as one of their predators, a banded sea snake.\n\nIn 2005, researchers reported another cunning solution for moving away from danger without breaking the camouflage illusion: walking away on two legs (well, arms).\n\nIn the first example of bipedal locomotion under the sea, two tropical octopuses were found to lift up six of their arms and walk backwards on the other two.\n\nThis allowed the algae octopus, _Abdopus aculeatus_ , to keep its other arms extended and maintain its appearance of algae even while moving. Meanwhile, the veined octopus, _Amphioctopus marginatus_ , walked with six of its arms curled under its body, possibly to appear like a coconut rolling along the seafloor. Both were able to move faster than their usual many-armed crawl.\n\n[Take a look on YouTube at the unusual locomotion in a SciFri video featuring researcher Dr Christine Huffard](https://www.youtube.com/watch?v=23qzi88k3aM).\n\n## 8\\. Builder of cities\n\nWith very few known exceptions, octopuses are generally antisocial creatures.\n\nBut in 2012, scientists made a surprising discovery in Jervis Bay, Australia: the supposedly solitary gloomy octopus, _Octopus tetricus_ , builds underwater cities. Congregations of dens are formed from rock outcrops and discarded piles of shells from the clams and scallops the octopuses had feasted on.\n\nPopulation sizes certainly aren’t up to London standards, with only around 15 occupants living in Octopolis, as it was dubbed, and Octlantis – a second, nearby octopus commune studied in 2017. But they are far higher than scientists anticipated based on the loner reputation of _O. tetricus_.\n\nA gloomy octopus, _Octopus tetricus_ , hiding in a den. © S Rohrlach/ Shutterstock\n\nCity living has its advantages and drawbacks, as we all know. Frequent aggression, chases and even den evictions were observed among the octopuses living at Octlantis.\n\nThe researchers say they’re not sure what the benefits of living in a densely populated settlement are for these octopuses, but it may just be a case of necessity, with limited den spaces available in the otherwise flat and featureless area.\n\n## Finally, why do octopuses have blue blood?\n\nAre you still wondering why octopus blood is blue and what the three hearts do?\n\nWell, the blue blood is because the protein, haemocyanin, which carries oxygen around the octopus’s body, contains copper rather than iron like we have in our own haemoglobin.\n\nThe copper-based protein is more efficient at transporting oxygen molecules in cold and low-oxygen conditions, so is ideal for life in the ocean.\n\nIf the blood (called haemolymph in invertebrates) becomes deoxygenated – when the animal dies, for example – it loses its blue colour and turns clear instead.\n\nAn octopus’s three hearts have slightly different roles. One heart circulates blood around the body, while the other two pump it past the gills, to pick up oxygen.\n\n## Dive in\n\nExplore life underwater and read about the work of our marine scientists.\n\n[To the ocean](/discover/oceans.html)\n\n## What on Earth?\n\nJust how weird can the natural world be?\n\n[Explore the unusual](/discover/what-on-earth.html)\n\nHear more from Jon Ablett about octopus arms, personality and playing:\n\n## Discover more\n\n[What on Earth?Can you spot the hidden animals that use cunning camouflage?Take a look at these photos and see whether millions of years of evolution will outwit you.](/discover/can-you-spot-hidden-animals-cunning-camouflage.html)\n\n[CollectionsIn high spirits: meet Charles Darwin's favourite octopusBrimming with enthusiasm for the natural world, even Charles Darwin didn't always get it right.  \n](/discover/charles-darwins-octopus.html)\n\n[CollectionsGiant squid: from the deep sea to displayCurator Jon Ablett tells the tale of how an elusive monster from the deep came to be one of our popular attractions.](/discover/giant-squid.html)\n\n[OceansSeven sneaky survival strategies of reef animalsCoral reefs attract deadly predators. Find out how their inhabitants survive using everything from camouflage to chemical warfare.](/discover/seven-sneaky-survival-strategies-reef-animals.html)\n\n## Don't miss a thing\n\nReceive email updates about our news, science, exhibitions, events, products, services and fundraising activities. We may occasionally include third-party content from our corporate partners and other museums. We will not share your personal details with these third parties. You must be over the age of 13. [Privacy notice](https://www.nhm.ac.uk/about-us/privacy-notice.html).\n\n### Follow us on social media\n\n[](https://www.facebook.com/naturalhistorymuseum)[](https://twitter.com/NHM_London)[](https://www.youtube.com/user/naturalhistorymuseum)[](https://instagram.com/natural_history_museum)[](https://www.pinterest.com/nhmlondon)\n\n## Last chance to visit our Space exhibition!\n\nDon’t miss your opportunity to snap a selfie with a piece of Mars, touch a fragment of the Moon and lay your hands on a meteorite older than our planet!\n\n**Until Sunday 22 February 2026**\n\n[ Book your tickets to Space](/visit/exhibitions/space.html)\n\n## Last chance to visit our Space exhibition!\n\nDon’t miss your opportunity to snap a selfie with a piece of Mars, touch a fragment of the Moon and lay your hands on a meteorite older than our planet!\n\n**Until Sunday 22 February 2026**\n\n[ Book your tickets to Space](/visit/exhibitions/space.html)\n\n## Accept cookies?\n\nWe use [cookies](https://www.nhm.ac.uk/about-us/cookies-on-the-museums-website.html) to give you the best online experience. We use them to improve our website and content, and to tailor our digital advertising on third-party platforms. You can change your preferences at any time.\n\n[Manage my preferences](https://www.nhm.ac.uk/about-us/cookie-preferences.html)",
+    "length": 18958,
+    "format": "text",
+    "cached": true
+  }
+}

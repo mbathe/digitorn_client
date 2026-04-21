@@ -245,7 +245,7 @@ class _ToolsPanelState extends State<ToolsPanel> {
                   color: c.text)),
           const Spacer(),
           Consumer<ToolService>(
-            builder: (_, ts, __) => Text(
+            builder: (_, ts, _) => Text(
               ts.isLoading ? 'Loading…' : '${ts.categories.length} categories',
               style: GoogleFonts.inter(fontSize: 11, color: c.textMuted),
             ),

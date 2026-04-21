@@ -1,0 +1,35 @@
+app:
+  app_id: canvas-probe
+  name: canvas-probe
+  description: A minimal app to probe the canvas architecture
+
+execution:
+  mode: conversation
+  entry_agent: coordinator
+  greeting: "Hello! I'm the canvas probe coordinator."
+
+agents:
+  - id: coordinator
+    brain:
+      provider: openai
+      model: gpt-4o-mini
+    system_prompt: |
+      You are the coordinator agent.
+      You have access to filesystem and shell tools.
+
+modules:
+  filesystem:
+    config:
+      workspace: "."
+  
+  shell:
+    config: {}
+
+capabilities:
+  default_policy: auto
+  max_risk_level: medium
+  grant:
+    - module: filesystem
+      actions: [read, write]
+    - module: shell
+      actions: [bash]

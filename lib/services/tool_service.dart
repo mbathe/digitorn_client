@@ -128,6 +128,13 @@ class ToolService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Synchronous accessor for the cached tools of a category.
+  /// Returns an empty list when `loadCategory(appId, id)` hasn't run
+  /// yet for this category. UIs that render already-loaded data
+  /// (tools panel) use this instead of awaiting.
+  List<ToolRecord> categoryTools(String categoryId) =>
+      _categoryCache[categoryId] ?? const <ToolRecord>[];
+
   Future<List<ToolRecord>> loadCategory(String appId, String categoryId) async {
     if (_categoryCache.containsKey(categoryId)) return _categoryCache[categoryId]!;
 
@@ -240,5 +247,11 @@ class ToolService extends ChangeNotifier {
     _categoryCache = {};
     _lastAppId = null;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    super.dispose();
   }
 }

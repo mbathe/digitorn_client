@@ -1,0 +1,49 @@
+daemon OK at http://127.0.0.1:8000
+
+── /api/admin/{app_id}/* (scope=admin, expect 403/404 for non-admin user, confirming route exists) ──
+  [PASS] GET  /api/admin/digitorn-chat/approvals  (404)
+  [PASS] POST /api/admin/digitorn-chat/approve  (404)
+  [PASS] POST /api/admin/digitorn-chat/disable  (404)
+  [PASS] POST /api/admin/digitorn-chat/enable  (404)
+  [PASS] GET  /api/admin/digitorn-chat/mcp/pending-oauth  (404)
+  [PASS] POST /api/admin/digitorn-chat/mcp/srv/oauth-token  (404)
+  [PASS] DEL  /api/admin/digitorn-chat/mcp/srv/oauth-token  (404)
+  [PASS] GET  /api/admin/digitorn-chat/oauth/authorize  (404)
+  [PASS] GET  /api/admin/digitorn-chat/oauth/callback  (404)
+  [PASS] GET  /api/admin/digitorn-chat/quota  (404)
+  [PASS] PUT  /api/admin/digitorn-chat/quota  (404)
+  [PASS] DEL  /api/admin/digitorn-chat/quota  (404)
+  [PASS] GET  /api/admin/digitorn-chat/quota/user/u1  (404)
+  [PASS] PUT  /api/admin/digitorn-chat/quota/user/u1  (404)
+  [PASS] DEL  /api/admin/digitorn-chat/quota/user/u1  (404)
+  [PASS] POST /api/admin/digitorn-chat/reload  (404)
+  [PASS] GET  /api/admin/digitorn-chat/required-secrets  (404)
+  [PASS] GET  /api/admin/digitorn-chat/secrets  (404)
+  [PASS] PUT  /api/admin/digitorn-chat/secrets/KEY  (404)
+  [PASS] DEL  /api/admin/digitorn-chat/secrets/KEY  (404)
+
+── /api/apps/{app_id}/{quota,secrets,oauth,mcp} (owner-scope) ──
+  [PASS] GET  /api/apps/digitorn-chat/mcp/pending-oauth  (200)
+  [PASS] POST /api/apps/digitorn-chat/mcp/srv/oauth-token  (422)
+  [PASS] DEL  /api/apps/digitorn-chat/mcp/srv/oauth-token  (404)
+  [PASS] GET  /api/apps/digitorn-chat/oauth/authorize  (422)
+  [PASS] GET  /api/apps/digitorn-chat/oauth/callback  (422)
+  [PASS] GET  /api/apps/digitorn-chat/quota  (200)
+  [PASS] PUT  /api/apps/digitorn-chat/quota  (422)
+  [PASS] DEL  /api/apps/digitorn-chat/quota  (200)
+  [PASS] GET  /api/apps/digitorn-chat/quota/user/u1  (200)
+  [PASS] PUT  /api/apps/digitorn-chat/quota/user/u1  (422)
+  [PASS] DEL  /api/apps/digitorn-chat/quota/user/u1  (200)
+  [PASS] GET  /api/apps/digitorn-chat/secrets  (200)
+  [PASS] PUT  /api/apps/digitorn-chat/secrets/KEY  (422)
+  [PASS] DEL  /api/apps/digitorn-chat/secrets/KEY  (404)
+
+── preview_widgets (stream + uploaded-file URL) ──
+  [PASS] GET  /apps/{id}/widgets/data/{binding}/stream  (404)
+  [PASS] GET  /apps/{id}/widgets/upload/{u}/{s}/{id}/{fn}  (403)
+
+── sessions.py / workspace.py ──
+  [PASS] GET  /sessions/{sid}/images/{image_id}  (404)
+  [PASS] GET  /workspace/files/{path}/history  (200)
+
+=> 38/38 routes respond (route alive → client service generates the matching URL).

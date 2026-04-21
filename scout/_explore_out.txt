@@ -1,0 +1,88 @@
+daemon OK at http://127.0.0.1:8000
+
+══ A. fresh session → send → wait done → join ══
+  POST /messages  cid=fp-7d14c6b78704
+  turn completed: True
+  join ack: {"ok": true, "room": "session:explore-a-d2bb37d0", "latest_seq": 0}
+
+  ── A: full join after done (12 envs) ──
+       2  hook
+       1  connected 📸
+       1  user_message
+       1  message_started
+       1  stream_done
+       1  result
+       1  message_done
+       1  queue:snapshot 📸
+       1  active_ops:snapshot 📸
+       1  session:snapshot 📸
+       1  memory:snapshot 📸
+  snapshot arrival index (in arrival order):
+    [   0]  connected
+    [   8]  queue:snapshot
+    [   9]  active_ops:snapshot
+    [  10]  session:snapshot
+    [  11]  memory:snapshot
+  seq span: [1..9] count=7  gaps=2  dupes=0
+  distinct session_ids in stream: 1 
+  ephemeral-in-replay check: PASS (no ephemeral types in this window)
+  no tool events in this window
+  contract violations on durable events: 0
+
+══ B. join DURING the turn (mid-flight) ══
+  POST /messages  cid=fp-fecc99b7694a
+  join ack: {"ok": true, "room": "session:explore-b-c826480b", "latest_seq": 0}
+
+  ── B: join mid-turn (42 envs) ──
+      29  token ⚡
+       3  assistant_stream_snapshot ⚡
+       2  hook
+       1  connected 📸
+       1  user_message
+       1  message_started
+       1  queue:snapshot 📸
+       1  active_ops:snapshot 📸
+       1  session:snapshot 📸
+       1  memory:snapshot 📸
+       1  stream_done
+  snapshot arrival index (in arrival order):
+    [   0]  connected
+    [   5]  queue:snapshot
+    [   6]  active_ops:snapshot
+    [   7]  session:snapshot
+    [   8]  memory:snapshot
+  active_ops: count=2 turn=1  tool=0
+    op_id='fp-fecc99b7694a'              type=turn       state=running
+    op_id='_system'                      type=system     state=running
+  session:snapshot turn_running=True  message_count=2
+
+══ C. join with since=N (incremental replay) ══
+  baseline ended at seq=71 (12 durable events)
+  join ack: {"ok": true, "room": "session:explore-c-28bc0d79", "latest_seq": 0}
+
+  ── C: since=71 (12 envs) ──
+       2  hook
+       1  connected 📸
+       1  user_message
+       1  message_started
+       1  stream_done
+       1  result
+       1  message_done
+       1  queue:snapshot 📸
+       1  active_ops:snapshot 📸
+       1  session:snapshot 📸
+       1  memory:snapshot 📸
+  replay discipline: 0 events with seq <= 71  (should be 0)
+
+══ D. contract rigor on replay ══
+  ✓ every durable event carries the full contract (7 checked)
+
+  sample live envelope:
+{
+    "type": "user_message",
+    "kind": "session",
+    "seq": 1,
+    "ts": "2026-04-20T18:37:55.743075",
+    "session_id": "explore-d-f319a561"
+}
+    payload keys: ['client_message_id', 'content', 'correlation_id', 'event_id', 'images', 'op_id', 'op_state', 'op_type', 'pending', 'role', 'session_id']

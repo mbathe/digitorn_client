@@ -1,0 +1,59 @@
+
+== GET /api/apps/ws-validate-manual/ui-config ==
+  HTTP 200
+  top-level keys: ['app_id', 'preview_config', 'workspace', 'workspace_config']
+    workspace_config: keys=['auto_approve', 'render_mode', 'sync_to_disk']
+    preview_config: keys=[]
+    workspace: keys=[]
+  full payload:
+{
+  "app_id": "ws-validate-manual",
+  "workspace_config": {
+    "render_mode": "code",
+    "sync_to_disk": true,
+    "auto_approve": false
+  },
+  "preview_config": {},
+  "workspace": {}
+}
+
+== GET /api/apps/ws-validate-auto/ui-config ==
+  HTTP 200
+  top-level keys: ['app_id', 'preview_config', 'workspace', 'workspace_config']
+    workspace_config: keys=['auto_approve', 'render_mode', 'sync_to_disk']
+    preview_config: keys=[]
+    workspace: keys=[]
+  full payload:
+{
+  "app_id": "ws-validate-auto",
+  "workspace_config": {
+    "render_mode": "code",
+    "sync_to_disk": true,
+    "auto_approve": true
+  },
+  "preview_config": {},
+  "workspace": {}
+}
+
+== GET /api/apps/digitorn-builder/ui-config ==
+  HTTP 200
+  top-level keys: ['app_id', 'preview_config', 'workspace', 'workspace_config']
+    workspace_config: keys=['entry_file', 'render_mode', 'sync_to_disk', 'title']
+    preview_config: keys=[]
+    workspace: keys=['entry_file', 'render_mode', 'title']
+  full payload:
+{
+  "app_id": "digitorn-builder",
+  "workspace_config": {
+    "render_mode": "builder",
+    "entry_file": "app.yaml",
+    "title": "Digitorn App Builder",
+    "sync_to_disk": true
+  },
+  "preview_config": {},
+  "workspace": {
+    "render_mode": "builder",
+    "entry_file": "app.yaml",
+    "title": "Digitorn App Builder"
+  }
+}

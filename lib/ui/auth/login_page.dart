@@ -1,8 +1,17 @@
-import 'package:digitorn_client/theme/app_theme.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
-import '../../services/auth_service.dart';
 
+import '../../design/ds.dart';
+import '../../services/auth_service.dart';
+import '../../services/onboarding_service.dart';
+import '../../theme/app_theme.dart';
+import '../ds/ds.dart';
+
+enum _Mode { signIn, register }
+
+/// Premium login page — split hero on wide viewports, stacked on
+/// mobile. All visuals come from the DS components: aurora bg,
+/// brand mark, inputs, buttons. Authentication logic is unchanged.
 class LoginPage extends StatefulWidget {
   final VoidCallback onAuthenticated;
 
@@ -13,48 +22,48 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabs;
-  final _loginForm = GlobalKey<FormState>();
-  final _registerForm = GlobalKey<FormState>();
+    with TickerProviderStateMixin {
+  final _loginFormKey = GlobalKey<FormState>();
+  final _registerFormKey = GlobalKey<FormState>();
 
-  // Login fields
   final _loginUser = TextEditingController();
   final _loginPass = TextEditingController();
-
-  // Register fields
   final _regUser = TextEditingController();
-  final _regPass = TextEditingController();
   final _regEmail = TextEditingController();
-  final _regDisplay = TextEditingController();
+  final _regPass = TextEditingController();
+  final _urlCtrl = TextEditingController();
 
-  // Server URL
-  final _urlCtrl = TextEditingController(text: 'http://127.0.0.1:8000');
+  bool _hideLoginPass = true;
+  bool _hideRegPass = true;
+  bool _showAdvanced = false;
+  _Mode _mode = _Mode.signIn;
 
-  bool _obscurePass = true;
+  late final AnimationController _entry;
 
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 2, vsync: this);
     _urlCtrl.text = AuthService().baseUrl;
+    _entry = AnimationController(
+      vsync: this,
+      duration: DsDuration.hero,
+    )..forward();
   }
 
   @override
   void dispose() {
-    _tabs.dispose();
+    _entry.dispose();
     _loginUser.dispose();
     _loginPass.dispose();
     _regUser.dispose();
-    _regPass.dispose();
     _regEmail.dispose();
-    _regDisplay.dispose();
+    _regPass.dispose();
     _urlCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _doLogin() async {
-    if (!_loginForm.currentState!.validate()) return;
+    if (!_loginFormKey.currentState!.validate()) return;
     AuthService().baseUrl = _urlCtrl.text.trim();
     final ok = await AuthService().login(
       username: _loginUser.text.trim(),
@@ -64,236 +73,154 @@ class _LoginPageState extends State<LoginPage>
   }
 
   Future<void> _doRegister() async {
-    if (!_registerForm.currentState!.validate()) return;
+    if (!_registerFormKey.currentState!.validate()) return;
     AuthService().baseUrl = _urlCtrl.text.trim();
     final ok = await AuthService().register(
       username: _regUser.text.trim(),
       password: _regPass.text,
       email: _regEmail.text.trim().isEmpty ? null : _regEmail.text.trim(),
-      displayName:
-          _regDisplay.text.trim().isEmpty ? null : _regDisplay.text.trim(),
     );
-    if (ok && mounted) widget.onAuthenticated();
+    if (!mounted) return;
+    if (ok) {
+      await OnboardingService().resetAccount();
+      if (mounted) widget.onAuthenticated();
+    }
+  }
+
+  void _toggleMode() {
+    setState(
+        () => _mode = _mode == _Mode.signIn ? _Mode.register : _Mode.signIn);
   }
 
   @override
   Widget build(BuildContext context) {
+    final c = context.colors;
     return Scaffold(
-      backgroundColor: context.colors.bg,
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              // Logo
-              Container(
-                width: 48, height: 48,
-                decoration: BoxDecoration(
-                  color: context.colors.surfaceAlt,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: context.colors.borderHover),
-                ),
-                child: Icon(Icons.hub_outlined, color: context.colors.textMuted, size: 24),
-              ),
-              const SizedBox(height: 20),
-              Text('Digitorn Console',
-                  style: GoogleFonts.inter(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      color: context.colors.textBright)),
-              const SizedBox(height: 6),
-              Text('Connect to your Digitorn Bridge daemon',
-                  style: GoogleFonts.inter(
-                      fontSize: 13, color: context.colors.textMuted)),
-              const SizedBox(height: 32),
-
-              // Card
-              Container(
-                decoration: BoxDecoration(
-                  color: context.colors.surface,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: context.colors.border),
-                ),
-                child: Column(
+      backgroundColor: c.bg,
+      body: DsAuroraBackground(
+        child: SafeArea(
+          child: LayoutBuilder(
+            builder: (ctx, box) {
+              final wide = box.maxWidth >= 980;
+              final form = _FormPanel(
+                entry: _entry,
+                mode: _mode,
+                loginKey: _loginFormKey,
+                registerKey: _registerFormKey,
+                loginUser: _loginUser,
+                loginPass: _loginPass,
+                regUser: _regUser,
+                regEmail: _regEmail,
+                regPass: _regPass,
+                urlCtrl: _urlCtrl,
+                hideLoginPass: _hideLoginPass,
+                hideRegPass: _hideRegPass,
+                showAdvanced: _showAdvanced,
+                onToggleLoginPass: () =>
+                    setState(() => _hideLoginPass = !_hideLoginPass),
+                onToggleRegPass: () =>
+                    setState(() => _hideRegPass = !_hideRegPass),
+                onToggleAdvanced: () =>
+                    setState(() => _showAdvanced = !_showAdvanced),
+                onSignIn: _doLogin,
+                onRegister: _doRegister,
+                onToggleMode: _toggleMode,
+                onGuest: widget.onAuthenticated,
+              );
+              if (wide) {
+                return Row(
                   children: [
-                    // Tabs
-                    Container(
-                      decoration: BoxDecoration(
-                        border: Border(bottom: BorderSide(color: context.colors.border)),
-                      ),
-                      child: TabBar(
-                        controller: _tabs,
-                        labelStyle: GoogleFonts.inter(
-                            fontSize: 13, fontWeight: FontWeight.w600),
-                        unselectedLabelStyle:
-                            GoogleFonts.inter(fontSize: 13),
-                        labelColor: context.colors.textBright,
-                        unselectedLabelColor: context.colors.textMuted,
-                        indicatorColor: context.colors.text,
-                        indicatorWeight: 1.5,
-                        dividerColor: Colors.transparent,
-                        tabs: const [
-                          Tab(text: 'Sign in'),
-                          Tab(text: 'Register'),
-                        ],
-                      ),
+                    Expanded(
+                      flex: 6,
+                      child: _HeroPanel(entry: _entry),
                     ),
-
-                    Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        children: [
-                          // Server URL always visible
-                          _DarkField(
-                            controller: _urlCtrl,
-                            label: 'Daemon URL',
-                            hint: 'http://127.0.0.1:8000',
-                            prefixIcon: Icons.dns_outlined,
-                          ),
-                          const SizedBox(height: 16),
-
-                          // Tabs content
-                          SizedBox(
-                            height: 220,
-                            child: TabBarView(
-                              controller: _tabs,
-                              children: [
-                                _buildLoginForm(),
-                                _buildRegisterForm(),
-                              ],
-                            ),
-                          ),
-
-                          // Error message
-                          ListenableBuilder(
-                            listenable: AuthService(),
-                            builder: (_, __) {
-                              final err = AuthService().lastError;
-                              if (err == null) return const SizedBox.shrink();
-                              return Container(
-                                margin: const EdgeInsets.only(top: 12),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: context.colors.surfaceAlt,
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                      color: context.colors.red),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(Icons.error_outline,
-                                        color: context.colors.red, size: 14),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Text(err,
-                                          style: GoogleFonts.inter(
-                                              fontSize: 12,
-                                              color: context.colors.red)),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-                      ),
+                    Expanded(
+                      flex: 5,
+                      child: Center(child: form),
                     ),
                   ],
+                );
+              }
+              return SingleChildScrollView(
+                child: Column(
+                  children: [
+                    _CompactBrand(entry: _entry),
+                    form,
+                    SizedBox(height: DsSpacing.x7),
+                  ],
                 ),
-              ),
-
-              const SizedBox(height: 24),
-              _GuestButton(onTap: widget.onAuthenticated),
-            ],
+              );
+            },
           ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildLoginForm() {
-    return Form(
-      key: _loginForm,
-      child: Column(
-        children: [
-          _DarkField(
-            controller: _loginUser,
-            label: 'Username',
-            hint: 'your-username',
-            prefixIcon: Icons.person_outline,
-            validator: (v) => v!.isEmpty ? 'Required' : null,
-          ),
-          const SizedBox(height: 12),
-          _DarkField(
-            controller: _loginPass,
-            label: 'Password',
-            hint: '••••••••••••',
-            prefixIcon: Icons.lock_outline,
-            obscureText: _obscurePass,
-            suffixIcon: IconButton(
-              icon: Icon(
-                _obscurePass ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-                size: 16, color: context.colors.textMuted,
-              ),
-              onPressed: () => setState(() => _obscurePass = !_obscurePass),
-            ),
-            validator: (v) => v!.isEmpty ? 'Required' : null,
-          ),
-          const SizedBox(height: 16),
-          ListenableBuilder(
-            listenable: AuthService(),
-            builder: (_, __) => _PrimaryButton(
-              label: 'Sign in',
-              isLoading: AuthService().isLoading,
-              onPressed: _doLogin,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+class _HeroPanel extends StatelessWidget {
+  final AnimationController entry;
+  const _HeroPanel({required this.entry});
 
-  Widget _buildRegisterForm() {
-    return Form(
-      key: _registerForm,
-      child: SingleChildScrollView(
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return AnimatedBuilder(
+      animation: entry,
+      builder: (_, child) {
+        final t = DsCurve.decelSoft.transform(entry.value);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, (1 - t) * 14),
+            child: child,
+          ),
+        );
+      },
+      child: Padding(
+        padding: EdgeInsets.all(DsSpacing.x10),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _DarkField(
-              controller: _regUser,
-              label: 'Username',
-              hint: 'your-username',
-              prefixIcon: Icons.person_outline,
-              validator: (v) =>
-                  v!.length < 3 ? 'Min. 3 characters' : null,
+            Row(
+              children: [
+                const DsBrandMark(size: 36),
+                SizedBox(width: DsSpacing.x3),
+                Text('Digitorn', style: DsType.h2(color: c.textBright)),
+              ],
             ),
-            const SizedBox(height: 10),
-            _DarkField(
-              controller: _regPass,
-              label: 'Password',
-              hint: '••••••••••••',
-              prefixIcon: Icons.lock_outline,
-              obscureText: true,
-              validator: (v) =>
-                  v!.length < 12 ? 'Min. 12 characters' : null,
-            ),
-            const SizedBox(height: 10),
-            _DarkField(
-              controller: _regEmail,
-              label: 'Email (optional)',
-              hint: 'you@example.com',
-              prefixIcon: Icons.mail_outline,
-            ),
-            const SizedBox(height: 12),
-            ListenableBuilder(
-              listenable: AuthService(),
-              builder: (_, __) => _PrimaryButton(
-                label: 'Create account',
-                isLoading: AuthService().isLoading,
-                onPressed: _doRegister,
+            const Spacer(),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Text(
+                'auth.welcome_title_hero'.tr(),
+                style: DsType.display(size: 52, color: c.textBright),
               ),
+            ),
+            SizedBox(height: DsSpacing.x5),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: Text(
+                'auth.welcome_subtitle_hero'.tr(),
+                style: DsType.body(color: c.textMuted)
+                    .copyWith(fontSize: 15, height: 1.6),
+              ),
+            ),
+            const Spacer(),
+            Wrap(
+              spacing: DsSpacing.x3,
+              runSpacing: DsSpacing.x3,
+              children: [
+                _FeaturePill(
+                    icon: Icons.storefront_outlined,
+                    label: 'auth.feat_hub'.tr()),
+                _FeaturePill(
+                    icon: Icons.auto_fix_high_outlined,
+                    label: 'auth.feat_builder'.tr()),
+                _FeaturePill(
+                    icon: Icons.shield_outlined,
+                    label: 'auth.feat_self_hosted_short'.tr()),
+              ],
             ),
           ],
         ),
@@ -302,149 +229,530 @@ class _LoginPageState extends State<LoginPage>
   }
 }
 
-class _GuestButton extends StatefulWidget {
-  final VoidCallback onTap;
-  const _GuestButton({required this.onTap});
-
-  @override
-  State<_GuestButton> createState() => _GuestButtonState();
-}
-
-class _GuestButtonState extends State<_GuestButton> {
-  bool _h = false;
+class _FeaturePill extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _FeaturePill({required this.icon, required this.label});
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _h = true),
-      onExit: (_) => setState(() => _h = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: Text(
-          'Continue without account',
-          style: GoogleFonts.inter(
-            fontSize: 13,
-            color: _h ? context.colors.textMuted : context.colors.textMuted,
-            decoration: TextDecoration.underline,
-            decorationColor: _h ? context.colors.textMuted : context.colors.textMuted,
+    final c = context.colors;
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: DsSpacing.x4,
+        vertical: DsSpacing.x3,
+      ),
+      decoration: BoxDecoration(
+        color: c.surface.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(DsRadius.pill),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: c.accentPrimary),
+          SizedBox(width: DsSpacing.x3),
+          Text(label, style: DsType.caption(color: c.text)),
+        ],
+      ),
+    );
+  }
+}
+
+class _CompactBrand extends StatelessWidget {
+  final AnimationController entry;
+  const _CompactBrand({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return AnimatedBuilder(
+      animation: entry,
+      builder: (_, child) {
+        final t = DsCurve.decelSoft.transform(entry.value);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, (1 - t) * 10),
+            child: child,
           ),
+        );
+      },
+      child: Padding(
+        padding: EdgeInsets.only(top: DsSpacing.x8, bottom: DsSpacing.x5),
+        child: Column(
+          children: [
+            const DsBrandMark(size: 52),
+            SizedBox(height: DsSpacing.x4),
+            Text('Digitorn', style: DsType.h1(color: c.textBright)),
+          ],
         ),
       ),
     );
   }
 }
 
-class _DarkField extends StatelessWidget {
-  final TextEditingController controller;
-  final String label;
-  final String hint;
-  final IconData prefixIcon;
-  final bool obscureText;
-  final Widget? suffixIcon;
-  final String? Function(String?)? validator;
+class _FormPanel extends StatelessWidget {
+  final AnimationController entry;
+  final _Mode mode;
+  final GlobalKey<FormState> loginKey;
+  final GlobalKey<FormState> registerKey;
+  final TextEditingController loginUser;
+  final TextEditingController loginPass;
+  final TextEditingController regUser;
+  final TextEditingController regEmail;
+  final TextEditingController regPass;
+  final TextEditingController urlCtrl;
+  final bool hideLoginPass;
+  final bool hideRegPass;
+  final bool showAdvanced;
+  final VoidCallback onToggleLoginPass;
+  final VoidCallback onToggleRegPass;
+  final VoidCallback onToggleAdvanced;
+  final Future<void> Function() onSignIn;
+  final Future<void> Function() onRegister;
+  final VoidCallback onToggleMode;
+  final VoidCallback onGuest;
 
-  const _DarkField({
-    required this.controller,
-    required this.label,
-    required this.hint,
-    required this.prefixIcon,
-    this.obscureText = false,
-    this.suffixIcon,
-    this.validator,
+  const _FormPanel({
+    required this.entry,
+    required this.mode,
+    required this.loginKey,
+    required this.registerKey,
+    required this.loginUser,
+    required this.loginPass,
+    required this.regUser,
+    required this.regEmail,
+    required this.regPass,
+    required this.urlCtrl,
+    required this.hideLoginPass,
+    required this.hideRegPass,
+    required this.showAdvanced,
+    required this.onToggleLoginPass,
+    required this.onToggleRegPass,
+    required this.onToggleAdvanced,
+    required this.onSignIn,
+    required this.onRegister,
+    required this.onToggleMode,
+    required this.onGuest,
   });
 
   @override
   Widget build(BuildContext context) {
-    return TextFormField(
-      controller: controller,
-      obscureText: obscureText,
-      validator: validator,
-      style: GoogleFonts.inter(fontSize: 13, color: context.colors.textBright),
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        labelStyle: GoogleFonts.inter(fontSize: 12, color: context.colors.textMuted),
-        hintStyle: GoogleFonts.inter(fontSize: 13, color: context.colors.borderHover),
-        prefixIcon: Icon(prefixIcon, size: 16, color: context.colors.textMuted),
-        suffixIcon: suffixIcon,
-        filled: true,
-        fillColor: context.colors.bg,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: context.colors.borderHover),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: context.colors.borderHover),
-        ),
-        errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: context.colors.red),
-        ),
-        focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: context.colors.red),
-        ),
-        errorStyle: GoogleFonts.inter(fontSize: 11, color: context.colors.red),
-      ),
-    );
-  }
-}
-
-class _PrimaryButton extends StatefulWidget {
-  final String label;
-  final bool isLoading;
-  final VoidCallback onPressed;
-
-  const _PrimaryButton({
-    required this.label,
-    required this.isLoading,
-    required this.onPressed,
-  });
-
-  @override
-  State<_PrimaryButton> createState() => _PrimaryButtonState();
-}
-
-class _PrimaryButtonState extends State<_PrimaryButton> {
-  bool _h = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _h = true),
-      onExit: (_) => setState(() => _h = false),
-      child: GestureDetector(
-        onTap: widget.isLoading ? null : widget.onPressed,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          width: double.infinity,
-          height: 40,
-          decoration: BoxDecoration(
-            color: _h ? context.colors.borderHover : context.colors.border,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: context.colors.borderHover),
+    final c = context.colors;
+    final isSignIn = mode == _Mode.signIn;
+    return AnimatedBuilder(
+      animation: entry,
+      builder: (_, child) {
+        final t = DsCurve.decelSoft.transform(entry.value);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, (1 - t) * 16),
+            child: child,
           ),
-          child: Center(
-            child: widget.isLoading
-                ? SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 1.5, color: context.colors.textMuted),
-                  )
-                : Text(
-                    widget.label,
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: context.colors.textBright,
+        );
+      },
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: DsSpacing.x6,
+            vertical: DsSpacing.x7,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                isSignIn
+                    ? 'auth.welcome_back'.tr()
+                    : 'auth.create_your_account'.tr(),
+                style: DsType.display2(
+                    size: 30, color: c.textBright),
+              ),
+              SizedBox(height: DsSpacing.x3),
+              Text(
+                isSignIn
+                    ? 'auth.sign_in_to_continue'.tr()
+                    : 'auth.set_up_account'.tr(),
+                style: DsType.body(color: c.textMuted),
+              ),
+              SizedBox(height: DsSpacing.x8),
+              AnimatedSwitcher(
+                duration: DsDuration.base,
+                switchInCurve: DsCurve.decelSoft,
+                switchOutCurve: DsCurve.accelSoft,
+                transitionBuilder: (child, anim) {
+                  return FadeTransition(
+                    opacity: anim,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0, 0.03),
+                        end: Offset.zero,
+                      ).animate(anim),
+                      child: child,
                     ),
+                  );
+                },
+                child: isSignIn
+                    ? _SignInForm(
+                        key: const ValueKey('signIn'),
+                        formKey: loginKey,
+                        user: loginUser,
+                        pass: loginPass,
+                        hidePass: hideLoginPass,
+                        onToggleHide: onToggleLoginPass,
+                        onSubmit: onSignIn,
+                      )
+                    : _RegisterForm(
+                        key: const ValueKey('register'),
+                        formKey: registerKey,
+                        user: regUser,
+                        email: regEmail,
+                        pass: regPass,
+                        hidePass: hideRegPass,
+                        onToggleHide: onToggleRegPass,
+                        onSubmit: onRegister,
+                      ),
+              ),
+              SizedBox(height: DsSpacing.x4),
+              const _ErrorBanner(),
+              SizedBox(height: DsSpacing.x5),
+              _Advanced(
+                open: showAdvanced,
+                urlCtrl: urlCtrl,
+                onToggle: onToggleAdvanced,
+              ),
+              SizedBox(height: DsSpacing.x7),
+              _Separator(),
+              SizedBox(height: DsSpacing.x4),
+              DsButton(
+                label: 'auth.continue_without_account'.tr(),
+                onPressed: onGuest,
+                variant: DsButtonVariant.secondary,
+                expand: true,
+              ),
+              SizedBox(height: DsSpacing.x7),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    isSignIn
+                        ? 'auth.new_to_digitorn'.tr()
+                        : 'auth.already_have_account'.tr(),
+                    style: DsType.caption(color: c.textMuted),
                   ),
+                  SizedBox(width: DsSpacing.x2),
+                  DsButton(
+                    label: isSignIn
+                        ? 'auth.create_account'.tr()
+                        : 'auth.sign_in'.tr(),
+                    onPressed: onToggleMode,
+                    variant: DsButtonVariant.tertiary,
+                    size: DsButtonSize.sm,
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       ),
+    );
+  }
+}
+
+class _SignInForm extends StatelessWidget {
+  final GlobalKey<FormState> formKey;
+  final TextEditingController user;
+  final TextEditingController pass;
+  final bool hidePass;
+  final VoidCallback onToggleHide;
+  final Future<void> Function() onSubmit;
+
+  const _SignInForm({
+    super.key,
+    required this.formKey,
+    required this.user,
+    required this.pass,
+    required this.hidePass,
+    required this.onToggleHide,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Form(
+      key: formKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DsInput(
+            controller: user,
+            label: 'auth.username'.tr(),
+            leadingIcon: Icons.person_outline,
+            autofillHints: const [AutofillHints.username],
+            textInputAction: TextInputAction.next,
+            validator: (v) => (v == null || v.trim().isEmpty)
+                ? 'auth.username_required'.tr()
+                : null,
+          ),
+          SizedBox(height: DsSpacing.x4),
+          DsInput(
+            controller: pass,
+            label: 'auth.password'.tr(),
+            leadingIcon: Icons.lock_outline,
+            obscureText: hidePass,
+            autofillHints: const [AutofillHints.password],
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => onSubmit(),
+            trailing: DsInputAction(
+              icon: hidePass
+                  ? Icons.visibility_off_outlined
+                  : Icons.visibility_outlined,
+              onTap: onToggleHide,
+              tooltip: hidePass
+                  ? 'auth.show_password'.tr()
+                  : 'auth.hide_password'.tr(),
+            ),
+            validator: (v) => (v == null || v.isEmpty)
+                ? 'auth.password_required'.tr()
+                : null,
+          ),
+          SizedBox(height: DsSpacing.x5),
+          _LoadingAwareButton(
+            label: 'auth.sign_in'.tr(),
+            onPressed: onSubmit,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RegisterForm extends StatelessWidget {
+  final GlobalKey<FormState> formKey;
+  final TextEditingController user;
+  final TextEditingController email;
+  final TextEditingController pass;
+  final bool hidePass;
+  final VoidCallback onToggleHide;
+  final Future<void> Function() onSubmit;
+
+  const _RegisterForm({
+    super.key,
+    required this.formKey,
+    required this.user,
+    required this.email,
+    required this.pass,
+    required this.hidePass,
+    required this.onToggleHide,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Form(
+      key: formKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DsInput(
+            controller: user,
+            label: 'auth.username'.tr(),
+            leadingIcon: Icons.person_outline,
+            autofillHints: const [AutofillHints.newUsername],
+            textInputAction: TextInputAction.next,
+            validator: (v) => (v == null || v.trim().length < 3)
+                ? 'auth.min_3_chars'.tr()
+                : null,
+          ),
+          SizedBox(height: DsSpacing.x4),
+          DsInput(
+            controller: email,
+            label: 'auth.email_optional'.tr(),
+            leadingIcon: Icons.mail_outline,
+            keyboardType: TextInputType.emailAddress,
+            autofillHints: const [AutofillHints.email],
+            textInputAction: TextInputAction.next,
+          ),
+          SizedBox(height: DsSpacing.x4),
+          DsInput(
+            controller: pass,
+            label: 'auth.password'.tr(),
+            helper: 'auth.password_helper'.tr(),
+            leadingIcon: Icons.lock_outline,
+            obscureText: hidePass,
+            autofillHints: const [AutofillHints.newPassword],
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => onSubmit(),
+            trailing: DsInputAction(
+              icon: hidePass
+                  ? Icons.visibility_off_outlined
+                  : Icons.visibility_outlined,
+              onTap: onToggleHide,
+            ),
+            validator: (v) => (v == null || v.length < 12)
+                ? 'auth.min_12_chars'.tr()
+                : null,
+          ),
+          SizedBox(height: DsSpacing.x5),
+          _LoadingAwareButton(
+            label: 'auth.create_account'.tr(),
+            onPressed: onSubmit,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LoadingAwareButton extends StatelessWidget {
+  final String label;
+  final Future<void> Function() onPressed;
+  const _LoadingAwareButton({required this.label, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: AuthService(),
+      builder: (_, _) {
+        final loading = AuthService().isLoading;
+        return DsButton(
+          label: label,
+          onPressed: loading ? null : onPressed,
+          loading: loading,
+          expand: true,
+          size: DsButtonSize.lg,
+        );
+      },
+    );
+  }
+}
+
+class _Advanced extends StatelessWidget {
+  final bool open;
+  final TextEditingController urlCtrl;
+  final VoidCallback onToggle;
+  const _Advanced({
+    required this.open,
+    required this.urlCtrl,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onToggle,
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: DsSpacing.x2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    open
+                        ? Icons.keyboard_arrow_down
+                        : Icons.keyboard_arrow_right,
+                    size: 14,
+                    color: c.textMuted,
+                  ),
+                  SizedBox(width: DsSpacing.x1),
+                  Text('common.advanced'.tr(),
+                      style: DsType.caption(color: c.textMuted)),
+                ],
+              ),
+            ),
+          ),
+        ),
+        AnimatedSize(
+          duration: DsDuration.base,
+          curve: DsCurve.decelSoft,
+          child: open
+              ? Padding(
+                  padding: EdgeInsets.only(top: DsSpacing.x3),
+                  child: DsInput(
+                    controller: urlCtrl,
+                    label: 'auth.bridge_url'.tr(),
+                    leadingIcon: Icons.dns_outlined,
+                    keyboardType: TextInputType.url,
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+      ],
+    );
+  }
+}
+
+class _Separator extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Row(
+      children: [
+        Expanded(child: Container(height: 1, color: c.border)),
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: DsSpacing.x4),
+          child: Text('common.or'.tr(), style: DsType.micro(color: c.textDim)),
+        ),
+        Expanded(child: Container(height: 1, color: c.border)),
+      ],
+    );
+  }
+}
+
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return ListenableBuilder(
+      listenable: AuthService(),
+      builder: (_, _) {
+        final err = AuthService().lastError;
+        return AnimatedSize(
+          duration: DsDuration.base,
+          curve: DsCurve.decelSoft,
+          alignment: Alignment.topLeft,
+          child: err == null || err.isEmpty
+              ? const SizedBox(width: double.infinity)
+              : Container(
+                  width: double.infinity,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: DsSpacing.x4,
+                    vertical: DsSpacing.x3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: c.red.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(DsRadius.input),
+                    border:
+                        Border.all(color: c.red.withValues(alpha: 0.4)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.error_outline, size: 14, color: c.red),
+                      SizedBox(width: DsSpacing.x3),
+                      Expanded(
+                        child: Text(
+                          err,
+                          style: DsType.caption(color: c.red)
+                              .copyWith(height: 1.45),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+        );
+      },
     );
   }
 }

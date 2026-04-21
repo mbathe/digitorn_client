@@ -1,0 +1,68 @@
+
+== PART A  MANUAL mode ==
+  session=3f03e48a-bbd8-4ab7-b0d3-b5cf1687ec7e  ws=C:\Users\ASUS\AppData\Local\Temp\ws-val-c5f7332d
+
+-- GET /ui-config --
+  [PASS] ui-config HTTP 200  (got 200)
+  [PASS] workspace_config.auto_approve is False  (got False)
+  [PASS] workspace_config does not leak prompts / secrets  
+  [FAIL] workspace block present with render_mode  
+
+-- PUT /files/hello.txt  (initial) --
+  [PASS] PUT writeback 200  (got 200)
+
+-- GET /files/hello.txt?include_baseline=true --
+  [PASS] validation == pending (manual mode first write)  (got 'pending')
+  [PASS] insertions_pending == 3 (3 new lines vs empty baseline)  (got 3)
+  [PASS] deletions_pending == 0  
+  [PASS] source echoed back as 'user'  (got 'user')
+
+-- POST /files/approve --
+  [PASS] approve HTTP 200  (got 200)
+  [PASS] approve response validation=approved  
+  [PASS] after approve: pending counts == 0  (ins=0 del=0)
+
+-- PUT (second revision: 1 replaced line) --
+  [PASS] after edit: validation=pending  
+  [PASS] delta-vs-baseline: ins==1 del==1 (BUG #1 fix)  (ins=1 del=1)
+  [PASS] unified_diff_pending present  
+  [PASS] unified_diff lines \n terminated (BUG #2 fix)  (len=90, has-sep=False)
+
+-- POST /files/reject --
+  [PASS] reject HTTP 200  (got 200)
+  [PASS] reverted=baseline (had approved baseline)  (got 'baseline')
+  [PASS] after reject: content back to baseline  
+
+-- POST /files/approve-hunks --
+  parsed 1 hunks from diff:
+    hash=f613e2019382  @@ -1,3 +1,4 @@
+  [PASS] multiple hunks detected  (got 1)
+  [FAIL] approve-hunks HTTP 200  (got 400 {"success":false,"detail":{"error":"no hunks matched selection ['f613e2019382']","data":{"available_hunks":[{"index":0,"hash":"2ec6cce5cc4e"}]}},"status_code":4)
+
+-- POST /files/reject-hunks --
+  [FAIL] reject-hunks HTTP 200  (got 400 {"success":false,"detail":{"error":"no hunks matched selection ['f613e2019382']","data":{"available_hunks":[{"index":0,"hash":"2ec6cce5cc4e"}]}},"status_code":4)
+
+-- GET /files/hello.txt/history --
+  [PASS] history HTTP 200  (got 200 )
+  [PASS] history has revisions  (got 2)
+  [PASS] revision has approved_by field  
+  [PASS] revision has tokens_delta fields  
+
+-- POST /workspace/commit --
+  [PASS] commit HTTP 200  (got 200 )
+  [PASS] commit returns commit_sha  
+  [PASS] commit returns files_committed list  
+
+== PART B  AUTO_APPROVE mode ==
+  session=b1f8f69d-22a0-4048-b307-b4a509010a59  ws=C:\Users\ASUS\AppData\Local\Temp\ws-val-931f34e2
+  [PASS] ui-config.workspace_config.auto_approve == True  (got True)
+  [PASS] auto_approve: validation=approved on first write  (got 'approved')
+  [PASS] auto_approve: no pending counts  
+
+== RESULT ==
+  29 PASS   3 FAIL
+
+  Failing checks:
+    - workspace block present with render_mode
+    - approve-hunks HTTP 200
+    - reject-hunks HTTP 200

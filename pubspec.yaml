@@ -40,8 +40,14 @@ dependencies:
   google_fonts: ^8.0.2
   split_view: ^3.2.2
   provider: ^6.1.5+1
-  re_editor: ^0.8.0
+  syncfusion_flutter_core: ^33.1.46
   syncfusion_flutter_datagrid: ^33.1.46
+  syncfusion_flutter_pdfviewer: ^33.1.46
+  csv: ^6.0.0
+  yaml: ^3.1.2
+  toml: ^0.18.0
+  xml: ^6.6.0
+  archive: ^3.4.10
   fl_chart: ^1.2.0
   socket_io_client: ^3.1.4
   easy_localization: ^3.0.8
@@ -50,15 +56,53 @@ dependencies:
   flutter_fancy_tree_view: ^1.6.0
   shimmer: ^3.0.0
   diff_match_patch: ^0.4.1
+  crypto: ^3.0.3
   flutter_spinkit: ^5.2.2
+  flutter_local_notifications: ^18.0.0
   local_notifier: ^0.1.6
   desktop_drop: ^0.7.0
   fetch_client: ^1.2.1
   http: ^1.6.0
   xterm: ^4.0.0
+  url_launcher: ^6.3.2
+  markdown: ^7.3.1
+  web: ^1.1.1
+  # ── Webview for the Preview workspace ─────────────────────────
+  # On Windows desktop we use webview_windows (WebView2 / Edge) —
+  # the only native Chromium embed that supports HMR + JS + WS.
+  # Web builds use a HtmlElementView<iframe> directly (no extra
+  # package needed). Mobile builds would use webview_flutter — not
+  # added here yet, will land when we ship mobile.
+  webview_windows: ^0.4.0
+  webview_flutter: ^4.10.0
+  # Custom frameless title bar on Windows + Linux (native traffic
+  # lights stay on macOS). No-op on mobile / web.
+  window_manager: ^0.5.1
+  # Clipboard image paste (Ctrl/Cmd+V) — cross-platform. Covers
+  # screenshots captured via OS shortcuts (Win+Shift+S, Cmd+Shift+4)
+  # so they can be attached without saving to disk first.
+  pasteboard: ^0.4.0
+  package_info_plus: ^8.0.0
+  # ── Voice input (cross-platform) ────────────────────────────────
+  # `record` handles audio capture on every platform we ship.
+  # `speech_to_text` handles live transcription but only on
+  # Android / iOS / web — desktop platforms fall back to recording
+  # the audio and sending it as an attachment to the daemon, which
+  # then transcribes server-side (Whisper).
+  # `permission_handler` normalises runtime permission prompts
+  # across Android + iOS.
+  record: ^6.0.0
+  speech_to_text: ^7.0.0
+  permission_handler: ^11.3.1
+  path_provider: ^2.1.4
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  # End-to-end integration tests — lets us boot the actual app with
+  # fake socket/session services and run real user flows (send, abort,
+  # queue drain) as automated regression tests.
+  integration_test:
     sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
@@ -83,6 +127,8 @@ flutter:
   # To add assets to your application, add an assets section, like this:
   assets:
     - assets/translations/
+    - assets/logo.png
+    - assets/monaco/editor.html
 
   # For details regarding adding assets from package dependencies, see
   # https://flutter.dev/to/asset-from-package

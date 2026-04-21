@@ -1,0 +1,46 @@
+
+== Pending aggregation  session=be3e25ab-ebd9-4d73-9e51-87320c2517b1 ==
+
+-- write #1: replace line 2 --
+  insertions_pending=1  deletions_pending=1
+  diff preview (72B):
+    --- a/agg.txt
+    +++ b/agg.txt
+    @@ -1,4 +1,4 @@
+     one
+    -two
+    +ONE
+     three
+     four
+  [PASS] write #1: insertions_pending==1 (aggregate vs baseline)  (got 1)
+  [PASS] write #1: deletions_pending==1 (aggregate vs baseline)  (got 1)
+
+-- write #2: replace line 2+3 --
+  insertions_pending=2  deletions_pending=2
+  diff preview (79B):
+    --- a/agg.txt
+    +++ b/agg.txt
+    @@ -1,4 +1,4 @@
+     one
+    -two
+    -three
+    +ONE
+    +THREE
+  [PASS] write #2: insertions_pending==2 (aggregate vs baseline)  (got 2)
+  [PASS] write #2: deletions_pending==2 (aggregate vs baseline)  (got 2)
+
+-- write #3: replace line 2+3+4 --
+  insertions_pending=3  deletions_pending=3
+  diff preview (85B):
+    --- a/agg.txt
+    +++ b/agg.txt
+    @@ -1,4 +1,4 @@
+     one
+    -two
+    -three
+    -four
+    +ONE
+  [PASS] write #3: insertions_pending==3 (aggregate vs baseline)  (got 3)
+  [PASS] write #3: deletions_pending==3 (aggregate vs baseline)  (got 3)
+
+== RESULT ==  6 PASS  0 FAIL

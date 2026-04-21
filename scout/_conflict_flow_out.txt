@@ -1,0 +1,17 @@
+
+== Conflict round-trip  session=4f79801a-586b-4961-90f0-779435e3c775  ws=C:\Users\ASUS\AppData\Local\Temp\conflict-scout-26e86a5f ==
+  [PASS] seeded file has conflict markers  
+  [PASS] seeded file validation=approved (baseline includes markers)  
+  [PASS] resolution PUT 200  (got 200)
+  [PASS] no conflict markers remain  (content preview: 'line zero\nours version\nline tail\n')
+  [PASS] content equals 'ours' resolution  (mismatch: 'line zero\nours version\nline tail\n')
+  [PASS] validation=approved after auto_approve writeback  
+  [PASS] pending counts cleared  (ins=0 del=0)
+  [PASS] history recorded the resolution revision  (got 2 revisions)
+  [FAIL] newest revision approved_by=auto (writeback auto_approve=True)  (got approved_by='user')
+
+== RESULT ==
+  8 PASS   1 FAIL
+
+  Failing checks:
+    - newest revision approved_by=auto (writeback auto_approve=True)

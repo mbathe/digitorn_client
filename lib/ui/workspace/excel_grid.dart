@@ -46,6 +46,10 @@ class EmployeeDataSource extends DataGridSource {
   }
 }
 
+/// Spreadsheet grid pane.
+///
+/// Currently displays hardcoded placeholder data to demonstrate the grid
+/// layout. Replace [_employees] with real data when a data source is wired up.
 class ExcelGridPane extends StatefulWidget {
   const ExcelGridPane({super.key});
 
@@ -56,6 +60,7 @@ class ExcelGridPane extends StatefulWidget {
 class _ExcelGridPaneState extends State<ExcelGridPane> {
   EmployeeDataSource? employeeDataSource;
 
+  // TODO: Replace with real data source — this is placeholder/demo data.
   final List<Employee> _employees = [
     Employee(10001, 'James', 'Project Lead', 20000),
     Employee(10002, 'Kathryn', 'Manager', 30000),
@@ -78,8 +83,13 @@ class _ExcelGridPaneState extends State<ExcelGridPane> {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    if (employeeDataSource == null) {
-      return const SizedBox.shrink();
+    if (employeeDataSource == null || _employees.isEmpty) {
+      return Center(
+        child: Text(
+          'No spreadsheet data loaded',
+          style: GoogleFonts.inter(color: c.textMuted, fontSize: 13),
+        ),
+      );
     }
     return Container(
       color: c.bg,

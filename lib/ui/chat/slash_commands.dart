@@ -1,3 +1,4 @@
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../theme/app_theme.dart';
@@ -6,54 +7,57 @@ import '../../models/app_summary.dart';
 /// Slash command definition
 class SlashCommand {
   final String command;
-  final String label;
-  final String description;
+  final String labelKey;
+  final String descriptionKey;
   final IconData icon;
   final Set<String> requiredModules; // empty = always available
 
   const SlashCommand({
     required this.command,
-    required this.label,
-    required this.description,
+    required this.labelKey,
+    required this.descriptionKey,
     required this.icon,
     this.requiredModules = const {},
   });
+
+  String get label => labelKey.tr();
+  String get description => descriptionKey.tr();
 }
 
 /// All available slash commands
 const _allCommands = [
   // Universal (no module required)
-  SlashCommand(command: '/explain', label: 'Explain', description: 'Explain the code or concept', icon: Icons.lightbulb_outline, requiredModules: {}),
-  SlashCommand(command: '/summarize', label: 'Summarize', description: 'Summarize what was done', icon: Icons.summarize_outlined, requiredModules: {}),
-  SlashCommand(command: '/continue', label: 'Continue', description: 'Continue the current task', icon: Icons.arrow_forward_rounded, requiredModules: {}),
-  SlashCommand(command: '/plan', label: 'Plan', description: 'Create a plan before acting', icon: Icons.map_outlined, requiredModules: {}),
-  SlashCommand(command: '/review', label: 'Review', description: 'Review the recent changes', icon: Icons.rate_review_outlined, requiredModules: {}),
+  SlashCommand(command: '/explain', labelKey: 'chat_slash.explain_label', descriptionKey: 'chat_slash.explain_desc', icon: Icons.lightbulb_outline, requiredModules: {}),
+  SlashCommand(command: '/summarize', labelKey: 'chat_slash.summarize_label', descriptionKey: 'chat_slash.summarize_desc', icon: Icons.summarize_outlined, requiredModules: {}),
+  SlashCommand(command: '/continue', labelKey: 'chat_slash.continue_label', descriptionKey: 'chat_slash.continue_desc', icon: Icons.arrow_forward_rounded, requiredModules: {}),
+  SlashCommand(command: '/plan', labelKey: 'chat_slash.plan_label', descriptionKey: 'chat_slash.plan_desc', icon: Icons.map_outlined, requiredModules: {}),
+  SlashCommand(command: '/review', labelKey: 'chat_slash.review_label', descriptionKey: 'chat_slash.review_desc', icon: Icons.rate_review_outlined, requiredModules: {}),
 
   // Filesystem module
-  SlashCommand(command: '/read', label: 'Read', description: 'Read a file', icon: Icons.visibility_outlined, requiredModules: {'filesystem'}),
-  SlashCommand(command: '/edit', label: 'Edit', description: 'Edit a file', icon: Icons.edit_outlined, requiredModules: {'filesystem'}),
-  SlashCommand(command: '/find', label: 'Find', description: 'Search for files', icon: Icons.search_rounded, requiredModules: {'filesystem'}),
+  SlashCommand(command: '/read', labelKey: 'chat_slash.read_label', descriptionKey: 'chat_slash.read_desc', icon: Icons.visibility_outlined, requiredModules: {'filesystem'}),
+  SlashCommand(command: '/edit', labelKey: 'chat_slash.edit_label', descriptionKey: 'chat_slash.edit_desc', icon: Icons.edit_outlined, requiredModules: {'filesystem'}),
+  SlashCommand(command: '/find', labelKey: 'chat_slash.find_label', descriptionKey: 'chat_slash.find_desc', icon: Icons.search_rounded, requiredModules: {'filesystem'}),
 
   // Shell module
-  SlashCommand(command: '/run', label: 'Run', description: 'Run a shell command', icon: Icons.terminal_rounded, requiredModules: {'shell'}),
-  SlashCommand(command: '/test', label: 'Test', description: 'Run the test suite', icon: Icons.science_outlined, requiredModules: {'shell'}),
-  SlashCommand(command: '/install', label: 'Install', description: 'Install dependencies', icon: Icons.download_rounded, requiredModules: {'shell'}),
+  SlashCommand(command: '/run', labelKey: 'chat_slash.run_label', descriptionKey: 'chat_slash.run_desc', icon: Icons.terminal_rounded, requiredModules: {'shell'}),
+  SlashCommand(command: '/test', labelKey: 'chat_slash.test_label', descriptionKey: 'chat_slash.test_desc', icon: Icons.science_outlined, requiredModules: {'shell'}),
+  SlashCommand(command: '/install', labelKey: 'chat_slash.install_label', descriptionKey: 'chat_slash.install_desc', icon: Icons.download_rounded, requiredModules: {'shell'}),
 
   // Git module
-  SlashCommand(command: '/commit', label: 'Commit', description: 'Create a git commit', icon: Icons.check_circle_outline, requiredModules: {'git'}),
-  SlashCommand(command: '/diff', label: 'Diff', description: 'Show git diff', icon: Icons.compare_arrows_rounded, requiredModules: {'git'}),
-  SlashCommand(command: '/pr', label: 'PR', description: 'Create a pull request', icon: Icons.call_merge_rounded, requiredModules: {'git'}),
+  SlashCommand(command: '/commit', labelKey: 'chat_slash.commit_label', descriptionKey: 'chat_slash.commit_desc', icon: Icons.check_circle_outline, requiredModules: {'git'}),
+  SlashCommand(command: '/diff', labelKey: 'chat_slash.diff_label', descriptionKey: 'chat_slash.diff_desc', icon: Icons.compare_arrows_rounded, requiredModules: {'git'}),
+  SlashCommand(command: '/pr', labelKey: 'chat_slash.pr_label', descriptionKey: 'chat_slash.pr_desc', icon: Icons.call_merge_rounded, requiredModules: {'git'}),
 
   // Web module
-  SlashCommand(command: '/search', label: 'Search', description: 'Search the web', icon: Icons.language_rounded, requiredModules: {'web', 'http'}),
-  SlashCommand(command: '/fetch', label: 'Fetch', description: 'Fetch a URL', icon: Icons.cloud_download_outlined, requiredModules: {'web', 'http'}),
+  SlashCommand(command: '/search', labelKey: 'chat_slash.search_label', descriptionKey: 'chat_slash.search_desc', icon: Icons.language_rounded, requiredModules: {'web', 'http'}),
+  SlashCommand(command: '/fetch', labelKey: 'chat_slash.fetch_label', descriptionKey: 'chat_slash.fetch_desc', icon: Icons.cloud_download_outlined, requiredModules: {'web', 'http'}),
 
   // Memory module
-  SlashCommand(command: '/goal', label: 'Goal', description: 'Set a project goal', icon: Icons.flag_rounded, requiredModules: {'memory'}),
-  SlashCommand(command: '/todo', label: 'Todo', description: 'Add a task to the list', icon: Icons.checklist_rounded, requiredModules: {'memory'}),
+  SlashCommand(command: '/goal', labelKey: 'chat_slash.goal_label', descriptionKey: 'chat_slash.goal_desc', icon: Icons.flag_rounded, requiredModules: {'memory'}),
+  SlashCommand(command: '/todo', labelKey: 'chat_slash.todo_label', descriptionKey: 'chat_slash.todo_desc', icon: Icons.checklist_rounded, requiredModules: {'memory'}),
 
   // Database module
-  SlashCommand(command: '/query', label: 'Query', description: 'Run a database query', icon: Icons.storage_rounded, requiredModules: {'database'}),
+  SlashCommand(command: '/query', labelKey: 'chat_slash.query_label', descriptionKey: 'chat_slash.query_desc', icon: Icons.storage_rounded, requiredModules: {'database'}),
 ];
 
 /// Filter commands based on app modules

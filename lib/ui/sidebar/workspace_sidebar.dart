@@ -1,3 +1,4 @@
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../models/workspace_state.dart';
@@ -10,7 +11,7 @@ class WorkspaceSidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: WorkspaceState(),
-      builder: (_, __) {
+      builder: (_, _) {
         final ws = WorkspaceState();
         if (!ws.hasContent) return const SizedBox.shrink();
 
@@ -33,7 +34,7 @@ class WorkspaceSidebar extends StatelessWidget {
                   children: [
                     Icon(Icons.dashboard_outlined, color: context.colors.textDim, size: 14),
                     const SizedBox(width: 8),
-                    Text('Workspace',
+                    Text('workspace_sidebar.title'.tr(),
                       style: GoogleFonts.inter(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
@@ -91,7 +92,7 @@ class _GoalSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionHeader(icon: '●', iconColor: context.colors.orange, label: 'Goal'),
+        _SectionHeader(icon: '●', iconColor: context.colors.orange, label: 'workspace_sidebar.goal'.tr()),
         const SizedBox(height: 6),
         Text(
           goal,
@@ -127,7 +128,7 @@ class _TodoSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionHeader(icon: '☰', iconColor: context.colors.text, label: 'Tasks'),
+        _SectionHeader(icon: '☰', iconColor: context.colors.text, label: 'workspace_sidebar.tasks'.tr()),
         const SizedBox(height: 8),
 
         // Progress bar
@@ -142,7 +143,8 @@ class _TodoSection extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Text(
-              '+${todos.length - 10} more',
+              'workspace_sidebar.more_count'
+                  .tr(namedArgs: {'n': '${todos.length - 10}'}),
               style: GoogleFonts.inter(fontSize: 11, color: context.colors.textDim),
             ),
           ),
@@ -238,8 +240,10 @@ class _AgentSection extends StatelessWidget {
         a.status == AgentStatus.completed || a.status == AgentStatus.failed);
 
     final countLabel = active.isNotEmpty
-        ? '${active.length} running'
-        : '${done.length} done';
+        ? 'workspace_sidebar.running_count'
+            .tr(namedArgs: {'n': '${active.length}'})
+        : 'workspace_sidebar.done_count'
+            .tr(namedArgs: {'n': '${done.length}'});
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -247,7 +251,7 @@ class _AgentSection extends StatelessWidget {
         _SectionHeader(
           icon: '●',
           iconColor: active.isNotEmpty ? context.colors.cyan : context.colors.green,
-          label: 'Agents',
+          label: 'workspace_sidebar.agents'.tr(),
           badge: countLabel,
         ),
         const SizedBox(height: 6),
@@ -329,7 +333,7 @@ class _FactsSection extends StatelessWidget {
         _SectionHeader(
           icon: '•',
           iconColor: context.colors.text,
-          label: 'Memory',
+          label: 'workspace_sidebar.memory'.tr(),
           badge: '(${facts.length})',
         ),
         const SizedBox(height: 6),

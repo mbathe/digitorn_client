@@ -1,0 +1,81 @@
+
+╔═══ Builder canvas scout  session=scout-cv-cd3c60 ═══╗
+
+▶ STEP 1a: GET /sessions/{sid}/workspace  (before bootstrap)
+  HTTP 404  (expected 404 — session doesn't exist yet)
+
+▶ STEP 2: ask the builder to scaffold a minimal app
+
+▶ STEP 1b: GET /sessions/{sid}/workspace  (after bootstrap)
+  HTTP 200
+{
+  "render_mode": "builder",
+  "entry_file": "app.yaml",
+  "title": "Digitorn App Builder",
+  "workspace": "C:\\Users\\ASUS\\Documents\\digitorn-bridge"
+}
+  ✓ render_mode == 'builder'  (triggers BuilderCanvas)
+  ✓ entry_file == 'app.yaml'
+
+▶ STEP 3: preview event histogram
+      1  preview:snapshot
+
+▶ STEP 4: workspace state (from preview:state_changed / snapshot)
+  ✗ no workspace state received — canvas would wait forever
+
+▶ STEP 5: files pushed in preview events (2)
+    _state/compile.json                          61B  validation=pending
+    app.yaml                                    676B  validation=pending
+
+▶ STEP 6: GET app.yaml (authoritative, ?include_baseline=true)
+  HTTP 200  content=676B  validation=pending
+
+  --- preview ---
+    app:
+      app_id: canvas-probe
+      name: canvas-probe
+      description: A minimal app to probe the canvas architecture
+    
+    execution:
+      mode: conversation
+      entry_agent: coordinator
+      greeting: "Hello! I'm the canvas probe coordinator."
+    
+    agents:
+      - id: coordinator
+        brain:
+          provider: openai
+          model: gpt-4o-mini
+        system_prompt: |
+          You are the coordinator agent.
+          You have access to filesystem and shell tools.
+    
+    modules:
+      filesystem:
+        config:
+          workspace: "."
+      
+      shell:
+    ... 9 more lines
+
+▶ STEP 7: parse app.yaml as the client does
+    triggers: 0
+    agents:   1
+      - id='coordinator'        role=None               brain={'provider': 'openai', 'model': 'gpt-4o-mini'}
+    modules:  2
+      - filesystem
+      - shell
+    grants:   2
+      - agent=None → module='filesystem'  actions=['read', 'write']
+      - agent=None → module='shell'  actions=['bash']
+
+  ✗ no triggers — left column would render 'No triggers defined'
+  ✓ agents derivable → 1 nodes center column
+  ✓ modules derivable → 2 nodes right column
+  ✓ edges derivable → 2 agent→module connections
+
+▶ STEP 8: _state/*.json overlays (phase / compile / deploy / tests)
+  - _state/progress.json          not pushed yet (canvas overlays stay empty)
+  ✓ _state/compile.json           {"status": "success", "errors": [], "error_count": 0}
+  - _state/deploy.json            not pushed yet (canvas overlays stay empty)
+  - _state/tests.json             not pushed yet (canvas overlays stay empty)

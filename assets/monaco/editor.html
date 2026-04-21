@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monaco</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #container {
+    width: 100%;
+    height: 100%;
+  }
+  #boot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    color: #888;
+    font-size: 12px;
+  }
+  #boot.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="boot">Loading editor…</div>
+<div id="container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
+<script>
+/**
+ * Digitorn Monaco host — a thin bridge between a Flutter WebView and
+ * the Monaco editor. Communicates via postMessage on both sides:
+ *
+ *   Flutter → here   window.postMessage({type, ...}) from the host
+ *   here    → Flutter window.chrome.webview.postMessage(…)  (WebView2)
+ *                     window.MonacoBridge?.postMessage(…)   (flutter_inappwebview)
+ *                     window.flutter_inappwebview?.callHandler(…)
+ *
+ * The host keeps a `monaco.editor.ITextModel` per file path and swaps
+ * the current model on setModel({path}). This is fast — no bundle
+ * reload between files.
+ */
+(function () {
+  const INITIAL_HTML_LOG = true;
+  function log(...a) {
+    if (INITIAL_HTML_LOG) {
+      try { console.log("[monaco]", ...a); } catch (_) {}
+    }
+  }
+
+  // Cross-platform outbound bridge — tries every known WebView channel
+  // so the same HTML works on Windows (webview_windows), mobile
+  // (webview_flutter), and web (HtmlElementView postMessage).
+  function sendToHost(msg) {
+    const text = typeof msg === "string" ? msg : JSON.stringify(msg);
+    try {
+      // webview_windows (Edge Chromium)
+      if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage(text);
+        return;
+      }
+    } catch (_) {}
+    try {
+      // webview_flutter Android/iOS exposes JavaScript channels by name
+      if (window.MonacoBridge && typeof window.MonacoBridge.postMessage === "function") {
+        window.MonacoBridge.postMessage(text);
+        return;
+      }
+    } catch (_) {}
+    try {
+      // flutter_inappwebview
+      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        window.flutter_inappwebview.callHandler("MonacoBridge", text);
+        return;
+      }
+    } catch (_) {}
+    // Last resort — window parent (iframe case)
+    try { window.parent.postMessage(text, "*"); } catch (_) {}
+  }
+
+  // Queue messages until Monaco is ready.
+  let pending = [];
+  let monacoReady = false;
+  let editor = null;
+  const models = new Map(); // path -> ITextModel
+  // Diagnostics pushed before the model exists are buffered here
+  // and flushed when the model is created (see setOrUpdateModel).
+  const pendingMarkers = new Map(); // path -> IMarkerData[]
+  let currentPath = null;
+
+  function guessLanguage(path) {
+    const ext = (path.split(".").pop() || "").toLowerCase();
+    return {
+      ts: "typescript", tsx: "typescript",
+      js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
+      py: "python",
+      dart: "dart",
+      go: "go",
+      rs: "rust",
+      java: "java",
+      kt: "kotlin",
+      swift: "swift",
+      rb: "ruby",
+      php: "php",
+      c: "c", h: "c",
+      cpp: "cpp", cc: "cpp", hpp: "cpp",
+      cs: "csharp",
+      html: "html", htm: "html",
+      css: "css", scss: "scss", sass: "scss",
+      json: "json",
+      yaml: "yaml", yml: "yaml",
+      toml: "ini",
+      md: "markdown", mdx: "markdown",
+      sh: "shell", bash: "shell", zsh: "shell",
+      sql: "sql",
+      xml: "xml", svg: "xml"
+    }[ext] || "plaintext";
+  }
+
+  function applyTheme(name) {
+    if (!monacoReady) return;
+    try {
+      monaco.editor.setTheme(name === "dark" ? "digitorn-dark" : "digitorn-light");
+    } catch (e) { log("theme error", e); }
+  }
+
+  function registerThemes() {
+    // Digitorn dark — tweaked vs-dark with softer selection.
+    monaco.editor.defineTheme("digitorn-dark", {
+      base: "vs-dark",
+      inherit: true,
+      rules: [],
+      colors: {
+        "editor.background": "#0B1220",
+        "editor.foreground": "#E5E7EB",
+        "editorLineNumber.foreground": "#3A4255",
+        "editorLineNumber.activeForeground": "#A0AEC0",
+        "editor.selectionBackground": "#14532D",
+        "editor.inactiveSelectionBackground": "#0F3A21",
+        "editorCursor.foreground": "#22C55E",
+        "editor.lineHighlightBackground": "#10192B",
+        "editorIndentGuide.background": "#1E293B",
+        "editorIndentGuide.activeBackground": "#334155"
+      }
+    });
+    monaco.editor.defineTheme("digitorn-light", {
+      base: "vs",
+      inherit: true,
+      rules: [],
+      colors: {
+        "editor.background": "#FFFFFF",
+        "editor.foreground": "#1F2937",
+        "editorLineNumber.foreground": "#A8B2C3",
+        "editorLineNumber.activeForeground": "#4B5563"
+      }
+    });
+  }
+
+  function setOrUpdateModel(path, content, language, readOnly) {
+    if (!monacoReady) {
+      pending.push(() => setOrUpdateModel(path, content, language, readOnly));
+      return;
+    }
+    const lang = language || guessLanguage(path);
+    let model = models.get(path);
+    if (!model) {
+      try {
+        model = monaco.editor.createModel(
+          content || "",
+          lang,
+          monaco.Uri.parse("inmemory://digitorn/" + encodeURIComponent(path))
+        );
+      } catch (e) {
+        // URI collision — fall back to a unique one.
+        model = monaco.editor.createModel(
+          content || "",
+          lang,
+          monaco.Uri.parse(
+            "inmemory://digitorn/" + encodeURIComponent(path) +
+            "?t=" + Date.now()
+          )
+        );
+      }
+      models.set(path, model);
+      // Flush any diagnostics that arrived before the model existed.
+      if (pendingMarkers.has(path)) {
+        try {
+          monaco.editor.setModelMarkers(model, "digitorn", pendingMarkers.get(path));
+        } catch (e) { log("flush markers error", e); }
+        pendingMarkers.delete(path);
+      }
+    } else if (model.getValue() !== (content || "")) {
+      const sel = editor && editor.getModel() === model
+        ? editor.getSelection()
+        : null;
+      model.setValue(content || "");
+      if (sel && editor) editor.setSelection(sel);
+    }
+    currentPath = path;
+    editor.setModel(model);
+    editor.updateOptions({ readOnly: !!readOnly });
+  }
+
+  function setDiagnostics(path, items) {
+    if (!monacoReady) {
+      pending.push(() => setDiagnostics(path, items));
+      return;
+    }
+    const markers = Array.isArray(items) ? items : [];
+    const model = models.get(path);
+    if (!model) {
+      // Model not created yet — buffer until setModel arrives.
+      pendingMarkers.set(path, markers);
+      return;
+    }
+    try {
+      monaco.editor.setModelMarkers(model, "digitorn", markers);
+    } catch (e) { log("setModelMarkers error", e); }
+  }
+
+  function closeModel(path) {
+    const m = models.get(path);
+    if (!m) return;
+    try { m.dispose(); } catch (_) {}
+    models.delete(path);
+    pendingMarkers.delete(path);
+    if (currentPath === path) {
+      currentPath = null;
+      editor.setModel(null);
+    }
+  }
+
+  // Inbound message router. Accepts either an object or a JSON string.
+  function handleHostMessage(raw) {
+    let msg = raw;
+    try {
+      if (typeof msg === "string") msg = JSON.parse(msg);
+    } catch (_) { return; }
+    if (!msg || typeof msg !== "object") return;
+    switch (msg.type) {
+      case "setModel":
+        setOrUpdateModel(msg.path, msg.content, msg.language, msg.readOnly);
+        break;
+      case "updateContent":
+        // Same as setModel but keeps the cursor if possible.
+        setOrUpdateModel(msg.path, msg.content, msg.language, msg.readOnly);
+        break;
+      case "closeModel":
+        closeModel(msg.path);
+        break;
+      case "setDiagnostics":
+        setDiagnostics(msg.path, msg.items);
+        break;
+      case "lspResponse":
+        resolveLspResponse(msg);
+        break;
+      case "setTheme":
+        applyTheme(msg.theme);
+        break;
+      case "setFontSize":
+        if (editor) editor.updateOptions({ fontSize: msg.size });
+        break;
+      case "focus":
+        if (editor) editor.focus();
+        break;
+      case "getContent":
+        const m = editor && editor.getModel();
+        sendToHost({
+          type: "content",
+          path: currentPath,
+          content: m ? m.getValue() : ""
+        });
+        break;
+      case "goToLine":
+        if (editor && msg.line) {
+          editor.revealLineInCenter(msg.line);
+          editor.setPosition({ lineNumber: msg.line, column: msg.column || 1 });
+          editor.focus();
+        }
+        break;
+    }
+  }
+
+  // ── Inbound message wiring — THREE transports, all needed ─────
+  //
+  // 1. window.chrome.webview.message  — WebView2 (Windows/Linux).
+  //    Flutter's `_winCtrl.postWebMessage(json)` dispatches here
+  //    (NOT on `window.message`). Without this listener every
+  //    setModel / setTheme / setDiagnostics call from the host is
+  //    silently dropped, leaving the editor stuck on whatever model
+  //    the ready-handler happened to set first.
+  //
+  // 2. window.message  — iframe fallback (Flutter web's
+  //    `HtmlElementView<iframe>` uses `window.parent.postMessage`).
+  //
+  // 3. window.hostMessage(raw)  — direct JS call bridge used by
+  //    webview_flutter (Android/iOS/macOS) via runJavaScript.
+  if (window.chrome && window.chrome.webview &&
+      typeof window.chrome.webview.addEventListener === "function") {
+    window.chrome.webview.addEventListener(
+      "message",
+      (e) => handleHostMessage(e.data),
+    );
+  }
+  window.addEventListener("message", (e) => handleHostMessage(e.data));
+  window.hostMessage = handleHostMessage;
+
+  // ── Boot Monaco ────────────────────────────────────────────────
+  require.config({
+    paths: {
+      vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs"
+    }
+  });
+  require(["vs/editor/editor.main"], function () {
+    registerThemes();
+    editor = monaco.editor.create(document.getElementById("container"), {
+      theme: "digitorn-dark",
+      automaticLayout: true,
+      fontFamily: "'Fira Code', 'SF Mono', 'Consolas', monospace",
+      fontLigatures: true,
+      fontSize: 13,
+      lineNumbers: "on",
+      minimap: { enabled: true, renderCharacters: false, scale: 1 },
+      smoothScrolling: true,
+      scrollBeyondLastLine: false,
+      renderWhitespace: "selection",
+      wordWrap: "off",
+      tabSize: 2,
+      bracketPairColorization: { enabled: true },
+      guides: { bracketPairs: true, indentation: true },
+      padding: { top: 8, bottom: 8 },
+      readOnly: true
+    });
+
+    // Emit change events so the host can mirror dirty state (future
+    // use — right now the agent owns writes, user shouldn't edit).
+    editor.onDidChangeModelContent(() => {
+      const m = editor.getModel();
+      if (!m) return;
+      sendToHost({
+        type: "contentChanged",
+        path: currentPath,
+        content: m.getValue()
+      });
+    });
+
+    // Ctrl+S / Cmd+S — host decides semantics per readOnly state:
+    //   editable → PUT the buffer (writeback)
+    //   read-only → approve the file (legacy shortcut)
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      const m = editor.getModel();
+      sendToHost({
+        type: "save",
+        path: currentPath,
+        content: m ? m.getValue() : ""
+      });
+    });
+
+    // Fires when the editor loses focus — canonical "I stopped
+    // typing" moment for the host to PUT the current buffer. The
+    // host throttles further: emits only when the buffer has
+    // actually diverged from the last host-pushed content.
+    editor.onDidBlurEditorText(() => {
+      const m = editor.getModel();
+      sendToHost({
+        type: "editorBlurred",
+        path: currentPath,
+        content: m ? m.getValue() : ""
+      });
+    });
+
+    registerLspProviders();
+
+    document.getElementById("boot").classList.add("hidden");
+    monacoReady = true;
+    sendToHost({ type: "ready" });
+    // Drain queued commands
+    const q = pending.slice();
+    pending = [];
+    q.forEach((fn) => { try { fn(); } catch (_) {} });
+  });
+
+  // ── LSP bridge — Monaco ↔ Flutter ↔ daemon ─────────────────────
+  //
+  // Monaco invokes our providers (hover, definition, etc). We build
+  // an `lspRequest` envelope with a fresh id and send it to Flutter.
+  // Flutter forwards to the daemon and replies with `lspResponse`
+  // carrying the same id — we look up the Promise resolver in
+  // `lspPending` and fulfil it with the raw LSP result.
+  //
+  // Coordinate conversion:
+  //   Monaco positions are 1-based (lineNumber, column).
+  //   LSP positions are 0-based (line, character).
+  // All conversions are done here so daemon traffic is pure LSP.
+
+  const lspPending = new Map(); // id -> {resolve, reject, token}
+  let lspCounter = 0;
+
+  function newLspId() {
+    // Sub-ms entropy keeps ids unique across rapid successive calls
+    // without pulling in a uuid lib. Good enough — the daemon treats
+    // them as opaque strings.
+    const ms = Date.now();
+    const rnd = Math.floor(Math.random() * 0xffffff).toString(36);
+    return "lsp-" + ms + "-" + (++lspCounter) + "-" + rnd;
+  }
+
+  function requestLsp(path, method, params, token, opts) {
+    const id = newLspId();
+    // Daemon default is `supersede=true`; callers pass false only
+    // for user-initiated methods (references/rename).
+    const supersedePrevious =
+      opts && opts.supersedePrevious === false ? false : true;
+    return new Promise((resolve) => {
+      lspPending.set(id, { resolve, token });
+      // If Monaco cancels (cursor moved, typed again, editor closed)
+      // tell the host so it can drop the HTTP socket and fire an
+      // explicit /lsp/cancel. The host is the one that knows how to
+      // close the underlying fetch.
+      if (token && typeof token.onCancellationRequested === "function") {
+        token.onCancellationRequested(() => {
+          const entry = lspPending.get(id);
+          if (!entry) return; // already settled
+          lspPending.delete(id);
+          // Best-effort: tell the host to cancel the request.
+          try { sendToHost({ type: "lspCancel", id }); } catch (_) {}
+          // Resolve our Promise with null — Monaco providers expect
+          // that convention on cancellation.
+          entry.resolve(null);
+        });
+      }
+      sendToHost({
+        type: "lspRequest",
+        id,
+        path,
+        method,
+        params: params || {},
+        supersedePrevious,
+      });
+    });
+  }
+
+  function resolveLspResponse(msg) {
+    const entry = lspPending.get(msg.id);
+    if (!entry) return; // already resolved (cancel race) — ignore
+    lspPending.delete(msg.id);
+    if (msg.error || msg.cancelled) {
+      // Providers expect null on failure, not throws.
+      entry.resolve(null);
+      return;
+    }
+    entry.resolve(msg.result == null ? null : msg.result);
+  }
+
+  // Wait [ms] but bail early if the Monaco CancellationToken fires.
+  // Used to debounce completion requests: we don't hit the wire on
+  // every keystroke — only when the user pauses typing. Monaco cancels
+  // the outer provider invocation as soon as a fresh keystroke lands,
+  // so this races cleanly against supersession.
+  function debounce(ms, token) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        resolve(v);
+      };
+      const t = setTimeout(() => finish(false), ms);
+      if (token && typeof token.onCancellationRequested === "function") {
+        token.onCancellationRequested(() => {
+          clearTimeout(t);
+          finish(true);
+        });
+      }
+    });
+  }
+
+  function pos01(position) {
+    // Monaco → LSP : subtract 1.
+    return {
+      line: (position.lineNumber | 0) - 1,
+      character: (position.column | 0) - 1,
+    };
+  }
+
+  // Convert an LSP range (0-based) to a Monaco IRange (1-based).
+  function rangeLspToMonaco(r) {
+    if (!r || !r.start || !r.end) return null;
+    return {
+      startLineNumber: r.start.line + 1,
+      startColumn: r.start.character + 1,
+      endLineNumber: r.end.line + 1,
+      endColumn: r.end.character + 1,
+    };
+  }
+
+  function hoverContents(result) {
+    // LSP Hover.contents can be: MarkupContent | MarkedString | MarkedString[]
+    // MarkedString is either a string or { language, value }.
+    if (!result || !result.contents) return null;
+    const c = result.contents;
+    const out = [];
+    const pushOne = (v) => {
+      if (typeof v === "string") out.push({ value: v });
+      else if (v && typeof v === "object") {
+        if (typeof v.value === "string") out.push({ value: v.value });
+        else if (typeof v.kind === "string" && typeof v.value === "string") {
+          out.push({ value: v.value });
+        }
+      }
+    };
+    if (Array.isArray(c)) c.forEach(pushOne);
+    else pushOne(c);
+    if (!out.length) return null;
+    return {
+      range: rangeLspToMonaco(result.range) || undefined,
+      contents: out,
+    };
+  }
+
+  // LSP `Location | Location[] | LocationLink[]` → Monaco `Definition[]`.
+  function locationsToMonaco(result) {
+    if (!result) return null;
+    const raw = Array.isArray(result) ? result : [result];
+    const out = [];
+    for (const loc of raw) {
+      if (!loc) continue;
+      // LocationLink uses targetUri/targetSelectionRange
+      const uri = loc.uri || loc.targetUri;
+      const range = loc.range || loc.targetSelectionRange || loc.targetRange;
+      if (!uri || !range) continue;
+      const m = rangeLspToMonaco(range);
+      if (!m) continue;
+      out.push({ uri: monaco.Uri.parse(uri), range: m });
+    }
+    return out.length ? out : null;
+  }
+
+  // LSP CompletionItemKind (1..25) maps directly to Monaco's enum
+  // (monaco.languages.CompletionItemKind values 0..26 with different
+  // offsets). We do a by-name mapping to stay future-proof.
+  const lspKindToMonaco = (() => {
+    // LSP spec numeric values → Monaco enum name.
+    const names = {
+      1: "Text", 2: "Method", 3: "Function", 4: "Constructor", 5: "Field",
+      6: "Variable", 7: "Class", 8: "Interface", 9: "Module", 10: "Property",
+      11: "Unit", 12: "Value", 13: "Enum", 14: "Keyword", 15: "Snippet",
+      16: "Color", 17: "File", 18: "Reference", 19: "Folder", 20: "EnumMember",
+      21: "Constant", 22: "Struct", 23: "Event", 24: "Operator", 25: "TypeParameter",
+    };
+    return (k) => {
+      const name = names[k] || "Text";
+      const m = monaco.languages.CompletionItemKind;
+      return (m && m[name] != null) ? m[name] : (m && m.Text) || 0;
+    };
+  })();
+
+  // LSP WorkspaceEdit → Monaco rename edits. Monaco wants
+  // `{edits: [{resource: Uri, textEdit: {range, text}, versionId}]}`.
+  // LSP ships either `changes: {uri: TextEdit[]}` (old clients) or
+  // `documentChanges: [{textDocument, edits}]` (modern). Handle both.
+  function workspaceEditToMonaco(result) {
+    const edits = [];
+    const pushTextEdits = (uriStr, items) => {
+      if (!Array.isArray(items)) return;
+      let uri;
+      try { uri = monaco.Uri.parse(uriStr); } catch (_) { return; }
+      for (const te of items) {
+        const r = rangeLspToMonaco(te.range);
+        if (!r) continue;
+        edits.push({
+          resource: uri,
+          textEdit: { range: r, text: te.newText || "" },
+          versionId: undefined,
+        });
+      }
+    };
+    if (result.changes && typeof result.changes === "object") {
+      for (const uri of Object.keys(result.changes)) {
+        pushTextEdits(uri, result.changes[uri]);
+      }
+    }
+    if (Array.isArray(result.documentChanges)) {
+      for (const dc of result.documentChanges) {
+        if (dc && dc.textDocument && Array.isArray(dc.edits)) {
+          pushTextEdits(dc.textDocument.uri, dc.edits);
+        }
+      }
+    }
+    return { edits };
+  }
+
+  function completionToMonaco(result, model, position) {
+    // Result: CompletionList | CompletionItem[] | null
+    const items = Array.isArray(result)
+      ? result
+      : (result && Array.isArray(result.items) ? result.items : []);
+    const word = model.getWordUntilPosition(position);
+    const defaultRange = {
+      startLineNumber: position.lineNumber,
+      endLineNumber: position.lineNumber,
+      startColumn: word.startColumn,
+      endColumn: word.endColumn,
+    };
+    const suggestions = items.map((it) => {
+      const insert = (it.textEdit && it.textEdit.newText) ||
+                     it.insertText || it.label;
+      const range = (it.textEdit && it.textEdit.range)
+        ? rangeLspToMonaco(it.textEdit.range)
+        : defaultRange;
+      return {
+        label: typeof it.label === "string" ? it.label : (it.label && it.label.label) || "",
+        kind: lspKindToMonaco(it.kind),
+        detail: it.detail,
+        documentation: it.documentation && (it.documentation.value || it.documentation),
+        insertText: insert,
+        insertTextRules:
+          it.insertTextFormat === 2
+            ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+            : undefined,
+        range,
+        sortText: it.sortText,
+        filterText: it.filterText,
+      };
+    });
+    return {
+      suggestions,
+      incomplete: !!(result && result.isIncomplete),
+    };
+  }
+
+  function registerLspProviders() {
+    // Register across every language Monaco knows about so provider
+    // resolution works regardless of which file is open. Cheap —
+    // providers lazy-fire on demand and the fan-out is compile time.
+    const languages = monaco.languages.getLanguages().map((l) => l.id);
+    if (!languages.includes("plaintext")) languages.push("plaintext");
+
+    languages.forEach((lang) => {
+      monaco.languages.registerHoverProvider(lang, {
+        provideHover: async (model, position, token) => {
+          const path = pathFromModel(model);
+          if (!path) return null;
+          const result = await requestLsp(
+            path, "textDocument/hover",
+            { position: pos01(position) }, token);
+          return hoverContents(result);
+        },
+      });
+
+      monaco.languages.registerDefinitionProvider(lang, {
+        provideDefinition: async (model, position, token) => {
+          const path = pathFromModel(model);
+          if (!path) return null;
+          const result = await requestLsp(
+            path, "textDocument/definition",
+            { position: pos01(position) }, token);
+          return locationsToMonaco(result);
+        },
+      });
+
+      monaco.languages.registerReferenceProvider(lang, {
+        provideReferences: async (model, position, context, token) => {
+          const path = pathFromModel(model);
+          if (!path) return null;
+          // User-initiated (Shift+F12) — don't supersede an earlier
+          // search; both sets of results matter to the user.
+          const result = await requestLsp(
+            path, "textDocument/references",
+            {
+              position: pos01(position),
+              context: { includeDeclaration: !!context.includeDeclaration },
+            }, token, { supersedePrevious: false });
+          return locationsToMonaco(result);
+        },
+      });
+
+      monaco.languages.registerRenameProvider(lang, {
+        provideRenameEdits: async (model, position, newName, token) => {
+          const path = pathFromModel(model);
+          if (!path) return null;
+          const result = await requestLsp(
+            path, "textDocument/rename",
+            { position: pos01(position), newName }, token,
+            { supersedePrevious: false });
+          if (!result) return null;
+          return workspaceEditToMonaco(result);
+        },
+      });
+
+      // Trigger chars cover the common cases (`.` → member access,
+      // `(` → signature help, `:` for a few langs). The 140 ms
+      // debounce below keeps a fast typist from firing a request per
+      // keystroke — the daemon's supersession still handles anything
+      // that slips through.
+      monaco.languages.registerCompletionItemProvider(lang, {
+        triggerCharacters: [".", "(", ":", " ", "/", "\"", "'"],
+        provideCompletionItems: async (model, position, context, token) => {
+          const path = pathFromModel(model);
+          if (!path) return { suggestions: [] };
+          const cancelled = await debounce(140, token);
+          if (cancelled) return { suggestions: [] };
+          const params = { position: pos01(position) };
+          if (context && context.triggerCharacter) {
+            params.context = {
+              triggerKind: 2,
+              triggerCharacter: context.triggerCharacter,
+            };
+          }
+          const result = await requestLsp(
+            path, "textDocument/completion", params, token);
+          return completionToMonaco(result, model, position);
+        },
+      });
+
+      monaco.languages.registerSignatureHelpProvider(lang, {
+        signatureHelpTriggerCharacters: ["(", ","],
+        provideSignatureHelp: async (model, position, token) => {
+          const path = pathFromModel(model);
+          if (!path) return null;
+          const result = await requestLsp(
+            path, "textDocument/signatureHelp",
+            { position: pos01(position) }, token);
+          if (!result || !result.signatures || !result.signatures.length) {
+            return null;
+          }
+          return {
+            value: {
+              signatures: result.signatures.map((s) => ({
+                label: s.label,
+                documentation: s.documentation && (s.documentation.value || s.documentation),
+                parameters: (s.parameters || []).map((p) => ({
+                  label: p.label,
+                  documentation: p.documentation && (p.documentation.value || p.documentation),
+                })),
+              })),
+              activeSignature: result.activeSignature || 0,
+              activeParameter: result.activeParameter || 0,
+            },
+            dispose: () => {},
+          };
+        },
+      });
+
+      monaco.languages.registerDocumentSymbolProvider(lang, {
+        provideDocumentSymbols: async (model, token) => {
+          const path = pathFromModel(model);
+          if (!path) return null;
+          const result = await requestLsp(
+            path, "textDocument/documentSymbol", {}, token);
+          if (!result || !Array.isArray(result)) return null;
+          // LSP returns either DocumentSymbol[] (hierarchical) or
+          // SymbolInformation[] (flat with .location). Handle both.
+          const convert = (s) => {
+            const range = rangeLspToMonaco(s.range) ||
+                          rangeLspToMonaco(s.location && s.location.range);
+            if (!range) return null;
+            const selection =
+                rangeLspToMonaco(s.selectionRange) || range;
+            return {
+              name: s.name,
+              detail: s.detail || "",
+              // LSP SymbolKind is 1-based, Monaco 0-based.
+              kind: (s.kind || 1) - 1,
+              range,
+              selectionRange: selection,
+              children: Array.isArray(s.children)
+                ? s.children.map(convert).filter(Boolean)
+                : undefined,
+              tags: [],
+            };
+          };
+          return result.map(convert).filter(Boolean);
+        },
+      });
+    });
+  }
+
+  // Recover the session-relative path from a Monaco model. We stored
+  // the path in the URI as `inmemory://digitorn/<encoded-path>`, with
+  // an optional `?t=<timestamp>` disambiguator for URI collisions.
+  // Monaco's `Uri.path` already decodes `%xx`, so the raw `.path`
+  // should look like `/src/App.tsx`. Strip the leading slash and any
+  // trailing cache-buster.
+  function pathFromModel(model) {
+    if (!model || !model.uri) return null;
+    let p = model.uri.path || "";
+    if (p.startsWith("/")) p = p.slice(1);
+    const q = p.indexOf("?");
+    if (q >= 0) p = p.slice(0, q);
+    try { p = decodeURIComponent(p); } catch (_) {}
+    return p || null;
+  }
+})();
+</script>
+</body>
+</html>

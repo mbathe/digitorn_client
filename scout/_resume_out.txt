@@ -1,0 +1,101 @@
+
+== Part 1: run a turn on session resume-a298ba7f ==
+
+  first connection got 221 envelopes, last_seq=194779
+  event-type histogram:
+    139  token
+     26  hook
+     14  assistant_stream_snapshot
+      7  stream_done
+      7  out_token
+      7  in_token
+      6  tool_start
+      6  tool_call
+      2  terminal_output
+      1  connected
+      1  user_message
+      1  message_started
+      1  preview:snapshot
+      1  queue:snapshot
+      1  result
+      1  message_done
+
+== Part 2: fresh connection, rejoin with since=194779 ==
+
+  rejoin got 54 envelope(s) (since=194779):
+    seq=190840  connected
+    seq=194562  user_message
+    seq=194563  message_started
+    seq=194564  hook
+    seq=194565  hook
+    seq=194581  stream_done
+    seq=194583  tool_start
+    seq=194585  hook
+    seq=194586  tool_call
+    seq=194587  hook
+    seq=194588  hook
+    seq=194589  hook
+    seq=194602  stream_done
+    seq=194604  tool_start
+    seq=194606  hook
+    seq=194607  tool_call
+    seq=194608  hook
+    seq=194609  hook
+    seq=194610  hook
+    seq=194612  stream_done
+    seq=194614  tool_start
+    seq=194616  hook
+    seq=194617  tool_call
+    seq=194618  hook
+    seq=194619  hook
+    seq=194620  hook
+    seq=194637  stream_done
+    seq=194639  tool_start
+    seq=194641  hook
+    seq=194642  tool_call
+    seq=194643  terminal_output
+    seq=194644  hook
+    seq=194645  hook
+    seq=194646  hook
+    seq=194656  stream_done
+    seq=194658  tool_start
+    seq=194660  hook
+    seq=194661  tool_call
+    seq=194662  terminal_output
+    seq=194663  hook
+    seq=194664  hook
+    seq=194665  hook
+    seq=194677  stream_done
+    seq=194679  tool_start
+    seq=194681  hook
+    seq=194682  tool_call
+    seq=194683  hook
+    seq=194684  hook
+    seq=194685  hook
+    seq=194776  stream_done
+    seq=194778  result
+    seq=194779  message_done
+    seq=190841  preview:snapshot  state_keys=[]  resources=['files']
+    seq=190842  queue:snapshot
+      is_active=False
+      running_correlation_id=None
+      depth=0
+      entries=0
+
+== Part 3: fresh connection, rejoin with since=0 (full replay) ==
+  full replay got 54 envelope(s). Types:
+     26  hook
+      7  stream_done
+      6  tool_start
+      6  tool_call
+      2  terminal_output
+      1  connected
+      1  user_message
+      1  message_started
+      1  result
+      1  message_done
+      1  preview:snapshot
+      1  queue:snapshot
+
+== Findings ==
+  durable events replayed: ['user_message', 'message_started', 'hook', 'tool_start', 'tool_call', 'result', 'message_done', 'preview:snapshot', 'queue:snapshot']

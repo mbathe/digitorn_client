@@ -1,0 +1,56 @@
+daemon OK at http://127.0.0.1:8000
+
+session: audit-01ad6cab
+
+── SessionActionsService ──
+  [FAIL] POST /sessions/{sid}/compact  (500)  
+      [err] ReadError: [WinError 10054] An existing connection was forcibly closed 
+  [ERR ] GET  /sessions/{sid}/memory  (conn err)  
+  [PASS] GET  /sessions/{sid}/preview  (200)  (404 OK no preview module)
+  [PASS] GET  /sessions/{sid}/tasks  (200)  
+  [PASS] GET  /sessions/{sid}/export  (200)  
+  [PASS] GET  /sessions/search  (200)  (404 OK not deployed)
+  [PASS] POST /sessions/{sid}/abort  (200)  
+
+── AppLifecycleService ──
+  [PASS] POST /apps/validate  (422)  (4xx OK = invalid yaml)
+  [PASS] GET  /apps/{id}/deploy-status  (200)  
+  [PASS] GET  /apps/{id}/payload-schema  (200)  
+  [PASS] GET  /apps/{id}/index  (200)  
+  [PASS] GET  /apps/{id}/errors  (200)  
+  [PASS] GET  /apps/{id}/diagnostics  (200)  
+  [PASS] GET  /apps/{id}/files  (200)  
+  [PASS] GET  /apps/{id}/activations/stats  (200)  
+  [PASS] GET  /apps/{id}/status  (200)  
+
+── AutomationService ──
+  [PASS] GET  /apps/{id}/background-tasks  (200)  
+  [PASS] GET  /apps/{id}/watchers  (200)  
+  [PASS] GET  /apps/{id}/background-sessions  (200)  
+
+── WidgetsRuntimeService ──
+  [PASS] GET  /apps/{id}/widgets/validate  (200)  (404 OK no widgets)
+  [PASS] GET  /apps/{id}/preview-server/status  (200)  (404 OK no preview server)
+
+── AppAdminService ──
+  [PASS] GET  /apps/{id}/quota  (200)  (403 OK for non-admin)
+  [PASS] GET  /apps/{id}/secrets  (200)  
+  [PASS] GET  /apps/{id}/required-secrets  (200)  
+  [PASS] GET  /apps/{id}/approvals  (200)  
+  [PASS] GET  /apps/{id}/mcp/pending-oauth  (200)  (404 OK no MCP servers)
+
+── MiscApiService ──
+  [PASS] GET  /auth/sessions  (200)  
+  [PASS] GET  /api/config/browse  (200)  (4xx OK for non-admin)
+  [PASS] GET  /api/discovery/templates  (200)  
+  [PASS] GET  /api/discovery/triggers  (200)  
+  [PASS] GET  /api/discovery/triggers/configured  (200)  
+  [PASS] GET  /api/mcp/pool/health  (200)  
+  [PASS] GET  /api/transcribe/health  (200)  
+  [PASS] GET  /apps/{id}/notifications/active  (200)  
+
+=> 32/34 PASS (2 FAIL/ERR)
+
+Failures:
+  POST /sessions/{sid}/compact  (500) 
+  GET  /sessions/{sid}/memory  (conn err) 

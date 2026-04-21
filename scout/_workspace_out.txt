@@ -1,0 +1,2208 @@
+
+=== Workspace scout app=fs-tester session=scout-ws-e5d90a51 ===
+
+sandbox = C:\Users\ASUS\Documents\digitorn_client\scout\_sandbox
+
+--- 33 envelopes, type histogram ---
+    12  token
+     6  hook
+     2  stream_done
+     2  out_token
+     2  in_token
+     1  connected
+     1  user_message
+     1  message_started
+     1  queue:snapshot
+     1  assistant_stream_snapshot
+     1  tool_start
+     1  tool_call
+     1  result
+     1  message_done
+
+--- interesting envelopes ---
+
+[seq=129240] connected
+{}
+
+[seq=129237] user_message
+{
+  "session_id": "scout-ws-e5d90a51",
+  "role": "user",
+  "content": "Use the Write tool to create a file hello.txt with the single line 'hi'. Reply in one word when done.",
+  "images": [],
+  "correlation_id": "fp-ca950dd0b2a4",
+  "client_message_id": "",
+  "pending": false
+}
+
+[seq=129238] message_started
+{
+  "correlation_id": "fp-ca950dd0b2a4",
+  "session_id": "scout-ws-e5d90a51",
+  "position": 0,
+  "fast_path": true
+}
+
+[seq=129239] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0243,
+    "estimated_tokens": 3082,
+    "max_tokens": 126976,
+    "threshold": 0.75,
+    "messages": 2
+  }
+}
+
+[seq=129240] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0243,
+    "estimated_tokens": 3082,
+    "max_tokens": 126976,
+    "threshold": 0.75,
+    "messages": 2
+  }
+}
+
+[seq=129241] queue:snapshot
+{
+  "entries": [],
+  "depth": 0,
+  "is_active": false,
+  "running_correlation_id": null
+}
+
+[seq=129254] stream_done
+{}
+
+[seq=129256] tool_start
+{
+  "id": "call_00_XGrtaZFOREkB6ViFCKkExCpV",
+  "name": "Write",
+  "params": {
+    "file_path": "hello.txt",
+    "content": "hi"
+  },
+  "label": "Write",
+  "detail": "hi",
+  "display": {
+    "verb": "Write",
+    "detail": "hello.txt",
+    "icon": "file",
+    "channel": "workspace",
+    "hidden": false,
+    "category": "action",
+    "group": "filesystem",
+    "visible_params": [
+      "file_path",
+      "content"
+    ]
+  }
+}
+
+[seq=129258] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0256,
+    "estimated_tokens": 3256,
+    "max_tokens": 126976,
+    "threshold": 0.75,
+    "messages": 3
+  }
+}
+
+[seq=129259] tool_call
+{
+  "id": "call_00_XGrtaZFOREkB6ViFCKkExCpV",
+  "name": "Write",
+  "params": {
+    "file_path": "hello.txt",
+    "content": "hi"
+  },
+  "success": true,
+  "error": "",
+  "label": "Write",
+  "detail": "hi",
+  "display": {
+    "verb": "Write",
+    "detail": "hello.txt",
+    "icon": "file",
+    "channel": "workspace",
+    "hidden": false,
+    "category": "action",
+    "group": "filesystem",
+    "visible_params": [
+      "file_path",
+      "content"
+    ]
+  },
+  "result": {
+    "path": "hello.txt",
+    "language": "text",
+    "operation": "create",
+    "size": 2,
+    "lines": 1
+  }
+}
+
+[seq=129260] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0256,
+    "estimated_tokens": 3256,
+    "max_tokens": 126976,
+    "threshold": 0.75,
+    "messages": 3
+  }
+}
+
+[seq=129261] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0258,
+    "estimated_tokens": 3278,
+    "max_tokens": 126976,
+    "threshold": 0.75,
+    "messages": 4
+  }
+}
+
+[seq=129262] hook
+{
+  "hook_id": "_system",
+  "action_type": "context_status",
+  "phase": "update",
+  "details": {
+    "pressure": 0.0258,
+    "estimated_tokens": 3278,
+    "max_tokens": 126976,
+    "threshold": 0.75,
+    "messages": 4
+  }
+}
+
+[seq=129265] stream_done
+{}
+
+[seq=129267] result
+{
+  "content": "Done",
+  "session_id": "scout-ws-e5d90a51",
+  "tool_calls_count": 1,
+  "turns_used": 2,
+  "truncated": false,
+  "error": null,
+  "usage": {
+    "input_tokens": 9273,
+    "output_tokens": 73,
+    "total_input_tokens": 9273,
+    "total_output_tokens": 73,
+    "total_tokens": 9346,
+    "cost_usd": 0.00771
+  },
+  "turn_number": 1,
+  "context": {
+    "max_tokens": 131072,
+    "output_reserved": 4096,
+    "effective_max": 126976,
+    "system_prompt_tokens": 2914,
+    "system_prompt_pct": 2.3,
+    "tools_schema_tokens": 1402,
+    "tools_schema_pct": 1.1,
+    "message_history_tokens": 135,
+    "message_history_pct": 0.1,
+    "total_estimated_tokens": 4451,
+    "pressure": 0.035,
+    "available_tokens": 122525,
+    "compactions": 0
+  },
+  "workspace_status": {
+    "branch": "main",
+    "changes": [
+      {
+        "status": "M",
+        "path": "metadata",
+        "full_path": "metadata"
+      },
+      {
+        "status": "M",
+        "path": "en.json",
+        "full_path": "assets/translations/en.json"
+      },
+      {
+        "status": "M",
+        "path": "fr.json",
+        "full_path": "assets/translations/fr.json"
+      },
+      {
+        "status": "M",
+        "path": "main.dart",
+        "full_path": "lib/main.dart"
+      },
+      {
+        "status": "M",
+        "path": "app_summary.dart",
+        "full_path": "lib/models/app_summary.dart"
+      },
+      {
+        "status": "M",
+        "path": "chat_message.dart",
+        "full_path": "lib/models/chat_message.dart"
+      },
+      {
+        "status": "M",
+        "path": "session_metrics.dart",
+        "full_path": "lib/models/session_metrics.dart"
+      },
+      {
+        "status": "M",
+        "path": "workspace_state.dart",
+        "full_path": "lib/models/workspace_state.dart"
+      },
+      {
+        "status": "M",
+        "path": "api_client.dart",
+        "full_path": "lib/services/api_client.dart"
+      },
+      {
+        "status": "M",
+        "path": "auth_service.dart",
+        "full_path": "lib/services/auth_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "background_service.dart",
+        "full_path": "lib/services/background_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "notification_service.dart",
+        "full_path": "lib/services/notification_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "session_service.dart",
+        "full_path": "lib/services/session_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "socket_service.dart",
+        "full_path": "lib/services/socket_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "theme_service.dart",
+        "full_path": "lib/services/theme_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "tool_service.dart",
+        "full_path": "lib/services/tool_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "workspace_service.dart",
+        "full_path": "lib/services/workspace_service.dart"
+      },
+      {
+        "status": "M",
+        "path": "app_theme.dart",
+        "full_path": "lib/theme/app_theme.dart"
+      },
+      {
+        "status": "M",
+        "path": "login_page.dart",
+        "full_path": "lib/ui/auth/login_page.dart"
+      },
+      {
+        "status": "M",
+        "path": "chat_bubbles.dart",
+        "full_path": "lib/ui/chat/chat_bubbles.dart"
+      },
+      {
+        "status": "M",
+        "path": "chat_panel.dart",
+        "full_path": "lib/ui/chat/chat_panel.dart"
+      },
+      {
+        "status": "D",
+        "path": "checkpoint_rail.dart",
+        "full_path": "lib/ui/chat/checkpoint_rail.dart"
+      },
+      {
+        "status": "M",
+        "path": "context_modal.dart",
+        "full_path": "lib/ui/chat/context_modal.dart"
+      },
+      {
+        "status": "M",
+        "path": "tasks_modal.dart",
+        "full_path": "lib/ui/chat/tasks_modal.dart"
+      },
+      {
+        "status": "M",
+        "path": "tools_modal.dart",
+        "full_path": "lib/ui/chat/tools_modal.dart"
+      },
+      {
+        "status": "M",
+        "path": "command_palette.dart",
+        "full_path": "lib/ui/command_palette.dart"
+      },
+      {
+        "status": "M",
+        "path": "app_health.dart",
+        "full_path": "lib/ui/dashboard/app_health.dart"
+      },
+      {
+        "status": "M",
+        "path": "app_selector.dart",
+        "full_path": "lib/ui/dashboard/app_selector.dart"
+      },
+      {
+        "status": "M",
+        "path": "session_drawer.dart",
+        "full_path": "lib/ui/sessions/session_drawer.dart"
+      },
+      {
+        "status": "M",
+        "path": "settings_page.dart",
+        "full_path": "lib/ui/settings/settings_page.dart"
+      },
+      {
+        "status": "M",
+        "path": "workspace_sidebar.dart",
+        "full_path": "lib/ui/sidebar/workspace_sidebar.dart"
+      },
+      {
+        "status": "M",
+        "path": "tools_panel.dart",
+        "full_path": "lib/ui/tools/tools_panel.dart"
+      },
+      {
+        "status": "M",
+        "path": "code_editor.dart",
+        "full_path": "lib/ui/workspace/code_editor.dart"
+      },
+      {
+        "status": "M",
+        "path": "excel_grid.dart",
+        "full_path": "lib/ui/workspace/excel_grid.dart"
+      },
+      {
+        "status": "M",
+        "path": "workspace_panel.dart",
+        "full_path": "lib/ui/workspace/workspace_panel.dart"
+      },
+      {
+        "status": "M",
+        "path": "pubspec.lock",
+        "full_path": "pubspec.lock"
+      },
+      {
+        "status": "M",
+        "path": "pubspec.yaml",
+        "full_path": "pubspec.yaml"
+      },
+      {
+        "status": "M",
+        "path": "chat_message_test.dart",
+        "full_path": "test/models/chat_message_test.dart"
+      },
+      {
+        "status": "M",
+        "path": "workspace_service_test.dart",
+        "full_path": "test/services/workspace_service_test.dart"
+      },
+      {
+        "status": "M",
+        "path": "generated_plugin_registrant.cc",
+        "full_path": "windows/flutter/generated_plugin_registrant.cc"
+      },
+      {
+        "status": "M",
+        "path": "generated_plugins.cmake",
+        "full_path": "windows/flutter/generated_plugins.cmake"
+      },
+      {
+        "status": "?",
+        "path": "home_mockup.html",
+        "full_path": ".claude/home_mockup.html"
+      },
+      {
+        "status": "?",
+        "path": "scheduled_tasks.lock",
+        "full_path": ".claude/scheduled_tasks.lock"
+      },
+      {
+        "status": "?",
+        "path": "settings.local.json",
+        "full_path": ".claude/settings.local.json"
+      },
+      {
+        "status": "?",
+        "path": "mbathe.chatmode.md",
+        "full_path": ".github/chatmodes/mbathe.chatmode.md"
+      },
+      {
+        "status": "?",
+        "path": "settings.json",
+        "full_path": ".vscode/settings.json"
+      },
+      {
+        "status": "?",
+        "path": "README.md",
+        "full_path": "README.md"
+      },
+      {
+        "status": "?",
+        "path": ".gitignore",
+        "full_path": "android/.gitignore"
+      },
+      {
+        "status": "?",
+        "path": "build.gradle.kts",
+        "full_path": "android/app/build.gradle.kts"
+      },
+      {
+        "status": "?",
+        "path": "AndroidManifest.xml",
+        "full_path": "android/app/src/debug/AndroidManifest.xml"
+      },
+      {
+        "status": "?",
+        "path": "AndroidManifest.xml",
+        "full_path": "android/app/src/main/AndroidManifest.xml"
+      },
+      {
+        "status": "?",
+        "path": "MainActivity.kt",
+        "full_path": "android/app/src/main/kotlin/com/example/digitorn_client/MainActivity.kt"
+      },
+      {
+        "status": "?",
+        "path": "launch_background.xml",
+        "full_path": "android/app/src/main/res/drawable-v21/launch_background.xml"
+      },
+      {
+        "status": "?",
+        "path": "launch_background.xml",
+        "full_path": "android/app/src/main/res/drawable/launch_background.xml"
+      },
+      {
+        "status": "?",
+        "path": "ic_launcher.png",
+        "full_path": "android/app/src/main/res/mipmap-hdpi/ic_launcher.png"
+      },
+      {
+        "status": "?",
+        "path": "ic_launcher.png",
+        "full_path": "android/app/src/main/res/mipmap-mdpi/ic_launcher.png"
+      },
+      {
+        "status": "?",
+        "path": "ic_launcher.png",
+        "full_path": "android/app/src/main/res/mipmap-xhdpi/ic_launcher.png"
+      },
+      {
+        "status": "?",
+        "path": "ic_launcher.png",
+        "full_path": "android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png"
+      },
+      {
+        "status": "?",
+        "path": "ic_launcher.png",
+        "full_path": "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+      },
+      {
+        "status": "?",
+        "path": "styles.xml",
+        "full_path": "android/app/src/main/res/values-night/styles.xml"
+      },
+      {
+        "status": "?",
+        "path": "styles.xml",
+        "full_path": "android/app/src/main/res/values/styles.xml"
+      },
+      {
+        "status": "?",
+        "path": "AndroidManifest.xml",
+        "full_path": "android/app/src/profile/AndroidManifest.xml"
+      },
+      {
+        "status": "?",
+        "path": "build.gradle.kts",
+        "full_path": "android/build.gradle.kts"
+      },
+      {
+        "status": "?",
+        "path": "gradle.properties",
+        "full_path": "android/gradle.properties"
+      },
+      {
+        "status": "?",
+        "path": "gradle-wrapper.properties",
+        "full_path": "android/gradle/wrapper/gradle-wrapper.properties"
+      },
+      {
+        "status": "?",
+        "path": "settings.gradle.kts",
+        "full_path": "android/settings.gradle.kts"
+      },
+      {
+        "status": "?",
+        "path": "logo.png",
+        "full_path": "assets/logo.png"
+      },
+      {
+        "status": "?",
+        "path": "editor.html",
+        "full_path": "assets/monaco/editor.html"
+      },
+      {
+        "status": "?",
+        "path": "de.json",
+        "full_path": "assets/translations/de.json"
+      },
+      {
+        "status": "?",
+        "path": "es.json",
+        "full_path": "assets/translations/es.json"
+      },
+      {
+        "status": "?",
+        "path": "it.json",
+        "full_path": "assets/translations/it.json"
+      },
+      {
+        "status": "?",
+        "path": "pt.json",
+        "full_path": "assets/translations/pt.json"
+      },
+      {
+        "status": "?",
+        "path": "digitorn_logo.jpg",
+        "full_path": "digitorn_logo.jpg"
+      },
+      {
+        "status": "?",
+        "path": "app_manifest_contract.md",
+        "full_path": "docs/app_manifest_contract.md"
+      },
+      {
+        "status": "?",
+        "path": "voice_transcription_contract.md",
+        "full_path": "docs/voice_transcription_contract.md"
+      },
+      {
+        "status": "?",
+        "path": "install_flutter.ps1",
+        "full_path": "install_flutter.ps1"
+      },
+      {
+        "status": "?",
+        "path": ".gitignore",
+        "full_path": "ios/.gitignore"
+      },
+      {
+        "status": "?",
+        "path": "AppFrameworkInfo.plist",
+        "full_path": "ios/Flutter/AppFrameworkInfo.plist"
+      },
+      {
+        "status": "?",
+        "path": "Debug.xcconfig",
+        "full_path": "ios/Flutter/Debug.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "Release.xcconfig",
+        "full_path": "ios/Flutter/Release.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "project.pbxproj",
+        "full_path": "ios/Runner.xcodeproj/project.pbxproj"
+      },
+      {
+        "status": "?",
+        "path": "contents.xcworkspacedata",
+        "full_path": "ios/Runner.xcodeproj/project.xcworkspace/contents.xcworkspacedata"
+      },
+      {
+        "status": "?",
+        "path": "IDEWorkspaceChecks.plist",
+        "full_path": "ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist"
+      },
+      {
+        "status": "?",
+        "path": "WorkspaceSettings.xcsettings",
+        "full_path": "ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings"
+      },
+      {
+        "status": "?",
+        "path": "Runner.xcscheme",
+        "full_path": "ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme"
+      },
+      {
+        "status": "?",
+        "path": "contents.xcworkspacedata",
+        "full_path": "ios/Runner.xcworkspace/contents.xcworkspacedata"
+      },
+      {
+        "status": "?",
+        "path": "IDEWorkspaceChecks.plist",
+        "full_path": "ios/Runner.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist"
+      },
+      {
+        "status": "?",
+        "path": "WorkspaceSettings.xcsettings",
+        "full_path": "ios/Runner.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings"
+      },
+      {
+        "status": "?",
+        "path": "AppDelegate.swift",
+        "full_path": "ios/Runner/AppDelegate.swift"
+      },
+      {
+        "status": "?",
+        "path": "Contents.json",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-1024x1024@1x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-1024x1024@1x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-20x20@1x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@1x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-20x20@2x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@2x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-20x20@3x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@3x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-29x29@1x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@1x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-29x29@2x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@2x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-29x29@3x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@3x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-40x40@1x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@1x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-40x40@2x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@2x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-40x40@3x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@3x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-60x60@2x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@2x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-60x60@3x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@3x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-76x76@1x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@1x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-76x76@2x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@2x.png"
+      },
+      {
+        "status": "?",
+        "path": "Icon-App-83.5x83.5@2x.png",
+        "full_path": "ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-83.5x83.5@2x.png"
+      },
+      {
+        "status": "?",
+        "path": "Contents.json",
+        "full_path": "ios/Runner/Assets.xcassets/LaunchImage.imageset/Contents.json"
+      },
+      {
+        "status": "?",
+        "path": "LaunchImage.png",
+        "full_path": "ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage.png"
+      },
+      {
+        "status": "?",
+        "path": "LaunchImage@2x.png",
+        "full_path": "ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage@2x.png"
+      },
+      {
+        "status": "?",
+        "path": "LaunchImage@3x.png",
+        "full_path": "ios/Runner/Assets.xcassets/LaunchImage.imageset/LaunchImage@3x.png"
+      },
+      {
+        "status": "?",
+        "path": "README.md",
+        "full_path": "ios/Runner/Assets.xcassets/LaunchImage.imageset/README.md"
+      },
+      {
+        "status": "?",
+        "path": "LaunchScreen.storyboard",
+        "full_path": "ios/Runner/Base.lproj/LaunchScreen.storyboard"
+      },
+      {
+        "status": "?",
+        "path": "Main.storyboard",
+        "full_path": "ios/Runner/Base.lproj/Main.storyboard"
+      },
+      {
+        "status": "?",
+        "path": "Info.plist",
+        "full_path": "ios/Runner/Info.plist"
+      },
+      {
+        "status": "?",
+        "path": "Runner-Bridging-Header.h",
+        "full_path": "ios/Runner/Runner-Bridging-Header.h"
+      },
+      {
+        "status": "?",
+        "path": "SceneDelegate.swift",
+        "full_path": "ios/Runner/SceneDelegate.swift"
+      },
+      {
+        "status": "?",
+        "path": "RunnerTests.swift",
+        "full_path": "ios/RunnerTests/RunnerTests.swift"
+      },
+      {
+        "status": "?",
+        "path": "ds.dart",
+        "full_path": "lib/design/ds.dart"
+      },
+      {
+        "status": "?",
+        "path": "elevation.dart",
+        "full_path": "lib/design/elevation.dart"
+      },
+      {
+        "status": "?",
+        "path": "motion.dart",
+        "full_path": "lib/design/motion.dart"
+      },
+      {
+        "status": "?",
+        "path": "tokens.dart",
+        "full_path": "lib/design/tokens.dart"
+      },
+      {
+        "status": "?",
+        "path": "typography.dart",
+        "full_path": "lib/design/typography.dart"
+      },
+      {
+        "status": "?",
+        "path": "app_manifest.dart",
+        "full_path": "lib/models/app_manifest.dart"
+      },
+      {
+        "status": "?",
+        "path": "app_package.dart",
+        "full_path": "lib/models/app_package.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_schema.dart",
+        "full_path": "lib/models/credential_schema.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_v2.dart",
+        "full_path": "lib/models/credential_v2.dart"
+      },
+      {
+        "status": "?",
+        "path": "diagnostic.dart",
+        "full_path": "lib/models/diagnostic.dart"
+      },
+      {
+        "status": "?",
+        "path": "mcp_server.dart",
+        "full_path": "lib/models/mcp_server.dart"
+      },
+      {
+        "status": "?",
+        "path": "queue_entry.dart",
+        "full_path": "lib/models/queue_entry.dart"
+      },
+      {
+        "status": "?",
+        "path": "activity_inbox_service.dart",
+        "full_path": "lib/services/activity_inbox_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_service.dart",
+        "full_path": "lib/services/admin_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "app_bundle_loader.dart",
+        "full_path": "lib/services/app_bundle_loader.dart"
+      },
+      {
+        "status": "?",
+        "path": "approvals_service.dart",
+        "full_path": "lib/services/approvals_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "apps_service.dart",
+        "full_path": "lib/services/apps_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "assets_service.dart",
+        "full_path": "lib/services/assets_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "background_app_service.dart",
+        "full_path": "lib/services/background_app_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "builder_drafts_service.dart",
+        "full_path": "lib/services/builder_drafts_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_probe.dart",
+        "full_path": "lib/services/credential_probe.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_service.dart",
+        "full_path": "lib/services/credential_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "credentials_v2_service.dart",
+        "full_path": "lib/services/credentials_v2_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "cron.dart",
+        "full_path": "lib/services/cron.dart"
+      },
+      {
+        "status": "?",
+        "path": "database_service.dart",
+        "full_path": "lib/services/database_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "devices_service.dart",
+        "full_path": "lib/services/devices_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "file_actions_service.dart",
+        "full_path": "lib/services/file_actions_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "file_content_service.dart",
+        "full_path": "lib/services/file_content_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "lsp_service.dart",
+        "full_path": "lib/services/lsp_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "mcp_service.dart",
+        "full_path": "lib/services/mcp_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "modules_service.dart",
+        "full_path": "lib/services/modules_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "_notifier_io.dart",
+        "full_path": "lib/services/notifier/_notifier_io.dart"
+      },
+      {
+        "status": "?",
+        "path": "_notifier_web.dart",
+        "full_path": "lib/services/notifier/_notifier_web.dart"
+      },
+      {
+        "status": "?",
+        "path": "notifier.dart",
+        "full_path": "lib/services/notifier/notifier.dart"
+      },
+      {
+        "status": "?",
+        "path": "onboarding_service.dart",
+        "full_path": "lib/services/onboarding_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "package_service.dart",
+        "full_path": "lib/services/package_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "payload_schema.dart",
+        "full_path": "lib/services/payload_schema.dart"
+      },
+      {
+        "status": "?",
+        "path": "payload_service.dart",
+        "full_path": "lib/services/payload_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "preferences_service.dart",
+        "full_path": "lib/services/preferences_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "preview_store.dart",
+        "full_path": "lib/services/preview_store.dart"
+      },
+      {
+        "status": "?",
+        "path": "queue_service.dart",
+        "full_path": "lib/services/queue_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "quotas_service.dart",
+        "full_path": "lib/services/quotas_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "recent_attachments_service.dart",
+        "full_path": "lib/services/recent_attachments_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "session_prefs_service.dart",
+        "full_path": "lib/services/session_prefs_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "session_share.dart",
+        "full_path": "lib/services/session_share.dart"
+      },
+      {
+        "status": "?",
+        "path": "snippets_service.dart",
+        "full_path": "lib/services/snippets_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "tool_display_defaults_service.dart",
+        "full_path": "lib/services/tool_display_defaults_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "usage_service.dart",
+        "full_path": "lib/services/usage_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "user_events_service.dart",
+        "full_path": "lib/services/user_events_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "voice_input_service.dart",
+        "full_path": "lib/services/voice_input_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "workspace_module.dart",
+        "full_path": "lib/services/workspace_module.dart"
+      },
+      {
+        "status": "?",
+        "path": "workspace_snapshot_service.dart",
+        "full_path": "lib/services/workspace_snapshot_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_console_page.dart",
+        "full_path": "lib/ui/admin/admin_console_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "quotas_admin_page.dart",
+        "full_path": "lib/ui/admin/quotas_admin_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "_section_scaffold.dart",
+        "full_path": "lib/ui/admin/sections/_section_scaffold.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_audit_section.dart",
+        "full_path": "lib/ui/admin/sections/admin_audit_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_mcp_pool_section.dart",
+        "full_path": "lib/ui/admin/sections/admin_mcp_pool_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_overview_section.dart",
+        "full_path": "lib/ui/admin/sections/admin_overview_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_quotas_section.dart",
+        "full_path": "lib/ui/admin/sections/admin_quotas_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_system_credentials_section.dart",
+        "full_path": "lib/ui/admin/sections/admin_system_credentials_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_system_packages_section.dart",
+        "full_path": "lib/ui/admin/sections/admin_system_packages_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "admin_users_section.dart",
+        "full_path": "lib/ui/admin/sections/admin_users_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "approvals_page.dart",
+        "full_path": "lib/ui/approvals/approvals_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "asset_browser_dialog.dart",
+        "full_path": "lib/ui/assets/asset_browser_dialog.dart"
+      },
+      {
+        "status": "?",
+        "path": "activation_drawer.dart",
+        "full_path": "lib/ui/background/activation_drawer.dart"
+      },
+      {
+        "status": "?",
+        "path": "activations_page.dart",
+        "full_path": "lib/ui/background/activations_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "artifact_preview.dart",
+        "full_path": "lib/ui/background/artifact_preview.dart"
+      },
+      {
+        "status": "?",
+        "path": "background_dashboard.dart",
+        "full_path": "lib/ui/background/background_dashboard.dart"
+      },
+      {
+        "status": "?",
+        "path": "session_payload_page.dart",
+        "full_path": "lib/ui/background/session_payload_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "sparkline.dart",
+        "full_path": "lib/ui/background/widgets/sparkline.dart"
+      },
+      {
+        "status": "?",
+        "path": "typed_payload_form.dart",
+        "full_path": "lib/ui/background/widgets/typed_payload_form.dart"
+      },
+      {
+        "status": "?",
+        "path": "builder_drafts_page.dart",
+        "full_path": "lib/ui/builder/builder_drafts_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "artifact.dart",
+        "full_path": "lib/ui/chat/artifacts/artifact.dart"
+      },
+      {
+        "status": "?",
+        "path": "artifact_detector.dart",
+        "full_path": "lib/ui/chat/artifacts/artifact_detector.dart"
+      },
+      {
+        "status": "?",
+        "path": "artifact_panel.dart",
+        "full_path": "lib/ui/chat/artifacts/artifact_panel.dart"
+      },
+      {
+        "status": "?",
+        "path": "artifact_pill.dart",
+        "full_path": "lib/ui/chat/artifacts/artifact_pill.dart"
+      },
+      {
+        "status": "?",
+        "path": "artifact_service.dart",
+        "full_path": "lib/ui/chat/artifacts/artifact_service.dart"
+      },
+      {
+        "status": "?",
+        "path": "attach_menu.dart",
+        "full_path": "lib/ui/chat/attach/attach_menu.dart"
+      },
+      {
+        "status": "?",
+        "path": "attachment_helpers.dart",
+        "full_path": "lib/ui/chat/attach/attachment_helpers.dart"
+      },
+      {
+        "status": "?",
+        "path": "attachments_bar.dart",
+        "full_path": "lib/ui/chat/attach/attachments_bar.dart"
+      },
+      {
+        "status": "?",
+        "path": "chat_export_bridge.dart",
+        "full_path": "lib/ui/chat/chat_export_bridge.dart"
+      },
+      {
+        "status": "?",
+        "path": "chat_panel_logic.dart",
+        "full_path": "lib/ui/chat/chat_panel_logic.dart"
+      },
+      {
+        "status": "?",
+        "path": "recording_overlay.dart",
+        "full_path": "lib/ui/chat/recording_overlay.dart"
+      },
+      {
+        "status": "?",
+        "path": "saving_indicator.dart",
+        "full_path": "lib/ui/chat/saving_indicator.dart"
+      },
+      {
+        "status": "?",
+        "path": "smart_paste.dart",
+        "full_path": "lib/ui/chat/smart_paste.dart"
+      },
+      {
+        "status": "?",
+        "path": "snippets_picker.dart",
+        "full_path": "lib/ui/chat/snippets_picker.dart"
+      },
+      {
+        "status": "?",
+        "path": "chat_empty_state.dart",
+        "full_path": "lib/ui/chat/widgets/chat_empty_state.dart"
+      },
+      {
+        "status": "?",
+        "path": "workspace_snapshot_actions.dart",
+        "full_path": "lib/ui/chat/workspace_snapshot_actions.dart"
+      },
+      {
+        "status": "?",
+        "path": "title_bar.dart",
+        "full_path": "lib/ui/chrome/title_bar.dart"
+      },
+      {
+        "status": "?",
+        "path": "pill_tab_bar.dart",
+        "full_path": "lib/ui/common/pill_tab_bar.dart"
+      },
+      {
+        "status": "?",
+        "path": "remote_icon.dart",
+        "full_path": "lib/ui/common/remote_icon.dart"
+      },
+      {
+        "status": "?",
+        "path": "themed_dialogs.dart",
+        "full_path": "lib/ui/common/themed_dialogs.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_gate.dart",
+        "full_path": "lib/ui/credentials/credential_gate.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_onboarding.dart",
+        "full_path": "lib/ui/credentials/credential_onboarding.dart"
+      },
+      {
+        "status": "?",
+        "path": "credentials_form.dart",
+        "full_path": "lib/ui/credentials/credentials_form.dart"
+      },
+      {
+        "status": "?",
+        "path": "my_credentials_page.dart",
+        "full_path": "lib/ui/credentials/my_credentials_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_field_form.dart",
+        "full_path": "lib/ui/credentials_v2/credential_field_form.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_form_dialog.dart",
+        "full_path": "lib/ui/credentials_v2/credential_form_dialog.dart"
+      },
+      {
+        "status": "?",
+        "path": "credential_picker_dialog.dart",
+        "full_path": "lib/ui/credentials_v2/credential_picker_dialog.dart"
+      },
+      {
+        "status": "?",
+        "path": "credentials_gate_v2.dart",
+        "full_path": "lib/ui/credentials_v2/credentials_gate_v2.dart"
+      },
+      {
+        "status": "?",
+        "path": "credentials_manager_page.dart",
+        "full_path": "lib/ui/credentials_v2/credentials_manager_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "system_credentials_dialog.dart",
+        "full_path": "lib/ui/credentials_v2/system_credentials_dialog.dart"
+      },
+      {
+        "status": "?",
+        "path": "deploy_flow.dart",
+        "full_path": "lib/ui/dashboard/deploy_flow.dart"
+      },
+      {
+        "status": "?",
+        "path": "database_panel.dart",
+        "full_path": "lib/ui/database/database_panel.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds.dart",
+        "full_path": "lib/ui/ds/ds.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds_avatar.dart",
+        "full_path": "lib/ui/ds/ds_avatar.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds_brand.dart",
+        "full_path": "lib/ui/ds/ds_brand.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds_button.dart",
+        "full_path": "lib/ui/ds/ds_button.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds_input.dart",
+        "full_path": "lib/ui/ds/ds_input.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds_kbd.dart",
+        "full_path": "lib/ui/ds/ds_kbd.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds_progress.dart",
+        "full_path": "lib/ui/ds/ds_progress.dart"
+      },
+      {
+        "status": "?",
+        "path": "ds_surface.dart",
+        "full_path": "lib/ui/ds/ds_surface.dart"
+      },
+      {
+        "status": "?",
+        "path": "global_search.dart",
+        "full_path": "lib/ui/global_search.dart"
+      },
+      {
+        "status": "?",
+        "path": "hub_page.dart",
+        "full_path": "lib/ui/hub/hub_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "inbox_bell.dart",
+        "full_path": "lib/ui/inbox/inbox_bell.dart"
+      },
+      {
+        "status": "?",
+        "path": "keyboard_shortcuts_sheet.dart",
+        "full_path": "lib/ui/keyboard_shortcuts_sheet.dart"
+      },
+      {
+        "status": "?",
+        "path": "mcp_card.dart",
+        "full_path": "lib/ui/mcp/mcp_card.dart"
+      },
+      {
+        "status": "?",
+        "path": "mcp_catalogue.dart",
+        "full_path": "lib/ui/mcp/mcp_catalogue.dart"
+      },
+      {
+        "status": "?",
+        "path": "mcp_install_dialog.dart",
+        "full_path": "lib/ui/mcp/mcp_install_dialog.dart"
+      },
+      {
+        "status": "?",
+        "path": "mcp_oauth_dialog.dart",
+        "full_path": "lib/ui/mcp/mcp_oauth_dialog.dart"
+      },
+      {
+        "status": "?",
+        "path": "mcp_store_page.dart",
+        "full_path": "lib/ui/mcp/mcp_store_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "account_wizard_page.dart",
+        "full_path": "lib/ui/onboarding/account_wizard_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "setup_wizard_page.dart",
+        "full_path": "lib/ui/onboarding/setup_wizard_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "accessibility_step.dart",
+        "full_path": "lib/ui/onboarding/steps/accessibility_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "credentials_step.dart",
+        "full_path": "lib/ui/onboarding/steps/credentials_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "daemon_step.dart",
+        "full_path": "lib/ui/onboarding/steps/daemon_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "keyboard_tour_step.dart",
+        "full_path": "lib/ui/onboarding/steps/keyboard_tour_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "profile_step.dart",
+        "full_path": "lib/ui/onboarding/steps/profile_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "ready_step.dart",
+        "full_path": "lib/ui/onboarding/steps/ready_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "starter_apps_step.dart",
+        "full_path": "lib/ui/onboarding/steps/starter_apps_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "theme_step.dart",
+        "full_path": "lib/ui/onboarding/steps/theme_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "welcome_step.dart",
+        "full_path": "lib/ui/onboarding/steps/welcome_step.dart"
+      },
+      {
+        "status": "?",
+        "path": "wizard_nav.dart",
+        "full_path": "lib/ui/onboarding/wizard_nav.dart"
+      },
+      {
+        "status": "?",
+        "path": "wizard_shell.dart",
+        "full_path": "lib/ui/onboarding/wizard_shell.dart"
+      },
+      {
+        "status": "?",
+        "path": "wizard_step_scaffold.dart",
+        "full_path": "lib/ui/onboarding/wizard_step_scaffold.dart"
+      },
+      {
+        "status": "?",
+        "path": "oneshot_panel.dart",
+        "full_path": "lib/ui/oneshot/oneshot_panel.dart"
+      },
+      {
+        "status": "?",
+        "path": "disabled_apps_section.dart",
+        "full_path": "lib/ui/packages/disabled_apps_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "featured_catalogue.dart",
+        "full_path": "lib/ui/packages/featured_catalogue.dart"
+      },
+      {
+        "status": "?",
+        "path": "install_flow.dart",
+        "full_path": "lib/ui/packages/install_flow.dart"
+      },
+      {
+        "status": "?",
+        "path": "lifecycle_dialogs.dart",
+        "full_path": "lib/ui/packages/lifecycle_dialogs.dart"
+      },
+      {
+        "status": "?",
+        "path": "modules_view.dart",
+        "full_path": "lib/ui/packages/modules_view.dart"
+      },
+      {
+        "status": "?",
+        "path": "package_card.dart",
+        "full_path": "lib/ui/packages/package_card.dart"
+      },
+      {
+        "status": "?",
+        "path": "package_detail_page.dart",
+        "full_path": "lib/ui/packages/package_detail_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "packages_manager_page.dart",
+        "full_path": "lib/ui/packages/packages_manager_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "packages_store_page.dart",
+        "full_path": "lib/ui/packages/packages_store_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "scope_badge.dart",
+        "full_path": "lib/ui/packages/scope_badge.dart"
+      },
+      {
+        "status": "?",
+        "path": "recent_conversations_page.dart",
+        "full_path": "lib/ui/sessions/recent_conversations_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "diagnostics_page.dart",
+        "full_path": "lib/ui/settings/diagnostics_page.dart"
+      },
+      {
+        "status": "?",
+        "path": "_shared.dart",
+        "full_path": "lib/ui/settings/sections/_shared.dart"
+      },
+      {
+        "status": "?",
+        "path": "about_section.dart",
+        "full_path": "lib/ui/settings/sections/about_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "app_permissions_section.dart",
+        "full_path": "lib/ui/settings/sections/app_permissions_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "appearance_section.dart",
+        "full_path": "lib/ui/settings/sections/appearance_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "credentials_section.dart",
+        "full_path": "lib/ui/settings/sections/credentials_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "general_section.dart",
+        "full_path": "lib/ui/settings/sections/general_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "language_section.dart",
+        "full_path": "lib/ui/settings/sections/language_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "notifications_section.dart",
+        "full_path": "lib/ui/settings/sections/notifications_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "usage_section.dart",
+        "full_path": "lib/ui/settings/sections/usage_section.dart"
+      },
+      {
+        "status": "?",
+        "path": "changes_panel.dart",
+        "full_path": "lib/ui/workspace/changes/changes_panel.dart"
+      },
+      {
+        "status": "?",
+        "path": "line_diff.dart",
+        "full_path": "lib/ui/workspace/diff/line_diff.dart"
+      },
+      {
+        "status": "?",
+        "path": "line_diff_view.dart",
+        "full_path": "lib/ui/workspace/diff/line_diff_view.dart"
+      },
+      {
+        "status": "?",
+        "path": "unified_diff.dart",
+        "full_path": "lib/ui/workspace/diff/unified_diff.dart"
+      },
+      {
+        "status": "?",
+        "path": "code_explorer.dart",
+        "full_path": "lib/ui/workspace/ide/code_explorer.dart"
+      },
+      {
+        "status": "?",
+        "path": "conflict_pane.dart",
+        "full_path": "lib/ui/workspace/ide/conflict_pane.dart"
+      },
+      {
+        "status": "?",
+        "path": "editor_pane.dart",
+        "full_path": "lib/ui/workspace/ide/editor_pane.dart"
+      },
+      {
+        "status": "?",
+        "path": "ide_layout.dart",
+        "full_path": "lib/ui/workspace/ide/ide_layout.dart"
+      },
+      {
+        "status": "?",
+        "path": "monaco_editor_pane.dart",
+        "full_path": "lib/ui/workspace/ide/monaco_editor_pane.dart"
+      },
+      {
+        "status": "?",
+        "path": "problems_panel.dart",
+        "full_path": "lib/ui/workspace/ide/problems_panel.dart"
+      },
+      {
+        "status": "?",
+        "path": "preview_iframe.dart",
+        "full_path": "lib/ui/workspace/preview/preview_iframe.dart"
+      },
+      {
+        "status": "?",
+        "path": "search_engine.dart",
+        "full_path": "lib/ui/workspace/search/search_engine.dart"
+      },
+      {
+        "status": "?",
+        "path": "search_panel.dart",
+        "full_path": "lib/ui/workspace/search/search_panel.dart"
+      },
+      {
+        "status": "?",
+        "path": "code_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/code_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "csv_parser.dart",
+        "full_path": "lib/ui/workspace/viewers/csv/csv_parser.dart"
+      },
+      {
+        "status": "?",
+        "path": "csv_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/csv_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "image_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/image_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "json_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/json_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "log_parser.dart",
+        "full_path": "lib/ui/workspace/viewers/log/log_parser.dart"
+      },
+      {
+        "status": "?",
+        "path": "log_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/log_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "markdown_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/markdown_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "notebook_parser.dart",
+        "full_path": "lib/ui/workspace/viewers/notebook/notebook_parser.dart"
+      },
+      {
+        "status": "?",
+        "path": "notebook_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/notebook_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "pdf_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/pdf_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "structured_data_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/structured/structured_data_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "toml_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/toml_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "viewer_registry.dart",
+        "full_path": "lib/ui/workspace/viewers/viewer_registry.dart"
+      },
+      {
+        "status": "?",
+        "path": "xml_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/xml_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "yaml_file_viewer.dart",
+        "full_path": "lib/ui/workspace/viewers/yaml_file_viewer.dart"
+      },
+      {
+        "status": "?",
+        "path": "workspace_picker.dart",
+        "full_path": "lib/ui/workspace/workspace_picker.dart"
+      },
+      {
+        "status": "?",
+        "path": "workspace_rail.dart",
+        "full_path": "lib/ui/workspace/workspace_rail.dart"
+      },
+      {
+        "status": "?",
+        "path": "ws_preview_router.dart",
+        "full_path": "lib/ui/workspace/ws_preview_router.dart"
+      },
+      {
+        "status": "?",
+        "path": "bindings.dart",
+        "full_path": "lib/widgets_v1/bindings.dart"
+      },
+      {
+        "status": "?",
+        "path": "data_runtime.dart",
+        "full_path": "lib/widgets_v1/data_runtime.dart"
+      },
+      {
+        "status": "?",
+        "path": "dispatcher.dart",
+        "full_path": "lib/widgets_v1/dispatcher.dart"
+      },
+      {
+        "status": "?",
+        "path": "host.dart",
+        "full_path": "lib/widgets_v1/host.dart"
+      },
+      {
+        "status": "?",
+        "path": "models.dart",
+        "full_path": "lib/widgets_v1/models.dart"
+      },
+      {
+        "status": "?",
+        "path": "action_primitives.dart",
+        "full_path": "lib/widgets_v1/primitives/action_primitives.dart"
+      },
+      {
+        "status": "?",
+        "path": "content.dart",
+        "full_path": "lib/widgets_v1/primitives/content.dart"
+      },
+      {
+        "status": "?",
+        "path": "data_display.dart",
+        "full_path": "lib/widgets_v1/primitives/data_display.dart"
+      },
+      {
+        "status": "?",
+        "path": "feedback.dart",
+        "full_path": "lib/widgets_v1/primitives/feedback.dart"
+      },
+      {
+        "status": "?",
+        "path": "html.dart",
+        "full_path": "lib/widgets_v1/primitives/html.dart"
+      },
+      {
+        "status": "?",
+        "path": "input.dart",
+        "full_path": "lib/widgets_v1/primitives/input.dart"
+      },
+      {
+        "status": "?",
+        "path": "layout.dart",
+        "full_path": "lib/widgets_v1/primitives/layout.dart"
+      },
+      {
+        "status": "?",
+        "path": "presence.dart",
+        "full_path": "lib/widgets_v1/primitives/presence.dart"
+      },
+      {
+        "status": "?",
+        "path": "runtime.dart",
+        "full_path": "lib/widgets_v1/runtime.dart"
+      },
+      {
+        "status": "?",
+        "path": "service.dart",
+        "full_path": "lib/widgets_v1/service.dart"
+      },
+      {
+        "status": "?",
+        "path": "state.dart",
+        "full_path": "lib/widgets_v1/state.dart"
+      },
+      {
+        "status": "?",
+        "path": "zones.dart",
+        "full_path": "lib/widgets_v1/zones.dart"
+      },
+      {
+        "status": "?",
+        "path": ".gitignore",
+        "full_path": "linux/.gitignore"
+      },
+      {
+        "status": "?",
+        "path": "CMakeLists.txt",
+        "full_path": "linux/CMakeLists.txt"
+      },
+      {
+        "status": "?",
+        "path": "CMakeLists.txt",
+        "full_path": "linux/flutter/CMakeLists.txt"
+      },
+      {
+        "status": "?",
+        "path": "generated_plugin_registrant.cc",
+        "full_path": "linux/flutter/generated_plugin_registrant.cc"
+      },
+      {
+        "status": "?",
+        "path": "generated_plugin_registrant.h",
+        "full_path": "linux/flutter/generated_plugin_registrant.h"
+      },
+      {
+        "status": "?",
+        "path": "generated_plugins.cmake",
+        "full_path": "linux/flutter/generated_plugins.cmake"
+      },
+      {
+        "status": "?",
+        "path": "CMakeLists.txt",
+        "full_path": "linux/runner/CMakeLists.txt"
+      },
+      {
+        "status": "?",
+        "path": "main.cc",
+        "full_path": "linux/runner/main.cc"
+      },
+      {
+        "status": "?",
+        "path": "my_application.cc",
+        "full_path": "linux/runner/my_application.cc"
+      },
+      {
+        "status": "?",
+        "path": "my_application.h",
+        "full_path": "linux/runner/my_application.h"
+      },
+      {
+        "status": "?",
+        "path": "logo.ico",
+        "full_path": "logo/logo.ico"
+      },
+      {
+        "status": "?",
+        "path": "logo.png",
+        "full_path": "logo/logo.png"
+      },
+      {
+        "status": "?",
+        "path": "photo_2026-04-11_16-00-14.jpg",
+        "full_path": "logo/photo_2026-04-11_16-00-14.jpg"
+      },
+      {
+        "status": "?",
+        "path": ".gitignore",
+        "full_path": "macos/.gitignore"
+      },
+      {
+        "status": "?",
+        "path": "Flutter-Debug.xcconfig",
+        "full_path": "macos/Flutter/Flutter-Debug.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "Flutter-Release.xcconfig",
+        "full_path": "macos/Flutter/Flutter-Release.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "GeneratedPluginRegistrant.swift",
+        "full_path": "macos/Flutter/GeneratedPluginRegistrant.swift"
+      },
+      {
+        "status": "?",
+        "path": "project.pbxproj",
+        "full_path": "macos/Runner.xcodeproj/project.pbxproj"
+      },
+      {
+        "status": "?",
+        "path": "IDEWorkspaceChecks.plist",
+        "full_path": "macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist"
+      },
+      {
+        "status": "?",
+        "path": "Runner.xcscheme",
+        "full_path": "macos/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme"
+      },
+      {
+        "status": "?",
+        "path": "contents.xcworkspacedata",
+        "full_path": "macos/Runner.xcworkspace/contents.xcworkspacedata"
+      },
+      {
+        "status": "?",
+        "path": "IDEWorkspaceChecks.plist",
+        "full_path": "macos/Runner.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist"
+      },
+      {
+        "status": "?",
+        "path": "AppDelegate.swift",
+        "full_path": "macos/Runner/AppDelegate.swift"
+      },
+      {
+        "status": "?",
+        "path": "Contents.json",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json"
+      },
+      {
+        "status": "?",
+        "path": "app_icon_1024.png",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_1024.png"
+      },
+      {
+        "status": "?",
+        "path": "app_icon_128.png",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_128.png"
+      },
+      {
+        "status": "?",
+        "path": "app_icon_16.png",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_16.png"
+      },
+      {
+        "status": "?",
+        "path": "app_icon_256.png",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_256.png"
+      },
+      {
+        "status": "?",
+        "path": "app_icon_32.png",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_32.png"
+      },
+      {
+        "status": "?",
+        "path": "app_icon_512.png",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_512.png"
+      },
+      {
+        "status": "?",
+        "path": "app_icon_64.png",
+        "full_path": "macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_64.png"
+      },
+      {
+        "status": "?",
+        "path": "MainMenu.xib",
+        "full_path": "macos/Runner/Base.lproj/MainMenu.xib"
+      },
+      {
+        "status": "?",
+        "path": "AppInfo.xcconfig",
+        "full_path": "macos/Runner/Configs/AppInfo.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "Debug.xcconfig",
+        "full_path": "macos/Runner/Configs/Debug.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "Release.xcconfig",
+        "full_path": "macos/Runner/Configs/Release.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "Warnings.xcconfig",
+        "full_path": "macos/Runner/Configs/Warnings.xcconfig"
+      },
+      {
+        "status": "?",
+        "path": "DebugProfile.entitlements",
+        "full_path": "macos/Runner/DebugProfile.entitlements"
+      },
+      {
+        "status": "?",
+        "path": "Info.plist",
+        "full_path": "macos/Runner/Info.plist"
+      },
+      {
+        "status": "?",
+        "path": "MainFlutterWindow.swift",
+        "full_path": "macos/Runner/MainFlutterWindow.swift"
+      },
+      {
+        "status": "?",
+        "path": "Release.entitlements",
+        "full_path": "macos/Runner/Release.entitlements"
+      },
+      {
+        "status": "?",
+        "path": "RunnerTests.swift",
+        "full_path": "macos/RunnerTests/RunnerTests.swift"
+      },
+      {
+        "status": "?",
+        "path": "_abort_out.txt",
+        "full_path": "scout/_abort_out.txt"
+      },
+      {
+        "status": "?",
+        "path": "_compaction_out.txt",
+        "full_path": "scout/_compaction_out.txt"
+      },
+      {
+        "status": "?",
+        "path": "_replay_out.txt",
+        "full_path": "scout/_replay_out.txt"
+      },
+      {
+        "status": "?",
+        "path": "hello.txt",
+        "full_path": "scout/_sandbox/hello.txt"
+      },
+      {
+        "status": "?",
+        "path": "_workspace_out.txt",
+        "full_path": "scout/_workspace_out.txt"
+      },
+      {
+        "status": "?",
+        "path": "scout_abort.py",
+        "full_path": "scout/scout_abort.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_apps.py",
+        "full_path": "scout/scout_apps.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_auth.py",
+        "full_path": "scout/scout_auth.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_compaction.py",
+        "full_path": "scout/scout_compaction.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_events.py",
+        "full_path": "scout/scout_events.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_pressure.py",
+        "full_path": "scout/scout_pressure.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_queue.py",
+        "full_path": "scout/scout_queue.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_replay.py",
+        "full_path": "scout/scout_replay.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_tools.py",
+        "full_path": "scout/scout_tools.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_tools_focused.py",
+        "full_path": "scout/scout_tools_focused.py"
+      },
+      {
+        "status": "?",
+        "path": "scout_workspace.py",
+        "full_path": "scout/scout_workspace.py"
+      },
+      {
+        "status": "?",
+        "path": "daemon_chat_flow_test.dart",
+        "full_path": "test/e2e/daemon_chat_flow_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "app_state_workspace_test.dart",
+        "full_path": "test/integration/app_state_workspace_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "chat_flow_test.dart",
+        "full_path": "test/integration/chat_flow_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "chat_message_sortkey_test.dart",
+        "full_path": "test/models/chat_message_sortkey_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "queue_service_test.dart",
+        "full_path": "test/services/queue_service_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "socket_routing_test.dart",
+        "full_path": "test/services/socket_routing_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "workspace_module_test.dart",
+        "full_path": "test/services/workspace_module_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "chat_panel_logic_test.dart",
+        "full_path": "test/ui/chat/chat_panel_logic_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "widget_test.dart",
+        "full_path": "test/widget_test.dart"
+      },
+      {
+        "status": "?",
+        "path": "logo.png",
+        "full_path": "web/icons/logo.png"
+      },
+      {
+        "status": "?",
+        "path": "logo.png",
+        "full_path": "windows/runner/resources/logo.png"
+      }
+    ]
+  }
+}
+
+[seq=129268] message_done
+{
+  "correlation_id": "fp-ca950dd0b2a4",
+  "session_id": "scout-ws-e5d90a51",
+  "fast_path": true
+}
+
+--- keys hinting at workspace state ---
+  result/workspace_status
+
+--- sandbox contents after turn ---
+  ./hello.txt

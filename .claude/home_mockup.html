@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Digitorn — Home mockup (dark) v2</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0D0D0D;
+    --surface: #111111;
+    --surface-alt: #141414;
+    --border: #1E1E1E;
+    --border-hover: #333333;
+    --text: #D4D4D4;
+    --text-bright: #E6E6E6;
+    --text-muted: #555555;
+    --text-dim: #3A3A3A;
+    --blue: #3B82F6;
+    --input-bg: #111111;
+    --input-border: #222222;
+  }
+  html, body { margin: 0; padding: 0; background: #000; font-family: 'Inter', system-ui, sans-serif; color: var(--text); }
+  .frame {
+    width: 1280px; height: 800px;
+    margin: 30px auto;
+    background: var(--bg);
+    position: relative;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.6);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  /* Fake sidebar hint */
+  .frame::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0; width: 56px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+  }
+
+  .stack { position: absolute; inset: 0; }
+
+  /* Input block — Alignment(0, -0.55) */
+  .input-block {
+    position: absolute;
+    left: 50%;
+    top: 22.5%;
+    transform: translate(-50%, -50%);
+    width: 720px;
+    max-width: calc(100% - 96px);
+    padding: 0 32px;
+    box-sizing: border-box;
+    text-align: center;
+  }
+  .logo {
+    width: 72px; height: 72px;
+    margin: 0 auto;
+    background: linear-gradient(135deg, #1f6feb, #8957e5);
+    border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Fira Code';
+    font-size: 28px; color: #fff; font-weight: 700;
+  }
+  .title {
+    font-size: 28px; font-weight: 700; color: var(--text-bright);
+    margin: 16px 0 6px;
+    letter-spacing: -0.3px;
+  }
+  .subtitle {
+    font-size: 15px; color: var(--text-muted);
+    margin: 0 0 32px;
+  }
+
+  /* Chat input — now matches chat_panel.dart exactly:
+     radius 12, ~77px height to match the real chat input with its bar,
+     small circular send button identical to _SendButton */
+  .chat-input {
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 12px;                    /* ← was 14, now 12 like chat_panel */
+    display: flex;
+    align-items: flex-end;
+    padding: 0;
+    box-shadow:
+      0 10px 24px rgba(0,0,0,0.14),
+      0 1px 2px rgba(0,0,0,0.05);
+    transition: all 150ms ease-out;
+    min-height: 76px;                       /* ← same physical height */
+  }
+  .chat-input.focused {
+    border-color: rgba(59,130,246,0.5);
+    box-shadow:
+      0 10px 32px rgba(0,0,0,0.2),
+      0 1px 2px rgba(0,0,0,0.05);
+  }
+  .chat-textarea {
+    flex: 1;
+    padding: 26px 10px 26px 20px;           /* ← vertical 26+26=52, +22 text ≈ 74 */
+    font-family: 'Inter';
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--text-muted);
+    text-align: left;
+    min-height: 22px;
+  }
+
+  /* Small circular send button — identical to chat_panel _SendButton */
+  .send-btn {
+    width: 28px; height: 28px;
+    margin: 0 14px 14px 0;                  /* ← pushed to bottom-right */
+    background: var(--border-hover);        /* ← #333333 resting */
+    border-radius: 50%;                     /* ← circle */
+    display: flex; align-items: center; justify-content: center;
+    transition: background 100ms ease-out;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .send-btn:hover {
+    background: var(--text-muted);          /* ← #555555 hover */
+  }
+  .send-arrow {
+    color: var(--text-bright);              /* ← #E6E6E6 white-ish */
+    font-size: 14px;
+    line-height: 1;
+    font-weight: 700;
+    transform: translateY(-1px);
+  }
+
+  /* 4 suggestion chips — vertically centred */
+  .chips {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 720px;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 11px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    transition: all 150ms ease-out;
+    cursor: pointer;
+  }
+  .chip:hover {
+    background: rgba(59,130,246,0.09);
+    border-color: rgba(59,130,246,0.45);
+    color: var(--text-bright);
+    box-shadow: 0 6px 16px rgba(59,130,246,0.15);
+  }
+  .chip .icon {
+    font-size: 16px;
+    color: var(--text-muted);
+  }
+  .chip:hover .icon { color: var(--blue); }
+
+  /* Footer */
+  .footer {
+    position: absolute;
+    left: 0; right: 0; bottom: 14px;
+    display: flex; justify-content: center; gap: 20px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .inspector {
+    position: fixed;
+    top: 10px; right: 10px;
+    background: rgba(0,0,0,0.9);
+    color: #888;
+    font-family: 'Fira Code', monospace;
+    font-size: 10px;
+    padding: 12px 14px;
+    border-radius: 6px;
+    border: 1px solid #222;
+    max-width: 260px;
+    line-height: 1.6;
+  }
+  .inspector b { color: #9ef; }
+  .inspector .old { color: #777; text-decoration: line-through; }
+  .caption {
+    text-align: center;
+    color: #666;
+    font-size: 11px;
+    font-family: 'Fira Code', monospace;
+    margin-top: 18px;
+  }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <div class="stack">
+
+      <div class="input-block">
+        <div class="logo">D</div>
+        <div class="title">Hello</div>
+        <div class="subtitle">How can I help you today?</div>
+        <div class="chat-input focused">
+          <div class="chat-textarea">Ask anything…</div>
+          <div class="send-btn"><div class="send-arrow">↑</div></div>
+        </div>
+      </div>
+
+      <div class="chips">
+        <div class="chip"><span class="icon">◇</span>Code</div>
+        <div class="chip"><span class="icon">◎</span>Analyze</div>
+        <div class="chip"><span class="icon">✎</span>Write</div>
+        <div class="chip"><span class="icon">⚯</span>Debug</div>
+      </div>
+
+      <div class="footer">
+        <span>Refresh</span>
+        <span>Logout</span>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="caption">
+    home mockup v2 · 1280×800 · changes from v1 highlighted in inspector
+  </div>
+
+  <div class="inspector">
+    <b>Changes from v1</b><br><br>
+    <b>Radius:</b><br>
+    • input: <span class="old">14</span> → <b>12</b> (match chat_panel)<br><br>
+    <b>Height:</b><br>
+    • input: <span class="old">~56px</span> → <b>~76px</b><br>
+    &nbsp;&nbsp;(= chat_panel input total)<br>
+    • padding v: <span class="old">16/16</span> → <b>26/26</b><br><br>
+    <b>Send button:</b><br>
+    • shape: <span class="old">rounded sq</span> → <b>circle</b><br>
+    • size: <span class="old">36×36</span> → <b>28×28</b><br>
+    • color: <span class="old">blue #3B82F6</span> → <b>#333333</b><br>
+    • hover: <span class="old">blue α0.92</span> → <b>#555555</b><br>
+    • icon: <span class="old">18px white</span> → <b>14px #E6E6E6</b><br>
+    &nbsp;&nbsp;(exact _SendButton clone)<br><br>
+    <b>Position:</b><br>
+    • bottom-right, 14px margin<br><br>
+    <b>Unchanged:</b><br>
+    • focus border blue<br>
+    • chip styling<br>
+    • layout geometry
+  </div>
+</body>
+</html>

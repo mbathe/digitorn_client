@@ -35,6 +35,12 @@ class SubAgent {
   final AgentStatus status;
   final double duration;
   final String preview;
+  final String? parentAgent;
+  final int toolCallsCount;
+  final String? resultSummary;
+  final String? error;
+  final String? reason;
+  final List<String>? waitingFor;
   final DateTime updatedAt;
 
   const SubAgent({
@@ -44,8 +50,34 @@ class SubAgent {
     required this.status,
     this.duration = 0,
     this.preview = '',
+    this.parentAgent,
+    this.toolCallsCount = 0,
+    this.resultSummary,
+    this.error,
+    this.reason,
+    this.waitingFor,
     required this.updatedAt,
   });
+
+  bool get isActive => status == AgentStatus.spawned || status == AgentStatus.running;
+  bool get isDone => status == AgentStatus.completed || status == AgentStatus.failed || status == AgentStatus.cancelled;
+
+  String get durationLabel {
+    if (duration <= 0) return '';
+    if (duration < 60) return '${duration.round()}s';
+    if (duration < 3600) return '${(duration / 60).floor()}m ${(duration % 60).round()}s';
+    return '${(duration / 3600).floor()}h ${((duration % 3600) / 60).floor()}m';
+  }
+
+  String get briefStatus {
+    return switch (status) {
+      AgentStatus.spawned => 'starting…',
+      AgentStatus.running => preview.isNotEmpty ? preview : 'working…',
+      AgentStatus.completed => resultSummary ?? (durationLabel.isNotEmpty ? durationLabel : 'done'),
+      AgentStatus.failed => error ?? 'failed',
+      AgentStatus.cancelled => reason ?? 'cancelled',
+    };
+  }
 }
 
 // ─── Workspace state (sidebar data) ──────────────────────────────────────────
@@ -152,6 +184,31 @@ class WorkspaceState extends ChangeNotifier {
   }
 
   /// Called at the start of a new agent turn — clean up finished agents
+  /// Mark all running/spawned agents as failed (turn ended unexpectedly)
+  void finishAllAgents() {
+    bool changed = false;
+    for (final entry in _agents.entries) {
+      if (entry.value.isActive) {
+        final a = entry.value;
+        _agents[entry.key] = SubAgent(
+          id: a.id,
+          specialist: a.specialist,
+          task: a.task,
+          status: AgentStatus.completed,
+          duration: a.duration,
+          preview: a.preview,
+          parentAgent: a.parentAgent,
+          toolCallsCount: a.toolCallsCount,
+          resultSummary: a.resultSummary,
+          error: a.error,
+          updatedAt: DateTime.now(),
+        );
+        changed = true;
+      }
+    }
+    if (changed) notifyListeners();
+  }
+
   void onTurnStart() {
     // Remove completed/failed/cancelled agents from previous turn
     _agents.removeWhere((_, a) =>

@@ -1,0 +1,4 @@
+{
+    "inlineChat.notebookAgent": true,
+    "chat.useNestedAgentsMdFiles": true
+}

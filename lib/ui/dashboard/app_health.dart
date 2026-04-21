@@ -2,7 +2,9 @@ import 'package:digitorn_client/theme/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:dio/dio.dart';
+import '../../services/app_lifecycle_service.dart';
 import '../../services/auth_service.dart';
+import '../chat/chat_bubbles.dart' show showToast;
 
 /// App health dialog — shows diagnostics + metrics from daemon
 class AppHealthDialog extends StatefulWidget {
@@ -24,7 +26,10 @@ class AppHealthDialog extends StatefulWidget {
 class _AppHealthDialogState extends State<AppHealthDialog> {
   Map<String, dynamic>? _diagnostics;
   Map<String, dynamic>? _metrics;
+  Map<String, dynamic>? _status;
+  List<Map<String, dynamic>> _errors = const [];
   bool _loading = true;
+  bool _busy = false;
 
   final _dio = Dio(BaseOptions(
     connectTimeout: const Duration(seconds: 5),
@@ -42,10 +47,20 @@ class _AppHealthDialogState extends State<AppHealthDialog> {
 
   Future<void> _fetch() async {
     try {
-      final [diagResp, metResp] = await Future.wait([
+      // Parallelise every endpoint the dialog needs. AppLifecycleService
+      // wraps the four lifecycle introspection routes (status +
+      // errors) so we don't have to duplicate the Dio setup here.
+      final svc = AppLifecycleService();
+      final results = await Future.wait([
         _dio.get('$_base/api/apps/${widget.appId}/diagnostics'),
         _dio.get('$_base/api/metrics/apps/${widget.appId}'),
+        svc.status(widget.appId),
+        svc.fetchErrors(widget.appId, limit: 10),
       ]);
+      final diagResp = results[0] as Response;
+      final metResp = results[1] as Response;
+      final statusMap = results[2] as Map<String, dynamic>?;
+      final errorsList = results[3] as List<Map<String, dynamic>>?;
 
       if (mounted) {
         setState(() {
@@ -55,12 +70,68 @@ class _AppHealthDialogState extends State<AppHealthDialog> {
           _metrics = metResp.statusCode == 200
               ? (metResp.data['data'] ?? metResp.data) as Map<String, dynamic>?
               : null;
+          _status = statusMap;
+          _errors = errorsList ?? const [];
           _loading = false;
         });
       }
     } catch (e) {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  // ── Lifecycle actions ────────────────────────────────────────
+
+  Future<void> _runLifecycle({
+    required String label,
+    required Future<bool> Function() action,
+    String? confirmMessage,
+  }) async {
+    if (confirmMessage != null) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (dCtx) => AlertDialog(
+          backgroundColor: context.colors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: context.colors.border),
+          ),
+          title: Text('$label?',
+              style: GoogleFonts.inter(
+                  fontSize: 15, fontWeight: FontWeight.w600)),
+          content: Text(confirmMessage,
+              style: GoogleFonts.inter(fontSize: 13)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dCtx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dCtx).pop(true),
+              child: Text(label),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    setState(() => _busy = true);
+    final ok = await action();
+    if (!mounted) return;
+    setState(() => _busy = false);
+    showToast(context, ok ? '$label: OK' : '$label failed — check logs.');
+    if (ok) _fetch(); // refresh status / diagnostics / errors
+  }
+
+  bool get _isDisabled {
+    final s = _status;
+    if (s == null) return false;
+    final raw = s['status'] ?? s['state'] ?? s['enabled'];
+    if (raw is bool) return !raw;
+    if (raw is String) {
+      return raw == 'disabled' || raw == 'paused';
+    }
+    return false;
   }
 
   @override
@@ -125,9 +196,23 @@ class _AppHealthDialogState extends State<AppHealthDialog> {
                           color: c.textMuted, letterSpacing: 0.5)),
                       const SizedBox(height: 8),
                       _buildMetrics(),
+                      const SizedBox(height: 16),
                     ],
 
-                    if (_diagnostics == null && _metrics == null)
+                    // Recent errors (AppLifecycleService.fetchErrors)
+                    if (_errors.isNotEmpty) ...[
+                      Text('RECENT ERRORS',
+                          style: GoogleFonts.inter(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: c.textMuted,
+                              letterSpacing: 0.5)),
+                      const SizedBox(height: 8),
+                      _buildErrors(),
+                    ],
+
+                    if (_diagnostics == null && _metrics == null &&
+                        _errors.isEmpty)
                       Center(
                         child: Text('No data available',
                           style: GoogleFonts.inter(color: c.textMuted, fontSize: 13)),
@@ -135,6 +220,92 @@ class _AppHealthDialogState extends State<AppHealthDialog> {
                   ],
                 ),
               ),
+
+            // ── Lifecycle action bar ─────────────────────────────
+            if (!_loading) ...[
+              Divider(height: 1, color: c.border),
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _busy
+                          ? null
+                          : () => _runLifecycle(
+                              label: 'Reload',
+                              action: () => AppLifecycleService()
+                                  .reload(widget.appId)),
+                      icon: const Icon(Icons.refresh_rounded, size: 14),
+                      label: const Text('Reload'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: c.text,
+                        side: BorderSide(color: c.border),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed: _busy
+                          ? null
+                          : () => _runLifecycle(
+                              label: _isDisabled ? 'Enable' : 'Disable',
+                              action: _isDisabled
+                                  ? () => AppLifecycleService()
+                                      .enable(widget.appId)
+                                  : () => AppLifecycleService()
+                                      .disable(widget.appId)),
+                      icon: Icon(
+                        _isDisabled
+                            ? Icons.power_rounded
+                            : Icons.pause_rounded,
+                        size: 14,
+                      ),
+                      label: Text(_isDisabled ? 'Enable' : 'Disable'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: _isDisabled ? c.green : c.orange,
+                        side: BorderSide(
+                            color: (_isDisabled ? c.green : c.orange)
+                                .withValues(alpha: 0.4)),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                      ),
+                    ),
+                    const Spacer(),
+                    if (_busy)
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 1.5, color: c.textMuted),
+                      ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed: _busy
+                          ? null
+                          : () => _runLifecycle(
+                              label: 'Delete',
+                              confirmMessage:
+                                  'Permanently undeploy this app and wipe '
+                                  'every session. This cannot be undone.',
+                              action: () => AppLifecycleService()
+                                  .deleteApp(widget.appId)),
+                      icon: const Icon(Icons.delete_outline_rounded,
+                          size: 14),
+                      label: const Text('Delete'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: c.red,
+                        side: BorderSide(
+                            color: c.red.withValues(alpha: 0.4)),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -190,7 +361,7 @@ class _AppHealthDialogState extends State<AppHealthDialog> {
   Widget _diagRow(Map<String, dynamic> check) {
     final c = context.colors;
     final name = check['name'] as String? ?? check['check'] as String? ?? '';
-    final ok = check['ok'] as bool? ?? check['status'] == 'ok' ?? true;
+    final ok = (check['ok'] as bool?) ?? (check['status'] == 'ok');
     final detail = check['detail'] as String? ?? check['message'] as String? ?? '';
 
     return Padding(
@@ -224,6 +395,65 @@ class _AppHealthDialogState extends State<AppHealthDialog> {
           Text(label, style: GoogleFonts.inter(fontSize: 12, color: c.textMuted)),
           const Spacer(),
           Text(value, style: GoogleFonts.firaCode(fontSize: 12, color: c.text)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildErrors() {
+    final c = context.colors;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: c.red.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        children: [
+          for (int i = 0; i < _errors.length; i++) ...[
+            _errorRow(_errors[i]),
+            if (i < _errors.length - 1)
+              Divider(height: 1, color: c.border),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _errorRow(Map<String, dynamic> err) {
+    final c = context.colors;
+    final msg = (err['message'] ?? err['error'] ?? '').toString();
+    final ts = (err['ts'] ?? err['timestamp'] ?? '').toString();
+    final source = (err['source'] ?? err['kind'] ?? '').toString();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.error_outline_rounded, size: 13, color: c.red),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  msg.isEmpty ? '(no message)' : msg,
+                  style: GoogleFonts.firaCode(
+                      fontSize: 11, color: c.text),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          if (source.isNotEmpty || ts.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 19, top: 2),
+              child: Text(
+                [if (source.isNotEmpty) source, if (ts.isNotEmpty) ts]
+                    .join(' · '),
+                style:
+                    GoogleFonts.inter(fontSize: 10, color: c.textDim),
+              ),
+            ),
         ],
       ),
     );

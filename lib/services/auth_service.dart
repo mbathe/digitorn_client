@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
@@ -8,20 +9,83 @@ class AuthUser {
   final String? email;
   final String? displayName;
   final List<String> roles;
+  final List<String> permissions;
+
+  /// Server-provided convenience flag — true when the user has an
+  /// admin role OR the wildcard `*` permission. Set on every login
+  /// / register / refresh / `/auth/me` response. When the daemon
+  /// hasn't sent the field yet (legacy build) this stays null and
+  /// [isAdmin] falls back to the local roles/permissions check.
+  final bool? serverIsAdmin;
+
+  /// Relative URL on the daemon (e.g. `/api/users/me/avatar/alice.png`).
+  /// The client prefixes it with [AuthService.baseUrl] when rendering.
+  final String? avatarUrl;
+  final DateTime? createdAt;
+  final DateTime? lastSeenAt;
+  final String? phone;
+  final String? locale;
+  final String? timezone;
 
   AuthUser({
     required this.userId,
     this.email,
     this.displayName,
     this.roles = const [],
+    this.permissions = const [],
+    this.serverIsAdmin,
+    this.avatarUrl,
+    this.createdAt,
+    this.lastSeenAt,
+    this.phone,
+    this.locale,
+    this.timezone,
   });
 
   factory AuthUser.fromJson(Map<String, dynamic> json) => AuthUser(
         userId: json['user_id'] ?? '',
         email: json['email'],
         displayName: json['display_name'],
-        roles: List<String>.from(json['roles'] ?? []),
+        roles: List<String>.from(json['roles'] ?? const []),
+        permissions: List<String>.from(json['permissions'] ?? const []),
+        serverIsAdmin: json['is_admin'] is bool
+            ? json['is_admin'] as bool
+            : null,
+        avatarUrl: json['avatar_url'] as String?,
+        createdAt: _parseDate(json['created_at']),
+        lastSeenAt: _parseDate(json['last_seen_at']),
+        phone: json['phone'] as String?,
+        locale: json['locale'] as String?,
+        timezone: json['timezone'] as String?,
       );
+
+  static DateTime? _parseDate(dynamic v) {
+    if (v == null) return null;
+    if (v is String) return DateTime.tryParse(v);
+    if (v is num) {
+      return DateTime.fromMillisecondsSinceEpoch((v * 1000).toInt());
+    }
+    return null;
+  }
+
+  /// True when the current user is a workspace admin. Prefers the
+  /// daemon-provided `is_admin` boolean when available; falls back
+  /// to local computation against `roles` / `permissions` for
+  /// older daemon builds that don't emit the field yet.
+  bool get isAdmin {
+    if (serverIsAdmin != null) return serverIsAdmin!;
+    return roles.contains('admin') ||
+        roles.contains('*') ||
+        permissions.contains('*') ||
+        permissions.contains('admin');
+  }
+
+  /// True when the user has a specific permission. Admins (`*`)
+  /// always pass. Used by fine-grained UI gating.
+  bool can(String permission) {
+    if (isAdmin) return true;
+    return permissions.contains(permission);
+  }
 }
 
 class AuthService extends ChangeNotifier {
@@ -48,6 +112,14 @@ class AuthService extends ChangeNotifier {
     receiveTimeout: const Duration(seconds: 15),
   ));
 
+  // Prevent concurrent refresh attempts
+  Future<bool>? _refreshFuture;
+
+  Future<bool> _safeRefresh() {
+    _refreshFuture ??= refreshToken().whenComplete(() => _refreshFuture = null);
+    return _refreshFuture!;
+  }
+
   /// Create a Dio interceptor that auto-refreshes on 401.
   /// Add this to any Dio instance that calls the daemon API.
   Interceptor get authInterceptor => InterceptorsWrapper(
@@ -61,19 +133,18 @@ class AuthService extends ChangeNotifier {
       handler.next(options);
     },
     onError: (error, handler) async {
-      if (error.response?.statusCode == 401) {
-        // Try refresh once
-        final ok = await refreshToken();
-        if (ok) {
+      if (error.response?.statusCode == 401 && !_isRefreshing) {
+        // Try refresh (deduplicated across concurrent requests)
+        final ok = await _safeRefresh();
+        if (ok && _accessToken != null) {
           // Retry with new token
           error.requestOptions.headers['Authorization'] = 'Bearer $_accessToken';
           try {
-            final resp = await _dio.fetch(error.requestOptions);
+            final resp = await Dio().fetch(error.requestOptions);
             return handler.resolve(resp);
           } catch (_) {}
         }
-        // Refresh failed — force logout to redirect to login
-        await logout();
+        // Refresh failed — refreshToken() already called logout() if needed
       }
       handler.next(error);
     },
@@ -97,7 +168,11 @@ class AuthService extends ChangeNotifier {
     _refreshToken = refresh;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyAccessToken, access);
-    if (refresh != null) await prefs.setString(_keyRefreshToken, refresh);
+    if (refresh != null) {
+      await prefs.setString(_keyRefreshToken, refresh);
+    } else {
+      await prefs.remove(_keyRefreshToken);
+    }
     await prefs.setString(_keyBaseUrl, baseUrl);
   }
 
@@ -130,22 +205,33 @@ class AuthService extends ChangeNotifier {
       final response = await _dio.post(
         '$baseUrl/auth/login',
         data: {
-          if (username != null) 'username': username,
-          if (email != null) 'email': email,
+          'username': ?username,
+          'email': ?email,
           'password': password,
         },
       );
       if (response.statusCode == 200) {
-        final data = response.data;
-        await _saveTokens(data['access_token'], data['refresh_token']);
-        currentUser = AuthUser(
-          userId: data['user_id'] ?? '',
-          email: data['email'],
-          displayName: data['display_name'],
-          roles: List<String>.from(data['roles'] ?? []),
-        );
+        final data = response.data as Map<String, dynamic>;
+        final access = data['access_token'] as String?;
+        if (access == null) {
+          isLoading = false;
+          notifyListeners();
+          return false;
+        }
+        await _saveTokens(
+            access, data['refresh_token'] as String?);
+        // The login response now carries roles + permissions +
+        // is_admin alongside the tokens — parse it directly so we
+        // don't need a second `/auth/me` round-trip just to know
+        // whether the user is admin.
+        currentUser = AuthUser.fromJson(data);
         isLoading = false;
         notifyListeners();
+        // Background enrich: /auth/me has more fields than the
+        // login response (avatar_url, phone, created_at, …). We
+        // fire-and-forget it so the UI can render immediately
+        // with what we already have.
+        unawaited(_fetchMe());
         return true;
       }
     } on DioException catch (e) {
@@ -175,21 +261,26 @@ class AuthService extends ChangeNotifier {
         data: {
           'username': username,
           'password': password,
-          if (email != null) 'email': email,
-          if (displayName != null) 'display_name': displayName,
+          'email': ?email,
+          'display_name': ?displayName,
         },
       );
       if (response.statusCode == 200) {
-        final data = response.data;
-        await _saveTokens(data['access_token'], data['refresh_token']);
-        currentUser = AuthUser(
-          userId: data['user_id'] ?? '',
-          email: data['email'],
-          displayName: data['display_name'],
-          roles: List<String>.from(data['roles'] ?? []),
-        );
+        final data = response.data as Map<String, dynamic>;
+        final access = data['access_token'] as String?;
+        if (access == null) {
+          isLoading = false;
+          notifyListeners();
+          return false;
+        }
+        await _saveTokens(
+            access, data['refresh_token'] as String?);
+        // Same shape as login — roles, permissions, is_admin are
+        // embedded in the response. No second round-trip needed.
+        currentUser = AuthUser.fromJson(data);
         isLoading = false;
         notifyListeners();
+        unawaited(_fetchMe());
         return true;
       }
     } on DioException catch (e) {
@@ -206,37 +297,49 @@ class AuthService extends ChangeNotifier {
 
   Future<void> ensureValidToken() async {
     if (_accessToken == null) return;
-    // JWT tokens have 3 parts; decode payload to check exp
     try {
       final parts = _accessToken!.split('.');
       if (parts.length == 3) {
-        // Pad base64 if needed
         var payload = parts[1];
-        while (payload.length % 4 != 0) payload += '=';
+        while (payload.length % 4 != 0) {
+          payload += '=';
+        }
         final decoded = utf8.decode(base64Url.decode(payload));
         final Map<String, dynamic> claims = jsonDecode(decoded);
         final exp = claims['exp'] as int? ?? 0;
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        // Refresh if less than 60s left
-        if (exp - now < 60) {
-          await refreshToken();
+        // Refresh if less than 120s left (increased margin)
+        if (exp - now < 120) {
+          await _safeRefresh();
         }
       }
     } catch (_) {
-      // If decode fails, try refresh anyway
-      await refreshToken();
+      await _safeRefresh();
     }
   }
 
   // ─── Refresh ─────────────────────────────────────────────────────────────
+
+  bool _isRefreshing = false;
 
   Future<bool> refreshToken() async {
     if (_refreshToken == null) {
       debugPrint('refreshToken: no refresh token');
       return false;
     }
+    // Prevent infinite loop: if already refreshing, don't retry
+    if (_isRefreshing) {
+      debugPrint('refreshToken: already refreshing, skip');
+      return false;
+    }
+    _isRefreshing = true;
     try {
-      final response = await _dio.post(
+      // Use a PLAIN Dio without auth interceptor to avoid infinite loop
+      final plainDio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+      ));
+      final response = await plainDio.post(
         '$baseUrl/auth/refresh',
         data: {'refresh_token': _refreshToken},
         options: Options(
@@ -245,12 +348,32 @@ class AuthService extends ChangeNotifier {
       );
       debugPrint('refreshToken ← ${response.statusCode}');
       if (response.statusCode == 200 && response.data['access_token'] != null) {
-        await _saveTokens(response.data['access_token'], _refreshToken);
+        final data = response.data as Map<String, dynamic>;
+        await _saveTokens(
+            data['access_token'] as String, _refreshToken);
+        // The refresh response now carries roles / permissions /
+        // is_admin too — keep the local `currentUser` in sync so a
+        // role change pushed by the daemon (admin → user, etc.)
+        // takes effect on the next refresh without requiring a
+        // full app restart.
+        if (data['user_id'] is String) {
+          currentUser = AuthUser.fromJson(data);
+          notifyListeners();
+        }
+        _isRefreshing = false;
         return true;
+      }
+      // Refresh token expired — clear it to prevent further attempts
+      if (response.statusCode == 401) {
+        debugPrint('refreshToken: refresh token expired, logging out');
+        _isRefreshing = false;
+        await logout();
+        return false;
       }
     } catch (e) {
       debugPrint('refreshToken error: $e');
     }
+    _isRefreshing = false;
     return false;
   }
 
@@ -262,12 +385,221 @@ class AuthService extends ChangeNotifier {
         '$baseUrl/auth/me',
         options: _authOptions,
       );
-      if (response.statusCode == 200) {
-        currentUser = AuthUser.fromJson(response.data);
+      debugPrint('/auth/me ← ${response.statusCode} ${response.data}');
+      if (response.statusCode == 200 && response.data is Map) {
+        currentUser = AuthUser.fromJson(
+            (response.data as Map).cast<String, dynamic>());
+        debugPrint(
+            '/auth/me parsed → user=${currentUser?.userId}, '
+            'roles=${currentUser?.roles}, '
+            'permissions=${currentUser?.permissions}, '
+            'serverIsAdmin=${currentUser?.serverIsAdmin}, '
+            'effectiveIsAdmin=${currentUser?.isAdmin}');
+        notifyListeners();
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('/auth/me error: $e');
       // Token likely invalid — clear
       await _clearTokens();
+    }
+  }
+
+  // The old `/auth/sessions` family was a per-app *chat* session
+  // registry in disguise — the daemon removed it in the 2026-04
+  // per-app sessions migration. Chat sessions now live exclusively
+  // under `/api/apps/{app_id}/sessions[/…]` and are managed by
+  // SessionService. There is no replacement for "list my logged-in
+  // devices" today; see the migration note in CLAUDE.md.
+
+  /// Absolute URL for the current user's avatar — null when the
+  /// daemon hasn't given us one. The daemon returns a relative path
+  /// like `/api/users/me/avatar/alice.png`.
+  String? get avatarAbsoluteUrl {
+    final rel = currentUser?.avatarUrl;
+    if (rel == null || rel.isEmpty) return null;
+    if (rel.startsWith('http://') || rel.startsWith('https://')) return rel;
+    return '$baseUrl$rel';
+  }
+
+  /// Headers the UI can pass to `Image.network` so the Authorization
+  /// bearer token reaches the daemon (otherwise the avatar / icon
+  /// endpoints return 401).
+  Map<String, String> get authImageHeaders => {
+        if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
+      };
+
+  // ─── Profile management ─────────────────────────────────────────────────
+  //
+  // Backed by three daemon routes:
+  //   * PUT    /api/users/me/profile      — display name / phone / locale
+  //   * POST   /api/users/me/password     — old + new password
+  //   * POST   /api/users/me/avatar       — multipart file upload
+  //   * DELETE /api/users/me/avatar       — clear current avatar
+  //
+  // Every success path refreshes `currentUser` in place so every
+  // listener (sidebar, settings header, inbox) picks up the new
+  // value on the next rebuild.
+
+  /// Update editable profile fields. Pass `null` to leave a field
+  /// untouched. Returns true on success; on failure [lastError] is
+  /// populated and listeners are notified so the form can render
+  /// the server message inline.
+  Future<bool> updateProfile({
+    String? displayName,
+    String? phone,
+    String? locale,
+    String? timezone,
+  }) async {
+    final body = <String, dynamic>{};
+    if (displayName != null) body['display_name'] = displayName;
+    if (phone != null) body['phone'] = phone;
+    if (locale != null) body['locale'] = locale;
+    if (timezone != null) body['timezone'] = timezone;
+    if (body.isEmpty) return true;
+    try {
+      final r = await _dio.put(
+        '$baseUrl/api/users/me/profile',
+        data: body,
+        options: _authOptions,
+      );
+      debugPrint('updateProfile ← ${r.statusCode} ${r.data}');
+      if ((r.statusCode == 200 || r.statusCode == 204) && r.data is Map) {
+        final parsed = _unwrapUser(r.data as Map);
+        if (parsed != null) {
+          currentUser = parsed;
+        } else {
+          await _fetchMe();
+        }
+        lastError = null;
+        notifyListeners();
+        return true;
+      }
+      lastError = _bodyError(r.data) ?? 'HTTP ${r.statusCode}';
+      notifyListeners();
+      return false;
+    } on DioException catch (e) {
+      lastError = _extractError(e);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Change the user's password. The daemon verifies [oldPassword]
+  /// and rejects with 400 when it doesn't match — we surface the
+  /// server message verbatim so the form can show it inline.
+  Future<bool> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    try {
+      final r = await _dio.post(
+        '$baseUrl/api/users/me/password',
+        data: {
+          'old_password': oldPassword,
+          'new_password': newPassword,
+        },
+        options: _authOptions,
+      );
+      debugPrint('changePassword ← ${r.statusCode} ${r.data}');
+      final code = r.statusCode ?? 0;
+      if (code >= 400) {
+        lastError = _bodyError(r.data) ?? 'HTTP $code';
+        notifyListeners();
+        return false;
+      }
+      if (r.data is Map && (r.data as Map)['success'] == false) {
+        lastError = _bodyError(r.data) ?? 'Password change rejected';
+        notifyListeners();
+        return false;
+      }
+      lastError = null;
+      notifyListeners();
+      return true;
+    } on DioException catch (e) {
+      lastError = _extractError(e);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Upload a new avatar. [bytes] is the raw file contents (read
+  /// via `image_picker` or `file_picker`), [filename] drives the
+  /// content-disposition the daemon stores and [contentType]
+  /// should be the MIME type sniffed at pick time.
+  Future<bool> uploadAvatar({
+    required List<int> bytes,
+    required String filename,
+    String contentType = 'image/png',
+  }) async {
+    try {
+      final form = FormData.fromMap({
+        'file': MultipartFile.fromBytes(
+          bytes,
+          filename: filename,
+          contentType: DioMediaType.parse(contentType),
+        ),
+      });
+      final r = await _dio.post(
+        '$baseUrl/api/users/me/avatar',
+        data: form,
+        options: _authOptions,
+      );
+      debugPrint('uploadAvatar ← ${r.statusCode} ${r.data}');
+      if ((r.statusCode == 200 || r.statusCode == 204) && r.data is Map) {
+        final parsed = _unwrapUser(r.data as Map);
+        if (parsed != null) {
+          currentUser = parsed;
+        } else {
+          await _fetchMe();
+        }
+        lastError = null;
+        notifyListeners();
+        return true;
+      }
+      lastError = _bodyError(r.data) ?? 'HTTP ${r.statusCode}';
+      notifyListeners();
+      return false;
+    } on DioException catch (e) {
+      lastError = _extractError(e);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Clear the current avatar — returns the user to the
+  /// initials-on-gradient fallback rendered by `RemoteAvatar`.
+  Future<bool> deleteAvatar() async {
+    try {
+      final r = await _dio.delete(
+        '$baseUrl/api/users/me/avatar',
+        options: _authOptions,
+      );
+      if (r.statusCode == 200 || r.statusCode == 204) {
+        if (currentUser != null) {
+          final u = currentUser!;
+          currentUser = AuthUser(
+            userId: u.userId,
+            email: u.email,
+            displayName: u.displayName,
+            roles: u.roles,
+            permissions: u.permissions,
+            serverIsAdmin: u.serverIsAdmin,
+            avatarUrl: null,
+            createdAt: u.createdAt,
+            lastSeenAt: u.lastSeenAt,
+            phone: u.phone,
+            locale: u.locale,
+            timezone: u.timezone,
+          );
+          notifyListeners();
+        }
+        return true;
+      }
+      return false;
+    } on DioException catch (e) {
+      lastError = _extractError(e);
+      notifyListeners();
+      return false;
     }
   }
 
@@ -303,5 +635,38 @@ class AuthService extends ChangeNotifier {
       return 'Cannot connect to daemon at $baseUrl';
     }
     return e.message ?? 'Network error';
+  }
+
+  AuthUser? _unwrapUser(Map raw) {
+    final candidates = <Map>[];
+    if (raw['user'] is Map) candidates.add(raw['user'] as Map);
+    if (raw['data'] is Map) {
+      final d = raw['data'] as Map;
+      if (d['user'] is Map) candidates.add(d['user'] as Map);
+      candidates.add(d);
+    }
+    candidates.add(raw);
+    for (final c in candidates) {
+      if (c['user_id'] != null || c['id'] != null) {
+        final map = Map<String, dynamic>.from(c);
+        if (map['user_id'] == null && map['id'] != null) {
+          map['user_id'] = map['id'];
+        }
+        return AuthUser.fromJson(map);
+      }
+    }
+    return null;
+  }
+
+  String? _bodyError(dynamic body) {
+    if (body is Map) {
+      final err = body['error'] ?? body['detail'] ?? body['message'];
+      if (err is String && err.isNotEmpty) return err;
+      if (body['data'] is Map) {
+        return _bodyError(body['data']);
+      }
+    }
+    if (body is String && body.isNotEmpty) return body;
+    return null;
   }
 }

@@ -1,0 +1,45 @@
+
+=== Meta source scout  session=scout-mt-9d6732 ===
+
+▶ HTTP endpoint variants
+  200  /api/apps/digitorn-builder/sessions/scout-mt-9d6732/workspace
+       render_mode: builder
+       entry_file: app.yaml
+       title: Digitorn App Builder
+       workspace: C:\Users\ASUS\Documents\digitorn-bridge
+  307  /api/apps/digitorn-builder/sessions/scout-mt-9d6732/workspace/
+  404  /api/apps/digitorn-builder/workspace
+  200  /api/apps/digitorn-builder/sessions/scout-mt-9d6732
+       title: Hello — just init the session, don't write anything. Reply 'hi'.
+       workspace: C:\Users\ASUS\Documents\digitorn_client\scout\_sandbox_meta
+  200  /api/apps/digitorn-builder
+       workspace: {'render_mode': 'builder', 'entry_file': 'app.yaml', 'title': 'Digitorn App Builder'}
+  404  /api/apps/digitorn-builder/manifest
+
+▶ Event histogram (230 envelopes)
+    207  thinking_delta
+      4  hook
+      2  thinking_started
+      2  stream_done
+      2  thinking
+      2  out_token
+      2  in_token
+      1  connected
+      1  user_message
+      1  message_started
+      1  preview:snapshot
+      1  queue:snapshot
+      1  tool_start
+      1  tool_call
+      1  result
+      1  message_done
+
+▶ preview:snapshot payload (raw)
+  keys: ['session_id', 'state', 'resources', 'nodes', 'edges', 'events', 'seq']
+  state keys: []
+  (state is empty)
+  resources channels: ['files']
+    files: 0 items
+
+▶ preview:state_changed events (all)
+  (none)

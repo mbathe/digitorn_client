@@ -1,0 +1,512 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../../design/ds.dart';
+import '../../../services/onboarding_service.dart';
+import '../../../theme/app_theme.dart';
+import '../../ds/ds.dart';
+import '../wizard_nav.dart';
+import '../wizard_step_scaffold.dart';
+
+class StarterAppsStep extends StatefulWidget {
+  const StarterAppsStep({super.key});
+
+  @override
+  State<StarterAppsStep> createState() => _StarterAppsStepState();
+}
+
+class _StarterAppsStepState extends State<StarterAppsStep> {
+  final Set<String> _selected = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _selected.addAll(OnboardingService().installedApps);
+    if (_selected.isEmpty) _selected.addAll(_defaultsForRole());
+    // Builder is pre-installed — always part of the runtime.
+    _selected.add('digitorn-builder');
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _syncOut();
+      WizardNav.of(context).setCanAdvance(true);
+    });
+  }
+
+  Set<String> _defaultsForRole() {
+    switch (OnboardingService().role) {
+      case 'developer':
+        return {'code-review', 'shell-agent', 'doc-writer'};
+      case 'analyst':
+        return {'data-explorer', 'research-assistant'};
+      case 'operator':
+        return {'shell-agent', 'monitor-ops'};
+      case 'researcher':
+        return {'research-assistant', 'doc-writer'};
+      default:
+        return {'chat-general'};
+    }
+  }
+
+  void _syncOut() {
+    OnboardingService().installedApps
+      ..clear()
+      ..addAll(_selected);
+  }
+
+  void _toggle(String id) {
+    if (id == 'digitorn-builder') return; // builder is mandatory
+    setState(() {
+      if (_selected.contains(id)) {
+        _selected.remove(id);
+      } else {
+        _selected.add(id);
+      }
+      _syncOut();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final apps = _appsForRole(OnboardingService().role);
+    final count = _selected.length;
+    return WizardStepScaffold(
+      eyebrow: 'STEP 03',
+      title: 'Your first apps.',
+      subtitle:
+          'Builder ships pre-installed so you can create your own apps right '
+          'away. Add a few from the Hub to get started — browse thousands '
+          'more once you are in.',
+      showSkip: true,
+      skipLabel: 'Skip the Hub',
+      nextLabel: count > 1 ? 'Install $count apps' : 'Install & continue',
+      maxWidth: 760,
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const _SectionHeader(
+            label: 'BUILD YOUR OWN',
+            trailing: 'PRE-INSTALLED',
+          ),
+          SizedBox(height: DsSpacing.x4),
+          const _BuilderFeatureCard(),
+          SizedBox(height: DsSpacing.x8),
+          const _SectionHeader(
+            label: 'INSTALL FROM THE HUB',
+            trailing: '6 curated for you',
+          ),
+          SizedBox(height: DsSpacing.x4),
+          Wrap(
+            spacing: DsSpacing.x3,
+            runSpacing: DsSpacing.x3,
+            children: [
+              for (final a in apps)
+                SizedBox(
+                  width: 240,
+                  child: _AppCard(
+                    app: a,
+                    selected: _selected.contains(a.id),
+                    onTap: () => _toggle(a.id),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String label;
+  final String? trailing;
+  const _SectionHeader({required this.label, this.trailing});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Row(
+      children: [
+        Text(label, style: DsType.eyebrow(color: c.accentPrimary)),
+        Expanded(
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: DsSpacing.x4),
+            child: Container(height: 1, color: c.border),
+          ),
+        ),
+        if (trailing != null)
+          Text(trailing!, style: DsType.eyebrow(color: c.textDim)),
+      ],
+    );
+  }
+}
+
+/// The hero card — Digitorn Builder, always included. Shows a faux
+/// chat input that rotates through example prompts so users
+/// immediately grok what Builder does.
+class _BuilderFeatureCard extends StatelessWidget {
+  const _BuilderFeatureCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            c.surface,
+            Color.lerp(c.surface, c.accentPrimary, 0.08) ?? c.surface,
+          ],
+        ),
+        borderRadius: BorderRadius.circular(DsRadius.card),
+        border: Border.all(
+          color: c.accentPrimary.withValues(alpha: 0.4),
+          width: DsStroke.normal,
+        ),
+        boxShadow: DsElevation.accentGlow(c.accentPrimary, strength: 0.35),
+      ),
+      padding: EdgeInsets.all(DsSpacing.x5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [c.accentPrimary, c.accentSecondary],
+                  ),
+                  borderRadius: BorderRadius.circular(DsRadius.xs),
+                  boxShadow: DsElevation.accentGlow(c.accentPrimary,
+                      strength: 0.6),
+                ),
+                child: Icon(
+                  Icons.auto_fix_high,
+                  color: c.onAccent,
+                  size: 20,
+                ),
+              ),
+              SizedBox(width: DsSpacing.x4),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Text('Digitorn Builder',
+                            style: DsType.h2(color: c.textBright)),
+                        SizedBox(width: DsSpacing.x3),
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: DsSpacing.x3,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: c.accentPrimary.withValues(alpha: 0.14),
+                            borderRadius: BorderRadius.circular(DsRadius.pill),
+                            border: Border.all(
+                              color: c.accentPrimary.withValues(alpha: 0.5),
+                            ),
+                          ),
+                          child: Text(
+                            'INCLUDED',
+                            style: DsType.micro(color: c.accentPrimary)
+                                .copyWith(
+                              letterSpacing: 1.2,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Tell Builder what you want — it ships you an app.',
+                      style: DsType.caption(color: c.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: DsSpacing.x5),
+          const _BuilderPromptDemo(),
+        ],
+      ),
+    );
+  }
+}
+
+class _BuilderPromptDemo extends StatefulWidget {
+  const _BuilderPromptDemo();
+
+  @override
+  State<_BuilderPromptDemo> createState() => _BuilderPromptDemoState();
+}
+
+class _BuilderPromptDemoState extends State<_BuilderPromptDemo>
+    with SingleTickerProviderStateMixin {
+  static const _prompts = [
+    'Build me a PR reviewer that summarises each file change…',
+    'Create an inbox triager that tags emails by urgency…',
+    'Make an agent that drafts weekly updates from my commits…',
+    'Spin up a data explorer over this Postgres database…',
+    'Build me a meeting summariser with action items…',
+  ];
+
+  int _promptIndex = 0;
+  int _charCount = 0;
+  bool _deleting = false;
+  Timer? _tick;
+  late final AnimationController _cursor;
+
+  @override
+  void initState() {
+    super.initState();
+    _cursor = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    )..repeat(reverse: true);
+    _tick = Timer.periodic(const Duration(milliseconds: 36), (_) => _step());
+  }
+
+  void _step() {
+    if (!mounted) return;
+    final current = _prompts[_promptIndex];
+    setState(() {
+      if (!_deleting) {
+        if (_charCount < current.length) {
+          _charCount++;
+        } else {
+          _deleting = true;
+          _tick?.cancel();
+          Future.delayed(const Duration(milliseconds: 2200), () {
+            if (!mounted) return;
+            _tick = Timer.periodic(
+                const Duration(milliseconds: 16), (_) => _step());
+          });
+        }
+      } else {
+        if (_charCount > 0) {
+          _charCount--;
+        } else {
+          _deleting = false;
+          _promptIndex = (_promptIndex + 1) % _prompts.length;
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    _cursor.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final text = _prompts[_promptIndex].substring(0, _charCount);
+    return Container(
+      decoration: BoxDecoration(
+        color: c.inputBg,
+        borderRadius: BorderRadius.circular(DsRadius.input),
+        border: Border.all(color: c.inputBorder),
+      ),
+      padding: EdgeInsets.symmetric(
+        horizontal: DsSpacing.x4,
+        vertical: DsSpacing.x4,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              color: c.accentPrimary.withValues(alpha: 0.18),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.north,
+              size: 12,
+              color: c.accentPrimary,
+            ),
+          ),
+          SizedBox(width: DsSpacing.x3),
+          Expanded(
+            child: DefaultTextStyle(
+              style: DsType.body(color: c.textBright),
+              child: Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(text),
+                  AnimatedBuilder(
+                    animation: _cursor,
+                    builder: (_, _) => Opacity(
+                      opacity: _cursor.value > 0.5 ? 1 : 0,
+                      child: Container(
+                        margin: const EdgeInsets.only(left: 1, bottom: 2),
+                        width: 2,
+                        height: 16,
+                        color: c.accentPrimary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StarterApp {
+  final String id;
+  final String name;
+  final String desc;
+  final IconData icon;
+  const _StarterApp(this.id, this.name, this.desc, this.icon);
+}
+
+List<_StarterApp> _appsForRole(String role) {
+  const all = [
+    _StarterApp('code-review', 'Code Reviewer',
+        'Reviews PRs, suggests fixes.', Icons.rate_review_outlined),
+    _StarterApp('shell-agent', 'Shell Agent',
+        'Runs commands with approval.', Icons.terminal),
+    _StarterApp('doc-writer', 'Doc Writer',
+        'Drafts and edits docs.', Icons.description_outlined),
+    _StarterApp('data-explorer', 'Data Explorer',
+        'Queries CSVs, sheets, SQL.', Icons.insights_outlined),
+    _StarterApp('research-assistant', 'Research Assistant',
+        'Finds, reads, synthesizes.', Icons.menu_book_outlined),
+    _StarterApp('monitor-ops', 'Ops Monitor',
+        'Alerts on anomalies.', Icons.monitor_heart_outlined),
+    _StarterApp('chat-general', 'General Chat',
+        'Plain chat with any model.', Icons.chat_outlined),
+    _StarterApp('meeting-notes', 'Meeting Notes',
+        'Transcribes and summarises.', Icons.mic_outlined),
+  ];
+  final order = <String>[];
+  switch (role) {
+    case 'developer':
+      order.addAll(['code-review', 'shell-agent', 'doc-writer',
+          'chat-general', 'meeting-notes', 'research-assistant']);
+      break;
+    case 'analyst':
+      order.addAll(['data-explorer', 'research-assistant', 'doc-writer',
+          'chat-general', 'meeting-notes', 'shell-agent']);
+      break;
+    case 'operator':
+      order.addAll(['shell-agent', 'monitor-ops', 'meeting-notes',
+          'chat-general', 'doc-writer', 'research-assistant']);
+      break;
+    case 'researcher':
+      order.addAll(['research-assistant', 'doc-writer', 'meeting-notes',
+          'chat-general', 'data-explorer', 'code-review']);
+      break;
+    default:
+      order.addAll(['chat-general', 'meeting-notes', 'doc-writer',
+          'research-assistant', 'data-explorer', 'code-review']);
+  }
+  final byId = {for (final a in all) a.id: a};
+  return [for (final id in order) if (byId[id] != null) byId[id]!];
+}
+
+class _AppCard extends StatelessWidget {
+  final _StarterApp app;
+  final bool selected;
+  final VoidCallback onTap;
+  const _AppCard({
+    required this.app,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return DsCard(
+      selected: selected,
+      onTap: onTap,
+      padding: EdgeInsets.all(DsSpacing.x4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: selected
+                  ? c.accentPrimary.withValues(alpha: 0.14)
+                  : c.surfaceAlt,
+              borderRadius: BorderRadius.circular(DsRadius.xs),
+            ),
+            child: Icon(
+              app.icon,
+              size: 18,
+              color: selected ? c.accentPrimary : c.text,
+            ),
+          ),
+          SizedBox(width: DsSpacing.x4),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        app.name,
+                        style: DsType.h3(color: c.textBright),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    AnimatedContainer(
+                      duration: DsDuration.fast,
+                      curve: DsCurve.decelSnap,
+                      width: 16,
+                      height: 16,
+                      decoration: BoxDecoration(
+                        color: selected ? c.accentPrimary : Colors.transparent,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: selected ? c.accentPrimary : c.border,
+                        ),
+                      ),
+                      child: selected
+                          ? Icon(Icons.check, size: 10, color: c.onAccent)
+                          : null,
+                    ),
+                  ],
+                ),
+                SizedBox(height: DsSpacing.x1),
+                Text(
+                  app.desc,
+                  style: DsType.micro(color: c.textMuted)
+                      .copyWith(fontSize: 11.5, height: 1.4),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

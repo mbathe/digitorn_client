@@ -1,0 +1,74 @@
+Resolving dependencies...
+Downloading packages...
+  archive 3.6.1 (4.0.9 available)
+  csv 6.0.0 (8.0.0 available)
+  device_info_plus 12.4.0 (13.0.0 available)
+  device_info_plus_platform_interface 7.0.3 (8.0.0 available)
+  flutter_fancy_tree_view 1.6.0 (discontinued replaced by two_dimensional_scrollables)
+  flutter_local_notifications 18.0.1 (21.0.0 available)
+  flutter_local_notifications_linux 5.0.0 (8.0.0 available)
+  flutter_local_notifications_platform_interface 8.0.0 (11.0.0 available)
+  flutter_markdown 0.7.7+1 (discontinued replaced by flutter_markdown_plus)
+  meta 1.17.0 (1.18.2 available)
+  mocktail 1.0.4 (1.0.5 available)
+  package_info_plus 8.3.1 (10.0.0 available)
+  package_info_plus_platform_interface 3.2.1 (4.0.0 available)
+  pasteboard 0.4.0 (0.5.0 available)
+  path_provider_android 2.2.23 (2.3.1 available)
+  permission_handler 11.4.0 (12.0.1 available)
+  permission_handler_android 12.1.0 (13.0.1 available)
+  syncfusion_flutter_core 33.1.46 (33.1.49 available)
+  syncfusion_flutter_datagrid 33.1.46 (33.1.49 available)
+  syncfusion_flutter_pdf 33.1.46 (33.1.49 available)
+  syncfusion_flutter_pdfviewer 33.1.46 (33.1.49 available)
+  syncfusion_flutter_signaturepad 33.1.46 (33.1.49 available)
+  syncfusion_pdfviewer_linux 33.1.47 (33.1.49 available)
+  syncfusion_pdfviewer_macos 33.1.47 (33.1.49 available)
+  syncfusion_pdfviewer_platform_interface 33.1.47 (33.1.49 available)
+  syncfusion_pdfviewer_web 33.1.47 (33.1.49 available)
+  syncfusion_pdfviewer_windows 33.1.47 (33.1.49 available)
+  test_api 0.7.10 (0.7.11 available)
+  timezone 0.9.4 (0.11.0 available)
+  vector_math 2.2.0 (2.3.0 available)
+  vm_service 15.0.2 (15.1.0 available)
+  win32 5.15.0 (6.0.1 available)
+  win32_registry 2.1.0 (3.0.3 available)
+Got dependencies!
+2 packages are discontinued.
+31 packages have newer versions incompatible with dependency constraints.
+Try `flutter pub outdated` for more information.
+00:00 +0: loading C:/Users/ASUS/Documents/digitorn_client/integration_test/join_session_hydration_test.dart
+Building Windows application...                                 
+Nuget.exe not found, trying to download or use cached version.
+Nuget is not installed.
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 1 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 2 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 3 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 4 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 5 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 6 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 7 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 8 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 9 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): warning MSB3026: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Beginning retry 10 in 1000ms. The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): error MSB3027: Could not copy "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". Exceeded retry count of 10. Failed. The file is locked by: "digitorn_client (38372)" [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\Microsoft.Common.CurrentVersion.targets(5353,5): error MSB3021: Unable to copy file "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\packages\Microsoft.Web.WebView2\build\native\x64\WebView2Loader.dll" to "C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll". The process cannot access the file 'C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\Debug\WebView2Loader.dll' because it is being used by another process. [C:\Users\ASUS\Documents\digitorn_client\build\windows\x64\runner\digitorn_client.vcxproj]
+Building Windows application...                                    97.1s
+00:00 +0 -1: loading C:/Users/ASUS/Documents/digitorn_client/integration_test/join_session_hydration_test.dart [E]
+  Failed to load "C:/Users/ASUS/Documents/digitorn_client/integration_test/join_session_hydration_test.dart": Build process failed.
+  package:flutter_tools/src/base/common.dart 34:3                    throwToolExit
+  package:flutter_tools/src/windows/build_windows.dart 262:5         _runBuild
+  ===== asynchronous gap ===========================
+  package:flutter_tools/src/windows/build_windows.dart 118:5         buildWindows
+  ===== asynchronous gap ===========================
+  package:flutter_tools/src/windows/windows_device.dart 65:5         WindowsDevice.buildForDevice
+  ===== asynchronous gap ===========================
+  package:flutter_tools/src/desktop_device.dart 108:7                DesktopDevice.startApp
+  ===== asynchronous gap ===========================
+  package:flutter_tools/src/test/integration_test_device.dart 57:39  IntegrationTestTestDevice.start
+  ===== asynchronous gap ===========================
+  package:flutter_tools/src/test/flutter_platform.dart 680:51        FlutterPlatform._startTest.<fn>
+  ===== asynchronous gap ===========================
+  package:flutter_tools/src/base/async_guard.dart 108:24             asyncGuard.<fn>
+  
+00:00 +0 -1: Some tests failed.

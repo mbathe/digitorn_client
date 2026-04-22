@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
+import '../services/app_config.dart';
 import '../services/auth_service.dart';
 import '../services/socket_service.dart';
 import '../services/queue_service.dart';
@@ -27,6 +28,29 @@ String extractText(dynamic content) {
         .join(' ');
   }
   return '';
+}
+
+/// Extract a token count from a session summary JSON field. The
+/// daemon ships ``tokens`` in two shapes depending on the endpoint:
+///   * ``int``  — legacy flat total (``/sessions`` list).
+///   * ``Map``  — ``{prompt, completion, total}`` (``/history``,
+///     per-session summary).
+/// A surprise Map on a field typed ``num`` was breaking
+/// ``loadSessions`` with a cast error, which silently stopped the
+/// sidebar from refreshing and cascaded into the chat panel flashing
+/// history before collapsing to the empty-state welcome screen.
+int _extractTokenCount(dynamic v) {
+  if (v == null) return 0;
+  if (v is num) return v.toInt();
+  if (v is Map) {
+    final t = v['total'] ?? v['tokens'];
+    if (t is num) return t.toInt();
+    // Sum prompt + completion as a fallback.
+    final p = v['prompt'];
+    final c = v['completion'];
+    if (p is num && c is num) return (p + c).toInt();
+  }
+  return 0;
 }
 
 /// Thrown by session list/history calls when the daemon says the app
@@ -155,8 +179,22 @@ class AppSession {
       appIcon: json['app_icon'] as String?,
       appColor: json['app_color'] as String?,
       workspacePath: (json['workspace_path'] ?? json['workspace']) as String?,
-      tokens: (json['tokens'] as num?)?.toInt() ?? 0,
-      costUsd: (json['cost_usd'] as num?)?.toDouble() ?? 0,
+      // ``tokens`` can arrive in two shapes depending on which endpoint
+      // the row came from:
+      //   * scalar  — ``/sessions`` list, flattens the summary to a
+      //     single total.
+      //   * map     — ``/history`` / per-session summary, carries
+      //     ``{prompt, completion, total}``.
+      // Accept both so a daemon schema tweak doesn't break session
+      // loading (which silently stopped populating the sidebar and
+      // caused the chat panel to flash history then fall back to the
+      // empty-state welcome screen).
+      tokens: _extractTokenCount(json['tokens']),
+      costUsd: (json['cost_usd'] is num)
+          ? (json['cost_usd'] as num).toDouble()
+          : (json['cost_usd'] is Map
+              ? ((json['cost_usd'] as Map)['total'] as num?)?.toDouble() ?? 0
+              : 0),
       lastError: json['last_error'] as String?,
     );
   }
@@ -360,8 +398,8 @@ class SessionService extends ChangeNotifier {
   Stream<String?> get onSessionChange => _sessionChangeCtrl.stream;
 
   late final Dio _dio = Dio(BaseOptions(
-    connectTimeout: const Duration(seconds: 10),
-    receiveTimeout: const Duration(hours: 4),
+    connectTimeout: AppConfig.connectTimeout,
+    receiveTimeout: AppConfig.sseReceiveTimeout,
     // Accept 2xx-4xx except 401 (let interceptor handle auth refresh)
     validateStatus: (status) => status != null && status < 500 && status != 401,
   ))..interceptors.add(AuthService().authInterceptor);
@@ -797,18 +835,26 @@ class SessionService extends ChangeNotifier {
       if (changed) notifyListeners();
 
       // Commit-on-first-success bookkeeping for draft sessions.
-      if (_draftSessionIds.contains(sid)) {
-        if (type == 'message_done') {
-          _onDraftFirstMessageDone(sid);
-        } else if ((type == 'error' || type == 'abort') &&
-            !_draftCommitPending.contains(sid)) {
-          // First turn failed before any `message_done` — the server
-          // will never persist this session, so drop our optimistic
-          // entry with no trace.
-          debugPrint(
-              'SessionService: draft $sid failed first turn ($type), removing');
-          removeDraftSession(sid);
-        }
+      //
+      // We USED TO drop the draft on the first ``error`` / ``abort``
+      // envelope, assuming the server had no session row yet. That was
+      // wrong on two counts:
+      //   1. The server DOES persist the session from the POST
+      //      ``/sessions`` creation — removing it locally wiped the
+      //      active session pointer, which cascaded through
+      //      ``_onSessionChange(null)`` and cleared the just-arrived
+      //      error marker before the UI could render it.
+      //   2. Even if the turn failed (billing 402, credential issue,
+      //      network blip), the user usually wants to see the error
+      //      and retry, not have the whole conversation vanish.
+      //
+      // Promotion to "committed" still happens on ``message_done`` —
+      // that's the only positive signal that the turn actually wrote
+      // something durable. A failed draft is kept alive as a draft
+      // until the user explicitly navigates away or invokes
+      // ``removeDraftSession`` (retry flow, close button, etc.).
+      if (_draftSessionIds.contains(sid) && type == 'message_done') {
+        _onDraftFirstMessageDone(sid);
       }
 
       // Semantic title push. The daemon MAY emit
@@ -828,11 +874,21 @@ class SessionService extends ChangeNotifier {
       }
     }
 
-    // Filter at the source: only events for the active session reach
-    // the chat panel. Events without a session_id (heartbeat,
-    // connected, _connection_*, _session_meta) pass through.
+    // Filter at the source. Everything routed to this method via
+    // [DigitornSocketService._handleBusEvent] is session-scoped (the
+    // socket service already split session-less types onto the user
+    // stream), so a missing/empty ``session_id`` is a daemon bug — drop
+    // it defensively instead of letting it bleed onto whichever session
+    // happens to be active. Control/meta events (heartbeat, connected,
+    // _connection_*, _session_meta) never pass through here.
     final active = activeSession?.sessionId;
-    if (sid != null && sid.isNotEmpty && active != null && sid != active) {
+    final hasSid = sid != null && sid.isNotEmpty;
+    if (!hasSid) {
+      debugPrint(
+          'SessionService: dropping untagged session-scoped event type=$type');
+      return;
+    }
+    if (active != null && sid != active) {
       return;
     }
     _eventCtrl.add(event);

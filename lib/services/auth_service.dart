@@ -3,6 +3,16 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'app_config.dart';
+
+/// Singleton marker value used by [AuthService.updateProfile] to
+/// signal "delete this attribute key server-side". The daemon's
+/// deep-merge treats literal `null` as a delete, so we substitute
+/// the sentinel for `null` at send time — Dart maps drop genuine
+/// `null` values, which would silently no-op the delete otherwise.
+class _AttributeDeleteSentinel {
+  const _AttributeDeleteSentinel();
+}
 
 class AuthUser {
   final String userId;
@@ -23,9 +33,19 @@ class AuthUser {
   final String? avatarUrl;
   final DateTime? createdAt;
   final DateTime? lastSeenAt;
+  final DateTime? updatedAt;
   final String? phone;
-  final String? locale;
-  final String? timezone;
+
+  /// Free-form user-owned preferences bag. The daemon's 2026-04
+  /// profile schema moved `locale` / `timezone` under `attributes`
+  /// and added `theme`, `notification_prefs`, etc. Deep-merge
+  /// semantics on PUT (null value deletes a key).
+  // Backed by a nullable field + getter so the class stays robust
+  // against hot-reload: when a field is added, existing in-memory
+  // instances read it as null, which would blow up non-null access.
+  final Map<String, dynamic>? _attributes;
+  Map<String, dynamic> get attributes =>
+      _attributes ?? const <String, dynamic>{};
 
   AuthUser({
     required this.userId,
@@ -37,27 +57,51 @@ class AuthUser {
     this.avatarUrl,
     this.createdAt,
     this.lastSeenAt,
+    this.updatedAt,
     this.phone,
-    this.locale,
-    this.timezone,
-  });
+    Map<String, dynamic>? attributes,
+  }) : _attributes = attributes;
 
-  factory AuthUser.fromJson(Map<String, dynamic> json) => AuthUser(
-        userId: json['user_id'] ?? '',
-        email: json['email'],
-        displayName: json['display_name'],
-        roles: List<String>.from(json['roles'] ?? const []),
-        permissions: List<String>.from(json['permissions'] ?? const []),
-        serverIsAdmin: json['is_admin'] is bool
-            ? json['is_admin'] as bool
-            : null,
-        avatarUrl: json['avatar_url'] as String?,
-        createdAt: _parseDate(json['created_at']),
-        lastSeenAt: _parseDate(json['last_seen_at']),
-        phone: json['phone'] as String?,
-        locale: json['locale'] as String?,
-        timezone: json['timezone'] as String?,
-      );
+  factory AuthUser.fromJson(Map<String, dynamic> json) {
+    // The daemon may return `attributes` as a nested map (new shape)
+    // or emit `locale` / `timezone` at the top level (legacy `/auth/me`
+    // shape). Merge both so downstream getters work either way.
+    final attrs = <String, dynamic>{};
+    final rawAttrs = json['attributes'];
+    if (rawAttrs is Map) {
+      attrs.addAll(rawAttrs.cast<String, dynamic>());
+    }
+    for (final legacyKey in const ['locale', 'timezone']) {
+      if (!attrs.containsKey(legacyKey) && json[legacyKey] != null) {
+        attrs[legacyKey] = json[legacyKey];
+      }
+    }
+    return AuthUser(
+      userId: (json['user_id'] ?? json['id'] ?? '') as String,
+      email: json['email'] as String?,
+      displayName: json['display_name'] as String?,
+      roles: List<String>.from(json['roles'] ?? const []),
+      permissions: List<String>.from(json['permissions'] ?? const []),
+      serverIsAdmin:
+          json['is_admin'] is bool ? json['is_admin'] as bool : null,
+      avatarUrl: json['avatar_url'] as String?,
+      createdAt: _parseDate(json['created_at']),
+      lastSeenAt: _parseDate(json['last_seen_at']),
+      updatedAt: _parseDate(json['updated_at']),
+      phone: json['phone'] as String?,
+      attributes: attrs,
+    );
+  }
+
+  /// Shortcut getters for the most-read attributes. Readers written
+  /// against the pre-migration schema keep working — new code can
+  /// either read them here or pull the full [attributes] bag.
+  String? get locale => attributes['locale'] as String?;
+  String? get timezone => attributes['timezone'] as String?;
+  String? get theme => attributes['theme'] as String?;
+  Map<String, dynamic> get notificationPrefs =>
+      (attributes['notification_prefs'] as Map?)?.cast<String, dynamic>() ??
+      const <String, dynamic>{};
 
   static DateTime? _parseDate(dynamic v) {
     if (v == null) return null;
@@ -97,7 +141,7 @@ class AuthService extends ChangeNotifier {
   static const _keyRefreshToken = 'refresh_token';
   static const _keyBaseUrl = 'base_url';
 
-  String baseUrl = 'http://127.0.0.1:8000';
+  String baseUrl = AppConfig.defaultDaemonUrl;
   String? _accessToken;
   String? _refreshToken;
   AuthUser? currentUser;
@@ -108,8 +152,8 @@ class AuthService extends ChangeNotifier {
   bool get isAuthenticated => _accessToken != null;
 
   late final Dio _dio = Dio(BaseOptions(
-    connectTimeout: const Duration(seconds: 8),
-    receiveTimeout: const Duration(seconds: 15),
+    connectTimeout: AppConfig.authConnectTimeout,
+    receiveTimeout: AppConfig.authReceiveTimeout,
   ));
 
   // Prevent concurrent refresh attempts
@@ -142,7 +186,9 @@ class AuthService extends ChangeNotifier {
           try {
             final resp = await Dio().fetch(error.requestOptions);
             return handler.resolve(resp);
-          } catch (_) {}
+          } catch (e) {
+            debugPrint('authInterceptor retry after refresh failed: $e');
+          }
         }
         // Refresh failed — refreshToken() already called logout() if needed
       }
@@ -156,7 +202,7 @@ class AuthService extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _accessToken = prefs.getString(_keyAccessToken);
     _refreshToken = prefs.getString(_keyRefreshToken);
-    baseUrl = prefs.getString(_keyBaseUrl) ?? 'http://127.0.0.1:8000';
+    baseUrl = prefs.getString(_keyBaseUrl) ?? AppConfig.defaultDaemonUrl;
     if (_accessToken != null) {
       await _fetchMe();
     }
@@ -440,21 +486,55 @@ class AuthService extends ChangeNotifier {
   // listener (sidebar, settings header, inbox) picks up the new
   // value on the next rebuild.
 
+  /// Sentinel used to signal "delete this attribute on the server".
+  /// The daemon's deep-merge interprets a JSON `null` as a delete,
+  /// but Dart drops `null` values from Maps, so callers pass this
+  /// sentinel and [updateProfile] swaps it for a literal `null` in
+  /// the outgoing body.
+  static const Object attributeDelete = _AttributeDeleteSentinel();
+
   /// Update editable profile fields. Pass `null` to leave a field
   /// untouched. Returns true on success; on failure [lastError] is
   /// populated and listeners are notified so the form can render
   /// the server message inline.
+  ///
+  /// [attributes] deep-merges into the user's attribute bag — pass
+  /// [attributeDelete] as a value to ask the daemon to drop the
+  /// key. The daemon guards the privileged bag (`password_hash`,
+  /// `mfa_secret`, etc.) and rejects any write atomically with 400;
+  /// we never send those from the client but surface the refusal
+  /// message verbatim when it happens.
   Future<bool> updateProfile({
     String? displayName,
+    String? email,
     String? phone,
     String? locale,
     String? timezone,
+    String? theme,
+    Map<String, dynamic>? notificationPrefs,
+    Map<String, dynamic>? attributes,
   }) async {
     final body = <String, dynamic>{};
     if (displayName != null) body['display_name'] = displayName;
+    if (email != null) body['email'] = email;
     if (phone != null) body['phone'] = phone;
-    if (locale != null) body['locale'] = locale;
-    if (timezone != null) body['timezone'] = timezone;
+    // Build attributes map from explicit top-level locale/timezone/
+    // theme helpers + the caller's extra bag. The daemon's 2026-04
+    // schema moved locale + timezone under `attributes`, so we must
+    // nest them here rather than sending them at the top level.
+    final mergedAttrs = <String, dynamic>{};
+    if (locale != null) mergedAttrs['locale'] = locale;
+    if (timezone != null) mergedAttrs['timezone'] = timezone;
+    if (theme != null) mergedAttrs['theme'] = theme;
+    if (notificationPrefs != null) {
+      mergedAttrs['notification_prefs'] = notificationPrefs;
+    }
+    if (attributes != null) {
+      attributes.forEach((k, v) {
+        mergedAttrs[k] = identical(v, attributeDelete) ? null : v;
+      });
+    }
+    if (mergedAttrs.isNotEmpty) body['attributes'] = mergedAttrs;
     if (body.isEmpty) return true;
     try {
       final r = await _dio.put(
@@ -463,7 +543,8 @@ class AuthService extends ChangeNotifier {
         options: _authOptions,
       );
       debugPrint('updateProfile ← ${r.statusCode} ${r.data}');
-      if ((r.statusCode == 200 || r.statusCode == 204) && r.data is Map) {
+      final code = r.statusCode ?? 0;
+      if ((code == 200 || code == 204) && r.data is Map) {
         final parsed = _unwrapUser(r.data as Map);
         if (parsed != null) {
           currentUser = parsed;
@@ -474,7 +555,11 @@ class AuthService extends ChangeNotifier {
         notifyListeners();
         return true;
       }
-      lastError = _bodyError(r.data) ?? 'HTTP ${r.statusCode}';
+      // 400 — likely a forbidden-field guard (`password_hash`,
+      // `mfa_secret`) or validation error. The daemon returns the
+      // full refusal reason in `detail` / `error`; we surface it so
+      // the form renders it inline.
+      lastError = _bodyError(r.data) ?? 'HTTP $code';
       notifyListeners();
       return false;
     } on DioException catch (e) {
@@ -587,9 +672,9 @@ class AuthService extends ChangeNotifier {
             avatarUrl: null,
             createdAt: u.createdAt,
             lastSeenAt: u.lastSeenAt,
+            updatedAt: u.updatedAt,
             phone: u.phone,
-            locale: u.locale,
-            timezone: u.timezone,
+            attributes: u.attributes,
           );
           notifyListeners();
         }
@@ -613,7 +698,9 @@ class AuthService extends ChangeNotifier {
           data: {'refresh_token': _refreshToken},
           options: _authOptions,
         );
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('logout: remote revocation failed ($e) — clearing locally');
+      }
     }
     await _clearTokens();
     notifyListeners();
@@ -626,7 +713,9 @@ class AuthService extends ChangeNotifier {
       final body = e.response?.data;
       if (body is Map) return body['error'] ?? body['detail'] ?? 'Unknown error';
       if (body is String) return body;
-    } catch (_) {}
+    } catch (err) {
+      debugPrint('_extractError: body parse failed ($err)');
+    }
     if (e.type == DioExceptionType.connectionTimeout ||
         e.type == DioExceptionType.receiveTimeout) {
       return 'Connection timeout — is the daemon running?';

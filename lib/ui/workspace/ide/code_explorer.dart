@@ -27,7 +27,7 @@ import '../../../services/workspace_module.dart';
 import '../../../theme/app_theme.dart';
 import 'commit_dialog.dart';
 
-class CodeExplorer extends StatelessWidget {
+class CodeExplorer extends StatefulWidget {
   /// Currently selected file — highlighted in the list. Null = none.
   final String? selectedPath;
   final void Function(String path) onSelect;
@@ -39,6 +39,25 @@ class CodeExplorer extends StatelessWidget {
   });
 
   @override
+  State<CodeExplorer> createState() => _CodeExplorerState();
+}
+
+class _CodeExplorerState extends State<CodeExplorer> {
+  /// Directories the user has explicitly collapsed — everything else
+  /// starts expanded so the hierarchy is visible at a glance.
+  final Set<String> _collapsed = <String>{};
+
+  void _toggleDir(String path) {
+    setState(() {
+      if (_collapsed.contains(path)) {
+        _collapsed.remove(path);
+      } else {
+        _collapsed.add(path);
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: WorkspaceModule(),
@@ -46,6 +65,11 @@ class CodeExplorer extends StatelessWidget {
         final module = WorkspaceModule();
         final paths = module.sortedPaths;
         final c = context.colors;
+        final tree = _buildFileTree(
+          module,
+          paths,
+          collapsed: _collapsed,
+        );
         return Container(
           color: c.surface,
           child: Column(
@@ -58,13 +82,25 @@ class CodeExplorer extends StatelessWidget {
                 Expanded(
                   child: ListView.builder(
                     padding: const EdgeInsets.symmetric(vertical: 4),
-                    itemCount: paths.length,
+                    itemCount: tree.rows.length,
                     itemBuilder: (_, i) {
-                      final file = module.files[paths[i]]!;
+                      final row = tree.rows[i];
+                      if (row.isDir) {
+                        return _DirRow(
+                          name: row.name,
+                          path: row.fullPath,
+                          depth: row.depth,
+                          expanded: !_collapsed.contains(row.fullPath),
+                          onTap: () => _toggleDir(row.fullPath),
+                        );
+                      }
+                      final file = row.file!;
                       return _FileTile(
                         file: file,
-                        selected: file.path == selectedPath,
-                        onTap: () => onSelect(file.path),
+                        selected: file.path == widget.selectedPath,
+                        onTap: () => widget.onSelect(file.path),
+                        depth: row.depth,
+                        displayName: row.name,
                       );
                     },
                   ),
@@ -73,6 +109,279 @@ class CodeExplorer extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+// ─── Tree model ──────────────────────────────────────────────────────
+//
+// We flatten the hierarchy into a list of [_ExplorerRow] entries, in
+// render order, so [ListView.builder] stays trivially efficient. Each
+// row knows its depth — used by [_IndentGuide] to draw VS Code-style
+// vertical rails that span the whole column.
+
+class _ExplorerRow {
+  final String name;
+  final String fullPath;
+  final int depth;
+  final bool isDir;
+  final WorkspaceFile? file;
+  const _ExplorerRow._({
+    required this.name,
+    required this.fullPath,
+    required this.depth,
+    required this.isDir,
+    this.file,
+  });
+
+  factory _ExplorerRow.dir(String name, String fullPath, int depth) =>
+      _ExplorerRow._(
+          name: name, fullPath: fullPath, depth: depth, isDir: true);
+
+  factory _ExplorerRow.file(String name, WorkspaceFile file, int depth) =>
+      _ExplorerRow._(
+          name: name,
+          fullPath: file.path,
+          depth: depth,
+          isDir: false,
+          file: file);
+}
+
+class _TreeLayout {
+  final List<_ExplorerRow> rows;
+  const _TreeLayout(this.rows);
+}
+
+_TreeLayout _buildFileTree(
+  WorkspaceModule module,
+  List<String> paths, {
+  required Set<String> collapsed,
+}) {
+  if (paths.isEmpty) return const _TreeLayout([]);
+
+  // Normalize + split once.
+  final items = paths.map((p) {
+    final norm = p.replaceAll('\\', '/');
+    final segs = norm.split('/').where((s) => s.isNotEmpty).toList();
+    return (norm: norm, segs: segs, original: p);
+  }).toList();
+
+  // Longest common directory prefix (everything but the filename).
+  int common = items.first.segs.length - 1;
+  if (common < 0) common = 0;
+  for (final it in items.skip(1)) {
+    final cap = [
+      common,
+      it.segs.length - 1,
+      items.first.segs.length - 1,
+    ].reduce((a, b) => a < b ? a : b);
+    var match = 0;
+    while (match < cap && it.segs[match] == items.first.segs[match]) {
+      match++;
+    }
+    common = match;
+    if (common == 0) break;
+  }
+
+  // Build a trie of directory nodes keyed by their accumulated path.
+  final dirChildren = <String, List<_TreeBuildNode>>{};
+  final dirOrder = <String>[];
+  final rootKey = items.first.segs.take(common).join('/');
+
+  void addDirOnce(String key) {
+    if (!dirChildren.containsKey(key)) {
+      dirChildren[key] = [];
+      dirOrder.add(key);
+    }
+  }
+
+  addDirOnce(rootKey);
+
+  for (final it in items) {
+    final rel = it.segs.sublist(common);
+    if (rel.isEmpty) continue;
+    var parentKey = rootKey;
+    for (var i = 0; i < rel.length; i++) {
+      final seg = rel[i];
+      final isLast = i == rel.length - 1;
+      final childKey = parentKey.isEmpty ? seg : '$parentKey/$seg';
+      if (isLast) {
+        final file = module.files[it.original];
+        if (file != null) {
+          dirChildren[parentKey]!.add(
+            _TreeBuildNode(name: seg, fullPath: it.original, file: file),
+          );
+        }
+      } else {
+        addDirOnce(childKey);
+        final existing = dirChildren[parentKey]!
+            .firstWhere((n) => n.isDir && n.fullPath == childKey,
+                orElse: () => _TreeBuildNode.empty());
+        if (existing.isEmpty) {
+          dirChildren[parentKey]!.add(
+            _TreeBuildNode(name: seg, fullPath: childKey, isDir: true),
+          );
+        }
+      }
+      parentKey = childKey;
+    }
+  }
+
+  // Sort each directory: dirs first, then files, both alpha — but only
+  // within directories. The file order WITHIN the flat original
+  // `sortedPaths` (recent-first) is preserved for siblings of the same
+  // directory through [module.sortedPaths] seeding the walk above, and
+  // we re-stabilise alphabetically at the directory level below to
+  // make "parent folders on top, children nested beneath" predictable.
+  for (final k in dirOrder) {
+    dirChildren[k]!.sort((a, b) {
+      if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+  }
+
+  // Walk the trie depth-first and emit rows.
+  final rows = <_ExplorerRow>[];
+  final rootName =
+      common > 0 ? items.first.segs.take(common).last : 'workspace';
+  rows.add(_ExplorerRow.dir(rootName, rootKey, 0));
+
+  void emit(String dirKey, int depth) {
+    if (collapsed.contains(dirKey)) return;
+    for (final n in dirChildren[dirKey] ?? const <_TreeBuildNode>[]) {
+      if (n.isDir) {
+        rows.add(_ExplorerRow.dir(n.name, n.fullPath, depth));
+        emit(n.fullPath, depth + 1);
+      } else {
+        rows.add(_ExplorerRow.file(n.name, n.file!, depth));
+      }
+    }
+  }
+  emit(rootKey, 1);
+
+  return _TreeLayout(rows);
+}
+
+class _TreeBuildNode {
+  final String name;
+  final String fullPath;
+  final bool isDir;
+  final WorkspaceFile? file;
+  final bool isEmpty;
+  const _TreeBuildNode({
+    required this.name,
+    required this.fullPath,
+    this.isDir = false,
+    this.file,
+  }) : isEmpty = false;
+  const _TreeBuildNode.empty()
+      : name = '',
+        fullPath = '',
+        isDir = false,
+        file = null,
+        isEmpty = true;
+}
+
+// ─── Indent guide ──────────────────────────────────────────────────
+//
+// Thin vertical line rendered once per indent level. Stacked across
+// rows (all rows share the same row height) they form continuous
+// rails that mimic VS Code's explorer.
+
+class _IndentGuide extends StatelessWidget {
+  const _IndentGuide();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return SizedBox(
+      width: 14,
+      child: Center(
+        child: SizedBox(
+          width: 1,
+          child: ColoredBox(color: c.border.withValues(alpha: 0.55)),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Directory row ──────────────────────────────────────────────────
+
+class _DirRow extends StatefulWidget {
+  final String name;
+  final String path;
+  final int depth;
+  final bool expanded;
+  final VoidCallback onTap;
+  const _DirRow({
+    required this.name,
+    required this.path,
+    required this.depth,
+    required this.expanded,
+    required this.onTap,
+  });
+
+  @override
+  State<_DirRow> createState() => _DirRowState();
+}
+
+class _DirRowState extends State<_DirRow> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) {
+        if (!_hovered && mounted) setState(() => _hovered = true);
+      },
+      onExit: (_) {
+        if (_hovered && mounted) setState(() => _hovered = false);
+      },
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          height: 22,
+          color: _hovered ? c.surfaceAlt : Colors.transparent,
+          child: Row(
+            children: [
+              for (int i = 0; i < widget.depth; i++) const _IndentGuide(),
+              const SizedBox(width: 4),
+              Icon(
+                widget.expanded
+                    ? Icons.keyboard_arrow_down_rounded
+                    : Icons.chevron_right_rounded,
+                size: 14,
+                color: c.textMuted,
+              ),
+              Icon(
+                widget.expanded
+                    ? Icons.folder_open_rounded
+                    : Icons.folder_rounded,
+                size: 13,
+                color: c.orange,
+              ),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  widget.name,
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                  style: GoogleFonts.inter(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w500,
+                    color: c.textMuted,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -319,10 +628,14 @@ class _FileTile extends StatefulWidget {
   final WorkspaceFile file;
   final bool selected;
   final VoidCallback onTap;
+  final int depth;
+  final String? displayName;
   const _FileTile({
     required this.file,
     required this.selected,
     required this.onTap,
+    this.depth = 0,
+    this.displayName,
   });
 
   @override
@@ -337,6 +650,7 @@ class _FileTileState extends State<_FileTile> {
     final c = context.colors;
     final file = widget.file;
     final isDeleted = file.isDeleted;
+    final label = widget.displayName ?? file.path;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) {
@@ -350,8 +664,8 @@ class _FileTileState extends State<_FileTile> {
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 100),
-          padding:
-              const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          height: 22,
+          padding: const EdgeInsets.only(right: 10),
           color: widget.selected
               ? c.green.withValues(alpha: 0.1)
               : _hovered
@@ -359,11 +673,15 @@ class _FileTileState extends State<_FileTile> {
                   : Colors.transparent,
           child: Row(
             children: [
+              for (int i = 0; i < widget.depth; i++) const _IndentGuide(),
+              // Chevron placeholder so filenames align under directory
+              // expand icons.
+              const SizedBox(width: 4 + 14),
               _LanguageIcon(lang: file.language, ext: file.extension),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  file.path,
+                  label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.firaCode(
@@ -373,30 +691,41 @@ class _FileTileState extends State<_FileTile> {
                   ),
                 ),
               ),
-              // Gutter counters — "+N -M" when pending. Uses the
-              // effective (parsed-from-unified-diff) counts rather
-              // than the daemon's `insertions_pending` /
-              // `deletions_pending` fields, which scout confirmed
-              // are cumulative-since-session-start, not
-              // pending-since-baseline.
-              if (file.hasPendingChanges) ...[
-                const SizedBox(width: 6),
-                if (file.pendingInsertionsEffective > 0)
-                  Text('+${file.pendingInsertionsEffective}',
-                      style: GoogleFonts.firaCode(
-                          fontSize: 10,
-                          color: c.green,
-                          fontWeight: FontWeight.w600)),
-                if (file.pendingInsertionsEffective > 0 &&
-                    file.pendingDeletionsEffective > 0)
-                  const SizedBox(width: 3),
-                if (file.pendingDeletionsEffective > 0)
-                  Text('-${file.pendingDeletionsEffective}',
-                      style: GoogleFonts.firaCode(
-                          fontSize: 10,
-                          color: c.red,
-                          fontWeight: FontWeight.w600)),
-              ],
+              // Gutter counters — "+N -M". The WorkspaceModule
+              // tracks these client-side by summing per-op
+              // insertions/deletions across consecutive writes (see
+              // `_updatePendingAggregate`). This replaces the
+              // daemon's `insertions_pending` / `deletions_pending`
+              // fields, which on several builds reset to the last
+              // operation's count instead of accumulating.
+              Builder(builder: (ctx) {
+                final mod = WorkspaceModule();
+                final ins = mod.pendingInsertionsFor(file.path);
+                final del = mod.pendingDeletionsFor(file.path);
+                if (ins <= 0 && del <= 0) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (ins > 0)
+                        Text('+$ins',
+                            style: GoogleFonts.firaCode(
+                                fontSize: 10,
+                                color: c.green,
+                                fontWeight: FontWeight.w600)),
+                      if (ins > 0 && del > 0)
+                        const SizedBox(width: 3),
+                      if (del > 0)
+                        Text('-$del',
+                            style: GoogleFonts.firaCode(
+                                fontSize: 10,
+                                color: c.red,
+                                fontWeight: FontWeight.w600)),
+                    ],
+                  ),
+                );
+              }),
               const SizedBox(width: 6),
               _ValidationDot(file: file),
               _GitBadge(file: file),
@@ -679,7 +1008,6 @@ class _TileActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = context.colors;
     // Hide approve/reject completely when the active app is in
     // auto_approve mode — the daemon stages every write, so the
     // actions would be no-ops that pollute logs (per brief §1).
@@ -687,18 +1015,25 @@ class _TileActions extends StatelessWidget {
     final autoApprove =
         appId.isNotEmpty && AppUiConfigService().isAutoApprove(appId);
     if (autoApprove) return const SizedBox.shrink();
-    final isPending = file.isPending;
-    final isApproved = file.isApproved;
+
+    // Hide both buttons when there's nothing to review. An already-
+    // approved file with no fresh edits since the last approval is
+    // "clean" — re-approving / rejecting it would be a no-op that
+    // just clutters the row. We only surface the actions the moment
+    // the agent introduces new pending changes.
+    final needsReview = file.isPending || file.hasPendingChanges;
+    if (!needsReview) return const SizedBox.shrink();
+
+    final c = context.colors;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (isPending || isApproved)
-          _InlineIcon(
-            icon: Icons.check_rounded,
-            color: c.green,
-            tooltip: 'Approve — snapshot as new baseline',
-            onTap: () => FileActionsService().approve(file.path),
-          ),
+        _InlineIcon(
+          icon: Icons.check_rounded,
+          color: c.green,
+          tooltip: 'Approve — snapshot as new baseline',
+          onTap: () => FileActionsService().approve(file.path),
+        ),
         const SizedBox(width: 2),
         _InlineIcon(
           icon: Icons.close_rounded,

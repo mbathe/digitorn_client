@@ -168,10 +168,11 @@ Widget buildNode(
     final as = node.asName;
     final children = <Widget>[];
     for (var i = 0; i < list.length; i++) {
+      final item = list[i];
       final extra = <String, dynamic>{
         ...?scopeExtra,
-        as: list[i],
-        'row': list[i],
+        as: item,
+        'row': item,
         'index': i,
         'first': i == 0,
         'last': i == list.length - 1,
@@ -182,7 +183,13 @@ Widget buildNode(
       cloneProps.remove('as');
       cloneProps.remove('key');
       final clone = WidgetNode(type: node.type, props: cloneProps);
-      children.add(buildNode(clone, runtime, scopeExtra: extra));
+      // Stable key: prefer an `id` field on the item (survives reorder /
+      // filter / add-remove), otherwise fall back to the index.
+      final stableId = (item is Map) ? item['id'] ?? item['_id'] : null;
+      children.add(KeyedSubtree(
+        key: ValueKey(stableId ?? i),
+        child: buildNode(clone, runtime, scopeExtra: extra),
+      ));
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

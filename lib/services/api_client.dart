@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import '../models/chat_message.dart';
 import '../models/app_manifest.dart';
 import '../models/app_summary.dart';
+import 'app_config.dart';
 import 'auth_service.dart';
 import 'workspace_module.dart' show WorkspaceFile;
 
@@ -257,7 +258,7 @@ class DigitornApiClient {
 
   DigitornApiClient._internal();
 
-  late Dio _dio = _buildDio('http://127.0.0.1:8000');
+  late Dio _dio = _buildDio(AuthService().baseUrl);
 
   /// Shared Dio for the whole session-scoped daemon API. Other
   /// services (SessionActionsService, AppLifecycleService, …) reuse
@@ -270,8 +271,8 @@ class DigitornApiClient {
 
   Dio _buildDio(String baseUrl) => Dio(BaseOptions(
         baseUrl: baseUrl,
-        connectTimeout: const Duration(seconds: 10),
-        receiveTimeout: const Duration(hours: 1),
+        connectTimeout: AppConfig.connectTimeout,
+        receiveTimeout: AppConfig.sseReceiveTimeout,
       ))..interceptors.add(AuthService().authInterceptor);
 
   // ─── Auth ─────────────────────────────────────────────────────────────────

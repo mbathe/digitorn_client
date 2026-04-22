@@ -110,9 +110,18 @@ class DigitornSocketService extends ChangeNotifier {
         .setQuery({'token': token})
         .setExtraHeaders({'Authorization': 'Bearer $token'})
         .enableReconnection()
-        .setReconnectionAttempts(5)
+        // Unlimited reconnection attempts. The previous cap of 5
+        // meant the client could reach a permanent disconnected
+        // state after ~38 seconds of network trouble (the
+        // cumulative backoff), leaving the UI apparently functional
+        // but silently isolated from the daemon — messages sent
+        // after that point never received responses because the
+        // socket never re-joined the session room. socket.io_client's
+        // contract: a negative value keeps retrying forever with the
+        // configured exponential backoff.
+        .setReconnectionAttempts(1 << 31)
         .setReconnectionDelay(2000)
-        .setReconnectionDelayMax(10000)
+        .setReconnectionDelayMax(30000)
         .build();
 
     final socket = io.io('$baseUrl/events', options);

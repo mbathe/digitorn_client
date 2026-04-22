@@ -531,19 +531,37 @@ class AdminService extends ChangeNotifier {
   /// strictly so a `success: false` response doesn't silently look
   /// like an empty list.
   Future<AdminUserListResponse> listUsersFiltered(UserFilters f) async {
-    final r = await _dio.get(
-      '$_base/api/admin/users',
-      queryParameters: {
-        if (f.q.isNotEmpty) 'q': f.q,
-        if (f.appId != null && f.appId!.isNotEmpty) 'app_id': f.appId,
-        if (f.role != null && f.role!.isNotEmpty) 'role': f.role,
-        if (f.isActive != null) 'is_active': f.isActive!.toString(),
-        if (f.provider != null && f.provider!.isNotEmpty)
-          'provider': f.provider,
-        'limit': f.limit,
-        'offset': f.offset,
-      },
-    );
+    final qp = <String, dynamic>{
+      if (f.q.isNotEmpty) 'q': f.q,
+      if (f.appId != null && f.appId!.isNotEmpty) 'app_id': f.appId,
+      if (f.role != null && f.role!.isNotEmpty) 'role': f.role,
+      if (f.isActive != null) 'is_active': f.isActive!.toString(),
+      if (f.provider != null && f.provider!.isNotEmpty)
+        'provider': f.provider,
+      'limit': f.limit,
+      'offset': f.offset,
+    };
+    debugPrint('[admin] GET $_base/api/admin/users qp=$qp');
+    final Response r;
+    try {
+      r = await _dio.get(
+        '$_base/api/admin/users',
+        queryParameters: qp,
+      );
+    } on DioException catch (e) {
+      debugPrint('[admin] DioException: ${e.type} '
+          'status=${e.response?.statusCode} '
+          'body=${e.response?.data} msg=${e.message}');
+      throw AdminUserException(
+        e.response?.data is Map
+            ? (_bodyMessage(e.response!.data) ?? e.message ?? 'Network error')
+            : (e.message ?? 'Network error'),
+        statusCode: e.response?.statusCode,
+      );
+    }
+    debugPrint('[admin] ← HTTP ${r.statusCode} '
+        'contentType=${r.headers.value('content-type')} '
+        'dataType=${r.data?.runtimeType}');
     if ((r.statusCode ?? 0) == 403) {
       throw const AdminUserException(
         'Admin permission required',
@@ -551,13 +569,17 @@ class AdminService extends ChangeNotifier {
       );
     }
     if (r.data is! Map || r.data['success'] != true) {
+      debugPrint('[admin] unexpected envelope: ${r.data}');
       throw AdminUserException(
         _bodyMessage(r.data) ?? 'HTTP ${r.statusCode}',
         statusCode: r.statusCode,
       );
     }
     final data = (r.data['data'] as Map).cast<String, dynamic>();
-    return AdminUserListResponse.fromJson(data);
+    final parsed = AdminUserListResponse.fromJson(data);
+    debugPrint('[admin] parsed ${parsed.users.length} users '
+        '(total=${parsed.total})');
+    return parsed;
   }
 
   /// GET `/api/admin/roles` — catalogue used by the role picker.

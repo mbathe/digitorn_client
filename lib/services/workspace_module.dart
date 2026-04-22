@@ -79,6 +79,14 @@ class WorkspaceFile {
   /// | "ignored".
   final String? gitStatus;
 
+  /// The file's content BEFORE this operation — populated by the
+  /// daemon on `preview:resource_patched` / `preview:resource_set`
+  /// events for every write/edit. We use it to seed the session
+  /// baseline in [WorkspaceModule] so the diff overlay can show
+  /// deletions, not just additions, for never-approved files.
+  /// Null when the event is a fresh read (no prior state).
+  final String? previousContent;
+
   const WorkspaceFile({
     required this.path,
     this.content = '',
@@ -100,6 +108,7 @@ class WorkspaceFile {
     this.deletionsPending = 0,
     this.baselineLines = 0,
     this.gitStatus,
+    this.previousContent,
   });
 
   /// Parse a raw map from the daemon (from snapshots or deltas).
@@ -128,6 +137,7 @@ class WorkspaceFile {
       deletionsPending: (m['deletions_pending'] as num?)?.toInt() ?? 0,
       baselineLines: (m['baseline_lines'] as num?)?.toInt() ?? 0,
       gitStatus: m['git_status'] as String?,
+      previousContent: m['previous_content'] as String?,
     );
   }
 
@@ -154,35 +164,30 @@ class WorkspaceFile {
   /// Pending counters (delta-vs-last-approved-baseline) shown as the
   /// `+N -M` badge next to file names in the explorer.
   ///
-  /// The daemon's `insertions_pending` / `deletions_pending` ARE the
-  /// authoritative aggregate delta-vs-baseline since the BUG #1 fix
-  /// (scout-verified by `scout/scout_pending_aggregation.py`: 3
-  /// consecutive 1-line edits produce ins=3 del=3, not 1/1 which a
-  /// per-op reading would show).
+  /// Priority order — the daemon ships two potentially contradictory
+  /// sources (the raw counters and the unified diff) and we've seen
+  /// builds where the counters reflect only the LAST write while the
+  /// unified diff is correctly cumulative. We therefore parse the
+  /// unified diff first (guaranteed aggregate since it's the
+  /// vs-baseline comparison) and fall back to the raw counters only
+  /// when no diff is available (e.g. fresh session before any write).
   ///
-  /// The earlier implementation short-circuited through `unifiedDiff`
-  /// (the PER-OPERATION diff from the last write, NOT cumulative).
-  /// That was correct workaround while the daemon shipped cumulative
-  /// totals; now it reads only the last op and hides the aggregate
-  /// — the exact symptom the user reported.
-  ///
-  /// Fallback path parses `unifiedDiffPending` (which IS vs-baseline)
-  /// as a last-resort when the daemon ever ships 0/0 alongside a
-  /// non-empty pending diff — defensive, not expected in practice.
+  /// This matches what the user sees: three consecutive 1-line edits
+  /// now produce `+3 -3`, not `+1 -1` that would hide the history.
   int get pendingInsertionsEffective {
-    if (insertionsPending > 0) return insertionsPending;
     if ((unifiedDiffPending ?? '').isNotEmpty) {
-      return _parsePendingDiffCounts().$1;
+      final parsed = _parsePendingDiffCounts();
+      if (parsed.$1 > 0 || parsed.$2 > 0) return parsed.$1;
     }
-    return 0;
+    return insertionsPending;
   }
 
   int get pendingDeletionsEffective {
-    if (deletionsPending > 0) return deletionsPending;
     if ((unifiedDiffPending ?? '').isNotEmpty) {
-      return _parsePendingDiffCounts().$2;
+      final parsed = _parsePendingDiffCounts();
+      if (parsed.$1 > 0 || parsed.$2 > 0) return parsed.$2;
     }
-    return 0;
+    return deletionsPending;
   }
 
   (int, int) _parsePendingDiffCounts() {
@@ -257,6 +262,7 @@ class WorkspaceFile {
         baselineLines:
             next == 'approved' ? lines : baselineLines,
         gitStatus: gitStatus,
+        previousContent: previousContent,
       );
 }
 
@@ -287,6 +293,46 @@ class WorkspaceModule extends ChangeNotifier {
   /// All files keyed by path.
   Map<String, WorkspaceFile> _files = {};
   Map<String, WorkspaceFile> get files => Map.unmodifiable(_files);
+
+  /// Per-path "session baseline" — the file's content as it stood
+  /// BEFORE the agent's first edit of this session. Used by the
+  /// editor's diff overlay to show cumulative insertions AND
+  /// deletions even when the daemon's `baseline` field is empty
+  /// (the default for files that were never approved).
+  ///
+  /// Populated lazily: the first time a file is observed, we seed
+  /// the baseline with `previous_content` from the event if the
+  /// daemon provided one (the authoritative pre-edit content), or
+  /// with `''` for files the agent created from nothing. On
+  /// approve, the baseline slides forward to the current content
+  /// so the next cycle diffs against the freshly-accepted state.
+  final Map<String, String> _sessionBaselines = {};
+
+  /// Best-effort baseline for [path] — the cached session origin if
+  /// we have one, otherwise empty (fresh file, first time we see
+  /// it). Consumers that already have a daemon-side baseline should
+  /// prefer it when non-empty.
+  String sessionBaselineFor(String path) => _sessionBaselines[path] ?? '';
+
+  /// Client-side aggregate of +/- since the last approval, per path.
+  ///
+  /// The daemon ships `insertions_pending` / `deletions_pending` alongside
+  /// each file payload, but in practice those counters reflect only the
+  /// *last* write operation on several builds — they don't accumulate
+  /// across consecutive edits, which is exactly the "always shows the
+  /// last edit" bug users hit. We fix it client-side by adding every
+  /// per-op `insertions`/`deletions` value (authoritative per-op, from
+  /// the daemon) to a running total, and clearing the entry the moment
+  /// the file flips to `approved` (= baseline bumped to current content).
+  final Map<String, ({int ins, int del})> _pendingAggregate = {};
+
+  /// Cumulative pending insertions for [path] since the last approval.
+  int pendingInsertionsFor(String path) =>
+      _pendingAggregate[path]?.ins ?? 0;
+
+  /// Cumulative pending deletions for [path] since the last approval.
+  int pendingDeletionsFor(String path) =>
+      _pendingAggregate[path]?.del ?? 0;
 
   /// Currently selected file in the explorer.
   String? _selectedPath;
@@ -546,6 +592,7 @@ class WorkspaceModule extends ChangeNotifier {
                   deletionsPending: parsed.deletionsPending,
                   baselineLines: parsed.baselineLines,
                   gitStatus: parsed.gitStatus,
+                  previousContent: parsed.previousContent,
                 );
         }
       }
@@ -571,6 +618,7 @@ class WorkspaceModule extends ChangeNotifier {
         }
       }
       if (filesDirty) {
+        _updatePendingAggregate(newFiles);
         _files = newFiles;
         // Auto-select first file if nothing selected
         if (_selectedPath == null && _files.isNotEmpty) {
@@ -586,12 +634,106 @@ class WorkspaceModule extends ChangeNotifier {
       // Store cleared
       _files = {};
       _selectedPath = null;
+      _pendingAggregate.clear();
+      _sessionBaselines.clear();
       changed = true;
     }
 
     if (_rebuildDiagnostics(store)) changed = true;
 
     if (changed) notifyListeners();
+  }
+
+  /// Walk [newFiles] and update [_pendingAggregate] so the `+N -M`
+  /// badge on the file tree reflects the CUMULATIVE insertions /
+  /// deletions since the last approval — not just the latest write.
+  ///
+  /// Why we key on `totalInsertions` / `totalDeletions` (session-wide
+  /// cumulative) rather than `insertions` / `deletions` (per-op):
+  /// store events are batched through a microtask in `_onStoreChanged`,
+  /// so three consecutive writes collapse into a single `_rebuild`
+  /// call — at which point `insertions`/`deletions` on the new
+  /// WorkspaceFile reflect only the LAST operation in the batch.
+  /// Subtracting consecutive session totals gives us the true delta
+  /// over the whole batch.
+  ///
+  /// Rules:
+  ///   1. `validation == 'approved'` → the baseline was just bumped
+  ///      to the current content, so pending resets to zero.
+  ///   2. File freshly introduced → seed the aggregate with the
+  ///      file's session totals (these represent every write since
+  ///      session start vs. an empty baseline).
+  ///   3. `updatedAt` advanced (or a clean→pending flip) → add the
+  ///      delta `newTotal - oldTotal` to the running count. Keying
+  ///      on `updatedAt` means snapshot replays on reconnect don't
+  ///      double-count because `updatedAt` doesn't move.
+  ///   4. Path removed from the new map → clean up the entry.
+  void _updatePendingAggregate(Map<String, WorkspaceFile> newFiles) {
+    for (final entry in newFiles.entries) {
+      final path = entry.key;
+      final newFile = entry.value;
+      final oldFile = _files[path];
+
+      // Session baseline — captured the first time we see this path,
+      // then slid forward on every approval. Used by the editor's
+      // diff overlay so it can render BOTH deletions AND insertions
+      // for files that have never been approved (the daemon-side
+      // `baseline` is empty in that case, leaving the diff with only
+      // the current content painted green).
+      if (!_sessionBaselines.containsKey(path)) {
+        // Prefer the daemon's `previous_content` when available —
+        // that's the file's state BEFORE this write. Falling back
+        // to '' is correct for fresh files the agent created from
+        // nothing (nothing to delete before the first line).
+        _sessionBaselines[path] = newFile.previousContent ?? '';
+      } else if (oldFile != null &&
+          !oldFile.isApproved &&
+          newFile.isApproved) {
+        // Approve slides the baseline forward so the next edit cycle
+        // diffs against the freshly-accepted state.
+        _sessionBaselines[path] = newFile.content;
+      }
+
+      if (newFile.isApproved) {
+        _pendingAggregate.remove(path);
+        continue;
+      }
+
+      if (oldFile == null) {
+        final ins = newFile.totalInsertions;
+        final del = newFile.totalDeletions;
+        if (ins > 0 || del > 0) {
+          _pendingAggregate[path] = (ins: ins, del: del);
+        }
+        continue;
+      }
+
+      final oldTs = oldFile.updatedAt;
+      final newTs = newFile.updatedAt;
+      final wroteSinceLastRebuild =
+          newTs != null && (oldTs == null || newTs > oldTs);
+      final flippedToPending = oldFile.isApproved && !newFile.isApproved;
+
+      if (wroteSinceLastRebuild || flippedToPending) {
+        final deltaIns =
+            (newFile.totalInsertions - oldFile.totalInsertions)
+                .clamp(0, 1 << 30);
+        final deltaDel =
+            (newFile.totalDeletions - oldFile.totalDeletions)
+                .clamp(0, 1 << 30);
+        if (deltaIns == 0 && deltaDel == 0) continue;
+        final current = _pendingAggregate[path] ?? (ins: 0, del: 0);
+        _pendingAggregate[path] = (
+          ins: current.ins + deltaIns,
+          del: current.del + deltaDel,
+        );
+      }
+    }
+
+    // Drop aggregates + baselines for files that disappeared from
+    // the store.
+    _pendingAggregate.removeWhere((k, _) => !newFiles.containsKey(k));
+    _sessionBaselines.removeWhere((k, _) => !newFiles.containsKey(k));
   }
 
   /// Re-read `resources['diagnostics']` into typed entries with a

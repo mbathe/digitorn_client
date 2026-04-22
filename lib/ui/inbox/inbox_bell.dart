@@ -432,8 +432,15 @@ class _InboxRowState extends State<_InboxRow> {
       } catch (_) {}
     }
     if (app == null) return;
-    await state.setApp(app);
-    if (sessionId != null && sessionId.isNotEmpty) {
+    // When opening a specific inbox item that points to an existing
+    // session, skip setApp's throwaway session creation — otherwise
+    // the race between the new session and the targeted session
+    // wipes the real history briefly after it loads.
+    final hasTargetSession = sessionId != null && sessionId.isNotEmpty;
+    await state.setApp(app,
+        createNewSession: !hasTargetSession,
+        clearSession: !hasTargetSession);
+    if (hasTargetSession) {
       // Best-effort: fetch the AppSession from the service if it's
       // already in memory; otherwise just request it by id.
       AppSession? target;

@@ -188,7 +188,13 @@ class _ListStatefulState extends State<_ListStateful> {
         'first': i == 0,
         'last': i == items.length - 1,
       };
-      built.add(_build(itemTemplate, runtime, iterExtra));
+      // Stable key so state-bearing children (inputs, expanded rows…)
+      // survive reorders / filter changes without cross-contaminating.
+      final stableId = (e is Map) ? e['id'] ?? e['_id'] : null;
+      built.add(KeyedSubtree(
+        key: ValueKey(stableId ?? i),
+        child: _build(itemTemplate, runtime, iterExtra),
+      ));
       if (separator && i < items.length - 1) {
         built.add(Container(height: 1, color: c.border));
       }

@@ -436,7 +436,8 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setApp(AppSummary app) async {
+  Future<void> setApp(AppSummary app,
+      {bool createNewSession = false, bool clearSession = true}) async {
     // Pre-session credentials gate — ask the daemon which secrets
     // the app needs, then walk the user through every missing one
     // before we try to create a session. If the user cancels, abort
@@ -455,7 +456,8 @@ class AppState extends ChangeNotifier {
 
     // Leave previous app room before joining the new one.
     final prevApp = activeApp;
-    if (prevApp != null && prevApp.appId != app.appId) {
+    final appSwitched = prevApp != null && prevApp.appId != app.appId;
+    if (appSwitched) {
       DigitornSocketService().leaveApp(prevApp.appId);
     }
     activeApp = app;
@@ -474,15 +476,42 @@ class AppState extends ChangeNotifier {
     // for that session (if they had opened it before).
     isWorkspaceVisible = false;
     // Synchronous store wipe so the workspace panel never renders
-    // the previous app/session's files during the HTTP round-trip
-    // below. `createAndSetSession` also wipes again as a safety net.
+    // the previous app's files during the HTTP round-trip below.
     PreviewStore().reset();
     WorkspaceModule().reset();
     WorkspaceService().clearAll();
+    // Clicking an app opens a fresh empty chat by default, even if
+    // the user is clicking the same app twice — product intent is
+    // "click on the app icon = new chat". Callers that immediately
+    // want to open a SPECIFIC session (history drawer, inbox jump)
+    // pass ``clearSession: false`` and call ``setActiveSession``
+    // themselves right after. Cross-app jumps always clear — keeping
+    // the previous app's session visible inside the new app for even
+    // one frame mixes state between apps.
+    if (clearSession || appSwitched) {
+      SessionService().activeSession = null;
+    }
     // Publish the activeApp=new + workspace=hidden state immediately
-    // so the UI rebuilds before the async session creation completes.
+    // so the UI rebuilds before any later async work completes.
     notifyListeners();
-    await SessionService().createAndSetSession(app.appId);
+    // **Session creation is lazy**: clicking an app no longer
+    // pre-creates a session. The chat panel opens in its empty
+    // state; the first call to ``_send()`` in the chat panel sees
+    // ``activeSession == null`` and creates the session on the fly
+    // via ``SessionService.createAndSetSession``. This matches the
+    // product spec ("on doit pouvoir avoir le chat qui s'ouvre
+    // lorsqu'on clique sur une application sans qu'une session ne
+    // soit créée; c'est quand on envoie un premier message que la
+    // session doit être créée") and eliminates the race where a
+    // pre-emptive throwaway session stole focus from the real one
+    // the caller wanted to open.
+    //
+    // ``createNewSession`` is kept as an opt-in escape hatch for
+    // callers that genuinely need a fresh session up front (e.g.
+    // scripted demos, dev tooling) — default is false.
+    if (createNewSession) {
+      await SessionService().createAndSetSession(app.appId);
+    }
     ToolService().clearCache();
     notifyListeners();
     // Probe whether the daemon serves a static preview for this app.

@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show SchedulerPhase;
 import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -30,6 +32,7 @@ import '../../models/session_metrics.dart';
 import '../../main.dart';
 import 'chat_bubbles.dart';
 import 'chat_panel_logic.dart' as logic;
+import 'chat_timeline.dart';
 import 'recording_overlay.dart';
 import '../../models/credential_v2.dart';
 import '../credentials/credential_gate.dart';
@@ -138,6 +141,163 @@ class _QueuedUserMessage {
   });
 }
 
+/// Thin `List<ChatMessage>` adapter that routes every mutation through
+/// a [ChatTimeline]. Reads return the timeline's sorted view; writes
+/// call the matching timeline mutation. The class exists so the large
+/// body of code in [_ChatPanelState] can keep using `_messages.add(m)`
+/// / `_messages.clear()` / `_messages.remove(m)` / `_messages[i]` /
+/// `_messages.length` exactly as before — without any call site ever
+/// being able to violate the ordering invariant.
+///
+/// Mutations whose semantics don't map cleanly to an ordered index
+/// (positional `insert(i, m)`, `[i] = m`) are forwarded to `upsert`:
+/// the timeline picks the position, not the caller. Positional
+/// assignment to a specific slot isn't meaningful under a (seq,
+/// tick) ordering.
+class _TimelineBackedMessageList with ListMixin<ChatMessage> {
+  final ChatTimeline _t;
+  _TimelineBackedMessageList(this._t);
+
+  /// Integer ordering key for a [ChatMessage]. Uses the model's
+  /// authoritative `sortKey`, which is already `seq*_seqScale + tick`
+  /// — the exact scheme the pre-timeline code sorted on. Every
+  /// bubble — daemon-originated or local-only — therefore lives in
+  /// the same number range:
+  ///
+  ///   * daemon bubble, seq=100  → sortKey = 100 * 1e6          = 100_000_000
+  ///   * local bubble,  anchor=100, tick=7 → sortKey = 100_000_007
+  ///   * daemon bubble, seq=101  → sortKey = 101 * 1e6          = 101_000_000
+  ///
+  /// so the local bubble correctly slots between the two daemon
+  /// bubbles instead of being pinned to a disjoint sentinel space.
+  ///
+  /// When a bubble has no daemon seq AND no anchor (sortKey falls
+  /// to `provisional_tick` only, a small number) we return `null` so
+  /// it lands at the timeline's tail sentinel — this matches test
+  /// fixtures that create bare ChatMessages without context.
+  static int? _keyOf(ChatMessage m) {
+    final sk = m.sortKey;
+    // sortKey < _seqScale means "no daemonSeq and no anchor" — treat
+    // as optimistic tail. _seqScale = 1_000_000 in the model.
+    return sk >= 1000000 ? sk : null;
+  }
+
+  @override
+  int get length => _t.length;
+
+  /// Only length==0 is honoured (maps to `clear`). Growing or shrinking
+  /// to a non-zero length is unsupported because positions are owned
+  /// by the timeline, not the caller.
+  @override
+  set length(int newLength) {
+    if (newLength == 0) {
+      // DEBUG: identify every code path that wipes the transcript.
+      // Keep this on until the ghost-clear bug is nailed down.
+      debugPrint(
+          '[CLEAR] _messages cleared from:\n${StackTrace.current}');
+      _t.clear();
+      return;
+    }
+    throw UnsupportedError(
+      'ChatTimeline-backed list: set length to 0 (clear) or use upsert/removeById',
+    );
+  }
+
+  @override
+  ChatMessage operator [](int index) => _t.messages[index];
+
+  @override
+  void operator []=(int index, ChatMessage value) {
+    // Re-upsert: the timeline will replace by id and re-sort.
+    _t.upsert(value, seq: _keyOf(value));
+  }
+
+  @override
+  void add(ChatMessage value) {
+    _t.upsert(value, seq: _keyOf(value));
+  }
+
+  @override
+  void addAll(Iterable<ChatMessage> iterable) {
+    for (final v in iterable) {
+      _t.upsert(v, seq: _keyOf(v));
+    }
+  }
+
+  @override
+  bool remove(Object? value) {
+    if (value is! ChatMessage) return false;
+    if (_t.byId(value.id) == null) return false;
+    _t.removeById(value.id);
+    return true;
+  }
+
+  @override
+  void removeWhere(bool Function(ChatMessage) test) {
+    final ids = <String>[];
+    for (final m in _t.messages) {
+      if (test(m)) ids.add(m.id);
+    }
+    for (final id in ids) {
+      _t.removeById(id);
+    }
+  }
+
+  @override
+  void retainWhere(bool Function(ChatMessage) test) {
+    removeWhere((m) => !test(m));
+  }
+
+  @override
+  ChatMessage removeAt(int index) {
+    final m = _t.messages[index];
+    _t.removeById(m.id);
+    return m;
+  }
+
+  @override
+  ChatMessage removeLast() {
+    final m = _t.messages.last;
+    _t.removeById(m.id);
+    return m;
+  }
+
+  @override
+  void removeRange(int start, int end) {
+    final snap = _t.messages.sublist(start, end).map((m) => m.id).toList();
+    for (final id in snap) {
+      _t.removeById(id);
+    }
+  }
+
+  @override
+  void clear() {
+    // DEBUG: identify every call to _messages.clear() during the
+    // investigation of the "session flashes then reverts to empty"
+    // bug. Remove once fixed.
+    debugPrint('[CLEAR] _messages.clear() from:\n${StackTrace.current}');
+    _t.clear();
+  }
+
+  @override
+  void insert(int index, ChatMessage value) {
+    _t.upsert(value, seq: _keyOf(value));
+  }
+
+  @override
+  void insertAll(int index, Iterable<ChatMessage> iterable) {
+    for (final v in iterable) {
+      _t.upsert(v, seq: _keyOf(v));
+    }
+  }
+
+  @override
+  void sort([int Function(ChatMessage, ChatMessage)? compare]) {
+    // No-op: the timeline is sorted by (seq, insertion-tick) at all
+    // times by construction. Any caller calling `.sort` is historical.
+  }
+}
+
 class ChatPanel extends StatefulWidget {
   const ChatPanel({super.key});
   @override
@@ -149,7 +309,22 @@ class _ChatPanelState extends State<ChatPanel> {
   final ScrollController _scroll = ScrollController();
   final FocusNode _focus = FocusNode();
 
-  final List<ChatMessage> _messages = [];
+  /// Single source of truth for chat bubble ordering. The timeline
+  /// enforces the invariant "bubbles are always rendered in (seq,
+  /// insertion-tick) order" by construction — no call site can
+  /// violate it, because the backing `_messages` list below is a
+  /// thin adapter that routes every mutation through `_timeline`.
+  ///
+  /// The daemon's `seq` on each event is the SOLE ordering authority
+  /// (§0 of the event spec). Optimistic bubbles that haven't been
+  /// echoed yet sit at the tail via a sentinel seq and get re-pinned
+  /// to their canonical seq on the first daemon echo. On session
+  /// switch or reconnect-backfill, the timeline is cleared and
+  /// reseeded from `/history`; the insertion order is the server's
+  /// canonical order.
+  final ChatTimeline _timeline = ChatTimeline();
+  late final _TimelineBackedMessageList _messages =
+      _TimelineBackedMessageList(_timeline);
   final Map<String, GlobalKey> _messageKeys = {};
   final List<ApprovalRequest> _pendingApprovals = [];
 
@@ -160,6 +335,16 @@ class _ChatPanelState extends State<ChatPanel> {
   ChatMessage? _currentMsg;
   bool _isSending = false;
   bool _hadTokens = false; // Track if any tokens were streamed this turn
+  // Id of the in-progress compaction marker (set on ``compact_context:start``,
+  // cleared when its matching ``:end`` upgrades the line to the final text).
+  String? _pendingCompactionBubbleId;
+  // Simple "agent is preparing the response" flag. Set to true the
+  // moment the user hits Send on a non-queued message, set to false
+  // the instant the agent shows ANY sign of responding (first token,
+  // first thinking, first tool, error, done). Renders a dedicated
+  // 3-bar skeleton ABOVE the input bar — independent of the bubble
+  // machinery, so it can't get lost in a ghost-bubble race.
+  bool _awaitingAgentResponse = false;
   Timer? _responseTimeout;
   DaemonError? _activeError;
   String _lastUserText = '';
@@ -323,6 +508,10 @@ class _ChatPanelState extends State<ChatPanel> {
     super.initState();
     _scroll.addListener(_onScroll);
     _ctrl.addListener(_onTextChanged);
+    // Rebuild whenever the timeline order changes — covers the case
+    // where a `rekey` / direct `ChatMessage.notifyListeners` happens
+    // outside an enclosing `setState` (e.g. from a service callback).
+    _timeline.addListener(_onTimelineChanged);
     // Rebuild when the daemon-persisted queue changes so the composer
     // badge + queue panel visibility stay in sync.
     QueueService().addListener(_onQueueChanged);
@@ -377,12 +566,29 @@ class _ChatPanelState extends State<ChatPanel> {
     VoiceInputService().removeListener(_onVoiceStateChanged);
     ChatExportBridge().unregister(_exportChat);
     ChatAttachBridge().unregister(_addAttachmentExternal);
+    _timeline.removeListener(_onTimelineChanged);
+    _timeline.dispose();
     _ctrl.dispose();
     _scroll.dispose();
     _focus.dispose();
     _findCtrl.dispose();
     _findFocus.dispose();
     super.dispose();
+  }
+
+  /// Timeline mutation hook. Schedules a frame rebuild via `setState`,
+  /// but only when no other `setState` is already in flight — the
+  /// bulk of mutations happen inside `setState(() { _messages.add(…) })`
+  /// blocks, and Flutter forbids a nested `setState`. Posting to the
+  /// next frame when we're already inside `build` makes the listener
+  /// safe in every call site.
+  void _onTimelineChanged() {
+    if (!mounted) return;
+    final phase = WidgetsBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.idle ||
+        phase == SchedulerPhase.postFrameCallbacks) {
+      setState(() {});
+    }
   }
 
   /// Stable sort by [ChatMessage.sortKey]. In the arrival-order
@@ -420,23 +626,34 @@ class _ChatPanelState extends State<ChatPanel> {
     }
   }
 
-  void _resortMessages() {
-    _messages.sort((a, b) => a.sortKey.compareTo(b.sortKey));
+  /// Legacy no-op. Ordering is now enforced by [ChatTimeline] on every
+  /// mutation — the timeline is always sorted by (seq, insertion-tick)
+  /// by construction, so a post-hoc re-sort is never needed. Kept as a
+  /// no-op so the dozens of historical call sites still compile while
+  /// we complete the migration; the next sweep removes it entirely.
+  void _resortMessages() {}
+
+  /// Pin a bubble to a canonical daemon seq. Updates the bubble's own
+  /// `daemonSeq` AND the timeline's sort key in a single atomic step —
+  /// forgetting the second half would leave the bubble orphaned at its
+  /// optimistic tail position while the model reports the real seq.
+  ///
+  /// The timeline is rekeyed with the bubble's freshly-recomputed
+  /// `sortKey` (not the raw seq), to stay in the same number range as
+  /// every other bubble — see [_TimelineBackedMessageList._keyOf].
+  void _pinBubbleSeq(ChatMessage msg, int seq) {
+    if (seq <= 0) return;
+    msg.updateSortKey(seq);
+    _timeline.rekey(msg.id, seq: msg.sortKey);
   }
 
-  /// Anchor used by every locally-inserted bubble (compaction,
-  /// error banners, optimistic user messages, system notices).
-  /// Returns the max between the envelope-driven `_lastPersistedSeq`
-  /// and the highest `daemonSeq` already present in the chat.
-  ///
-  /// Why not just `_lastPersistedSeq`? In edge cases the daemon can
-  /// emit an ephemeral event (seq 0) or re-deliver an older one;
-  /// the envelope-level cursor stays stuck at the wrong value and a
-  /// new local bubble would end up anchored BEFORE a freshly-rendered
-  /// daemon event — which is the "stuck-on-top" chronology bug.
-  /// Falling back to `max(rendered seqs)` keeps the invariant "local
-  /// bubbles always land at the tail" even when the envelope cursor
-  /// hasn't caught up yet.
+  /// Legacy anchor helper used by local-only bubbles (error banners,
+  /// system notices, optimistic user messages). Timeline-backed
+  /// bubbles don't need an anchor — they either carry a daemon seq
+  /// or sit at the tail sentinel — but the returned value still feeds
+  /// [ChatMessage] constructors whose `anchorSeq` field is part of
+  /// the public model. The timeline ignores `anchorSeq`; it keys off
+  /// `daemonSeq` (or null → tail).
   int _anchorForNewLocalBubble() {
     int best = _lastPersistedSeq;
     for (final m in _messages) {
@@ -465,7 +682,7 @@ class _ChatPanelState extends State<ChatPanel> {
     final cur = _currentMsg;
     if (cur == null) return;
     if (cur.daemonSeq != null) return;
-    cur.updateSortKey(envSeq + 1);
+    _pinBubbleSeq(cur, envSeq + 1);
   }
 
   /// Parse an envelope-level `ts` (ISO-8601 UTC with a trailing Z)
@@ -518,7 +735,13 @@ class _ChatPanelState extends State<ChatPanel> {
   // ─── Session switch ──────────────────────────────────────────────────────
 
   void _onSessionChange(String? newSessionId) {
-    if (newSessionId == _currentSessionId) return;
+    debugPrint('[SESSION_CHG] _onSessionChange: new=$newSessionId '
+        'current=$_currentSessionId '
+        'activeSession=${SessionService().activeSession?.sessionId}');
+    if (newSessionId == _currentSessionId) {
+      debugPrint('[SESSION_CHG] skip — same as current');
+      return;
+    }
     // Snapshot the outgoing session's messages so we can restore
     // them if the daemon's /history endpoint returns empty on the
     // way back in.
@@ -551,6 +774,8 @@ class _ChatPanelState extends State<ChatPanel> {
         _queuedUserMessages.clear();
         _lastPersistedSeq = 0;
         _lastEventTs = null;
+        _pendingCompactionBubbleId = null;
+        _awaitingAgentResponse = false;
       });
     } else {
       _currentSessionId = newSessionId;
@@ -587,6 +812,51 @@ class _ChatPanelState extends State<ChatPanel> {
   }
 
   Future<void> _tryRestoreAndConnect(String appId, String sessionId) async {
+    debugPrint(
+        '[RESTORE] _tryRestoreAndConnect START app=$appId sid=$sessionId');
+    // Flag the replay window **before** the HTTP fetch starts. Any
+    // live socket event arriving during the /history round-trip
+    // (which can take several seconds on a session with thousands
+    // of events) MUST go to ``_liveBuffer`` rather than taking the
+    // fast path through ``_onEvent``. Otherwise those live events
+    // populate ``_messages`` during the wait — and then
+    // ``_replayEventLog`` wipes them when it starts, producing the
+    // exact "history appears for a second then the chat goes back
+    // to the empty welcome state" flash the user reported.
+    if (mounted) {
+      setState(() {
+        _isReplaying = true;
+      });
+    } else {
+      _isReplaying = true;
+    }
+    try {
+      await _tryRestoreAndConnectInner(appId, sessionId);
+    } finally {
+      // Safety net — every non-replay return path above would otherwise
+      // leave ``_isReplaying`` stuck at true, re-buffering every live
+      // event forever. ``_replayEventLog`` resets it on the success
+      // path; this finally covers all the others (legacy messages[]
+      // fallback, workspace-only, cached hydrate, early returns).
+      if (_isReplaying && mounted) {
+        final buffered = List<Map<String, dynamic>>.from(_liveBuffer);
+        _liveBuffer.clear();
+        setState(() {
+          _isReplaying = false;
+        });
+        for (final ev in buffered) {
+          if (!mounted) break;
+          _onEvent(ev);
+        }
+      } else if (_isReplaying) {
+        _isReplaying = false;
+        _liveBuffer.clear();
+      }
+    }
+  }
+
+  Future<void> _tryRestoreAndConnectInner(
+      String appId, String sessionId) async {
     final cached = _sessionMessageCache[sessionId];
     final hadCached = cached != null && cached.isNotEmpty;
     SessionService().markLoadingHistory(true);
@@ -600,7 +870,14 @@ class _ChatPanelState extends State<ChatPanel> {
       }
     });
 
-    if (!mounted || _currentSessionId != sessionId) return;
+    debugPrint('[RESTORE] loadFullHistory done sid=$sessionId '
+        'full=${full != null} mounted=$mounted '
+        'currentSid=$_currentSessionId');
+    if (!mounted || _currentSessionId != sessionId) {
+      debugPrint('[RESTORE] early return — '
+          'mounted=$mounted, currentSid=$_currentSessionId != $sessionId');
+      return;
+    }
 
     if (full != null) {
       final messages = full['messages'] ?? full['turns'] ?? [];
@@ -608,6 +885,13 @@ class _ChatPanelState extends State<ChatPanel> {
       final workspace = full['workspace'] as String? ?? '';
       final title = full['title'] as String? ?? '';
       final interrupted = full['interrupted'] as bool? ?? false;
+      // Daemon-authoritative "a turn is running right now". Populated
+      // by ``manager.is_turn_running`` on the server side (see
+      // ``apps.py:get_session_history``). Replace the client-side
+      // event-log heuristic that too often mistook trailing
+      // hook/memory_update/compaction events for "still running"
+      // and left a ghost spinner on reopen.
+      final turnActive = full['turn_active'] as bool? ?? false;
       final hasEvents = events is List && events.isNotEmpty;
 
       // Apply snapshots BEFORE replaying events, so preview files,
@@ -628,11 +912,19 @@ class _ChatPanelState extends State<ChatPanel> {
       final ctx = full['context'] as Map<String, dynamic>?;
       if (ctx != null) ContextState().updateFromJson(ctx);
 
+      debugPrint(
+          '[RESTORE] full loaded: messages.count='
+          '${messages is List ? messages.length : "?"} '
+          'events.count=${events is List ? events.length : 0}');
+
       // Preferred path — replay the full event log when the daemon
       // has one. This is lossless and reproduces tool calls, widgets,
       // agent events, hooks, approvals, etc. exactly as they ran.
       if (hasEvents) {
-        await _replayEventLog(events, sessionInterrupted: interrupted);
+        await _replayEventLog(events,
+            sessionInterrupted: interrupted, turnActive: turnActive);
+        debugPrint(
+            '[RESTORE] replay done — _messages.length=${_messages.length}');
         if (!mounted || _currentSessionId != sessionId) return;
         _cacheSessionMessages(sessionId, _messages);
         _reconnectSession(appId, sessionId);
@@ -650,6 +942,22 @@ class _ChatPanelState extends State<ChatPanel> {
           setState(() {
             _statusPhase = 'interrupted';
             _isInterrupted = true;
+          });
+        }
+        // Same daemon-authoritative turn state on the legacy path —
+        // without this, reopening a session that IS still running on
+        // the server would miss its spinner until the next live event.
+        if (mounted) {
+          setState(() {
+            _turnInProgress = turnActive;
+            if (turnActive) {
+              _isSending = true;
+              if (_statusPhase.isEmpty) _statusPhase = 'responding';
+            } else {
+              _isSending = false;
+              _statusPhase = '';
+              _hadTokens = false;
+            }
           });
         }
 
@@ -909,6 +1217,7 @@ class _ChatPanelState extends State<ChatPanel> {
   Future<void> _replayEventLog(
     List<dynamic> events, {
     required bool sessionInterrupted,
+    required bool turnActive,
   }) async {
     // Per event-spec §0: seq is the sole authority. Sort by seq
     // (daemon-assigned, monotonic strict per user), NEVER by ts
@@ -1017,18 +1326,46 @@ class _ChatPanelState extends State<ChatPanel> {
       }
     }
 
-    // Unclosed turn → a turn_start didn't get a matching terminator.
-    // That's the only case we treat as "mid-turn".
+    // ``turnActive`` comes straight from the daemon
+    // (``manager.is_turn_running``, bundled in the /history response)
+    // — it's the authoritative signal and ALWAYS wins over our
+    // local event-log heuristic. The heuristic below (unbalanced
+    // turn_start / turn_end within 90 s) stays as a last-resort
+    // fallback for the case where ``turnActive`` is null — e.g.
+    // an older daemon that doesn't populate the field, or an
+    // offline replay. This is what fixes the "phantom 3-dot
+    // spinner on reopen" — the heuristic frequently armed it when
+    // hook / memory_update / compaction events landed after the
+    // final turn_end.
     final turnsUnbalanced = openTurn >= 0 && openTurn > closedTurn;
-    // Stale guard — if the last live event is older than 90 seconds
-    // the turn almost certainly timed out (daemon crash, abort that
-    // wasn't persisted, …). Don't show a stuck spinner for ghosts.
     final nowSec = DateTime.now().millisecondsSinceEpoch / 1000.0;
     final hasRecentActivity = lastTurnActivityTs > 0 &&
         (nowSec - lastTurnActivityTs) < 90;
-    final stillRunning = turnsUnbalanced && hasRecentActivity;
+    final heuristicRunning = turnsUnbalanced && hasRecentActivity;
+    final stillRunning = turnActive;
+    if (turnActive != heuristicRunning) {
+      debugPrint('[RESTORE] turn_active authoritative=$turnActive '
+          'heuristic=$heuristicRunning — trusting daemon');
+    }
 
     if (!mounted) return;
+    // Flip ``_isReplaying`` to false BEFORE draining the buffer.
+    // The buffer drain below calls ``_onEvent`` directly — that
+    // handler re-buffers any event that arrives while
+    // ``_isReplaying`` is true, so if we drained with the flag
+    // still set every buffered event would simply be re-added to
+    // ``_liveBuffer`` and the loop would stall (eventually hitting
+    // the safety cap after 50 no-op iterations). The previous
+    // attempt to keep the flag true during the drain to preserve
+    // arrival order had exactly this failure mode, which presented
+    // to the user as "history appears briefly then the chat reverts
+    // to the welcome/empty state" — the buffer never applied.
+    //
+    // Race note: new live events arriving DURING the drain now
+    // take the fast path. In practice that's acceptable because
+    // every event carries a ``seq`` and ``_appliedSeqs`` dedups,
+    // so an out-of-order apply still produces a consistent
+    // timeline after the final sort by seq.
     setState(() {
       _isReplaying = false;
       _replayDone = sorted.length;
@@ -1054,6 +1391,15 @@ class _ChatPanelState extends State<ChatPanel> {
         _currentMsg?.setThinkingState(false);
         _currentMsg = null;
       }
+      // Kill the 3-dot shimmer on any assistant bubble replay may have
+      // left in ``isStreaming=true`` with empty content (typical shape
+      // when a replayed ``status: responding`` / ``assistant_stream_snapshot``
+      // spawned a placeholder whose matching ``stream_done`` /
+      // ``message_done`` lives further back in the event log but
+      // never materialises because the orphan sits on an obsolete turn).
+      // When the turn is genuinely running, the very next live token
+      // re-opens a fresh streaming bubble via ``_ensureBubble``.
+      _finalizeOrphanStreamingBubbles();
     });
     _spinnerWatchdog?.cancel();
     _spinnerWatchdog = null;
@@ -1065,11 +1411,9 @@ class _ChatPanelState extends State<ChatPanel> {
       }
     }
 
-    // Drain any live events that arrived during the replay. They
-    // were captured before `_isReplaying` flipped back to false, so
-    // we dispatch them through the normal path now — in arrival
-    // order. Yield between events so the UI can draw a frame
-    // instead of blocking for the whole drain.
+    // Drain any live events that were buffered while the replay was
+    // running. Now that ``_isReplaying`` is false, ``_onEvent``
+    // processes them through the normal path in arrival order.
     if (_liveBuffer.isNotEmpty) {
       final buffered = List<Map<String, dynamic>>.from(_liveBuffer);
       _liveBuffer.clear();
@@ -1080,6 +1424,27 @@ class _ChatPanelState extends State<ChatPanel> {
           await Future.delayed(Duration.zero);
         }
       }
+    }
+
+    // Post-drain reconciliation. If the daemon says no turn is
+    // running but a buffered ``status: requesting`` / stray
+    // ``assistant_stream_snapshot`` re-armed the spinner or spawned
+    // an empty streaming bubble, snap back to the quiescent state
+    // and kill any shimmer. The daemon's ``turn_active`` is the
+    // source of truth — the live buffer is chatter.
+    if (mounted && !turnActive) {
+      setState(() {
+        _isSending = false;
+        _statusPhase = '';
+        _turnInProgress = false;
+        _hadTokens = false;
+        _finalizeOrphanStreamingBubbles();
+        _currentMsg?.setStreamingState(false);
+        _currentMsg?.setThinkingState(false);
+        _currentMsg = null;
+      });
+      _spinnerWatchdog?.cancel();
+      _spinnerWatchdog = null;
     }
 
     if (mounted) _scrollToBottom();
@@ -1175,7 +1540,7 @@ class _ChatPanelState extends State<ChatPanel> {
         'type': 'turn_complete',
         'data': data,
         'seq': ?seq,
-      });
+      }, fromReplay: true);
       return;
     }
 
@@ -1183,7 +1548,7 @@ class _ChatPanelState extends State<ChatPanel> {
       'type': type,
       'data': data,
       'seq': ?seq,
-    });
+    }, fromReplay: true);
   }
 
   // ─── Session event handler (Socket.IO → SessionService.events) ──────────
@@ -1193,7 +1558,7 @@ class _ChatPanelState extends State<ChatPanel> {
   // extract them from tool_call results.
   // workbench_*, terminal_output, diagnostics → workspace panel only.
 
-  void _onEvent(Map<String, dynamic> event) {
+  void _onEvent(Map<String, dynamic> event, {bool fromReplay = false}) {
     final type = event['type'] as String? ?? '';
     final data = event['data'] as Map<String, dynamic>? ?? {};
     // Seq is carried at the envelope root — same contract for every
@@ -1203,6 +1568,27 @@ class _ChatPanelState extends State<ChatPanel> {
     final envSeq = (event['seq'] as num?)?.toInt() ??
         (data['seq'] as num?)?.toInt() ??
         0;
+
+    // ── Buffer live events while we are still replaying history ──────
+    // MUST run BEFORE the dedup. Otherwise a live event that arrives
+    // during the /history fetch registers its seq in ``_appliedSeqs``
+    // and then gets buffered — when the SAME seq later comes up in
+    // the replay from /history, dedup drops it, and when the drain
+    // re-calls _onEvent on the buffered copy, dedup drops it too.
+    // The event is doubly lost (exactly the missing user_message
+    // bubbles observed: user_message / message_started seqs fired
+    // live, were buffered, then neither the replay nor the drain
+    // could apply them). Keep meta/connection events flowing so the
+    // UI still reflects socket state. ``fromReplay`` is set by
+    // ``_dispatchReplayEvent`` so replay events bypass the gate.
+    if (_isReplaying &&
+        !fromReplay &&
+        !type.startsWith('_') &&
+        type != 'connected' &&
+        type != 'heartbeat') {
+      _liveBuffer.add(event);
+      return;
+    }
 
     // Dedup by seq (event-spec §0 & §7 "dedup par seq"). An event
     // can legitimately arrive twice — live over Socket.IO AND via
@@ -1224,19 +1610,6 @@ class _ChatPanelState extends State<ChatPanel> {
       debugPrint('ChatPanel event: seq=$envSeq type=$type');
     }
 
-    // ── Buffer live events while we are still replaying history ──────
-    // Lets connection/meta events through so the UI still reflects
-    // socket state during long replays, but holds back everything
-    // that would mutate the chat timeline. The buffer is drained in
-    // order at the end of [_replayEventLog].
-    if (_isReplaying &&
-        !type.startsWith('_') &&
-        type != 'connected' &&
-        type != 'heartbeat') {
-      _liveBuffer.add(event);
-      return;
-    }
-
     // ── Session isolation: ignore events from other sessions ─────────
     //
     // The upstream filter in [SessionService.injectSocketEvent]
@@ -1244,19 +1617,30 @@ class _ChatPanelState extends State<ChatPanel> {
     // this widget lags `SessionService.activeSession` for one
     // microtask during a switch — compare against the live value so
     // events for the newly-active session are never dropped.
+    //
+    // Control/meta types (heartbeat, _connection_*, _session_meta) are
+    // legitimately session-less — let them through. Every other type
+    // reaching _onEvent carries chat-timeline state and MUST have a
+    // session_id: an untagged error/user_message/status is a daemon
+    // bug and would otherwise bleed into the currently-visible session.
     final eventSessionId = event['session_id'] as String? ??
         data['session_id'] as String? ?? '';
     final liveSessionId = SessionService().activeSession?.sessionId;
+    final isControlType = type.startsWith('_') || type == 'heartbeat';
+    if (!isControlType && eventSessionId.isEmpty) {
+      debugPrint(
+          'ChatPanel: dropping untagged session-scoped event type=$type');
+      return;
+    }
     if (eventSessionId.isNotEmpty &&
         liveSessionId != null &&
-        eventSessionId != liveSessionId &&
-        !type.startsWith('_connection')) {
+        eventSessionId != liveSessionId) {
       return;
     }
     // And if the chat-panel's cached current session id doesn't match
     // the live one, skip mutating widget state — we'll get the event
     // again after `_onSessionChange` re-syncs in the next microtask.
-    if (_currentSessionId != liveSessionId) {
+    if (!isControlType && _currentSessionId != liveSessionId) {
       return;
     }
 
@@ -1590,9 +1974,31 @@ class _ChatPanelState extends State<ChatPanel> {
       };
       if (liveTurnPhases.contains(phase)) {
         _noteLiveActivity();
-        if (!_isSending) {
+        // Never spawn a placeholder bubble on a status ping alone:
+        //
+        //   1. On a fresh session, a stale `responding` event
+        //      arriving right after SSE reconnect would yank the
+        //      empty-state UI off screen and start the typing
+        //      skeleton before the user has typed anything.
+        //   2. During an active turn, a `status: requesting`
+        //      sometimes lands BEFORE the echoed `user_message`
+        //      event that carries the canonical seq. If we created
+        //      the assistant bubble here it would anchor to
+        //      `_lastPersistedSeq` — often lower than the seq the
+        //      user bubble ends up pinned to — and render ABOVE the
+        //      user message with a stuck skeleton (no token ever
+        //      lands in it because the real bubble gets created
+        //      later when the first token arrives).
+        //
+        // We only flip `_isSending` here so the Stop button
+        // reappears after a background-tab turn resumes. The bubble
+        // itself is spawned lazily by the first content-bearing
+        // event (`token`, `thinking_delta`, `tool_start`,
+        // `message_started`, …) further down in this method.
+        final conversationStarted =
+            _messages.isNotEmpty || _isReplaying;
+        if (conversationStarted && !_isSending) {
           _isSending = true;
-          _ensureBubble();
         }
       }
       if (phase.isNotEmpty && mounted) {
@@ -1636,16 +2042,61 @@ class _ChatPanelState extends State<ChatPanel> {
     // Spawning an agent bubble on those would give it a sortKey
     // seeded from the current seq, and it would land ABOVE the user
     // bubble once the user_message handler updates sortKeys.
-    const noAgentBubbleEvents = {
-      'user_message',
-      'message_queued', 'message_started', 'message_done',
-      'message_cancelled', 'message_merged', 'message_replaced',
-      'queue_cleared', 'queue_full',
-      'approval_request', 'session.awaiting_approval',
-      'credential_required', 'credential_auth_required',
-      'abort',
-    };
-    if (!noAgentBubbleEvents.contains(type)) {
+    // Product rule (user spec): the "agent is thinking" 3-bar skeleton
+    // lives inside an empty streaming assistant bubble. It must be
+    // visible ONLY while the user is waiting for the agent's reply
+    // (``_isSending=true``) — no other state may spawn a placeholder
+    // bubble.
+    //
+    // Concretely:
+    //   * ``_send()`` flips ``_isSending=true`` right after the user
+    //     clicks Send → any event arriving AFTER that (status,
+    //     user_message echo, token, thinking, tool_start, …) sees
+    //     ``_isSending=true`` and can safely call ``_ensureBubble()``
+    //     to spawn the placeholder. The FIRST content-bearing event
+    //     within the same build pass fills the bubble → skeleton
+    //     disappears.
+    //   * When ``_isSending=false`` (session reopen, background-only
+    //     activity, post-turn trailing events) the placeholder is
+    //     never created — no phantom shimmer on session reopen.
+    //   * Content handlers still call ``_ensureBubble()`` unconditionally
+    //     at their own site (token / thinking / tool_start / snapshot)
+    //     so daemon-initiated streams (cron, activation) still render
+    //     even without a user click.
+    if (_isSending &&
+        !fromReplay &&
+        !type.startsWith('_') &&
+        type != 'heartbeat' &&
+        type != 'connected' &&
+        !type.startsWith('preview:') &&
+        !type.startsWith('widget:') &&
+        type != 'user_message' &&
+        type != 'message_queued' &&
+        type != 'message_done' &&
+        type != 'message_cancelled' &&
+        type != 'queue_cleared' &&
+        type != 'queue_full' &&
+        type != 'queue:snapshot' &&
+        type != 'session:snapshot' &&
+        type != 'active_ops:snapshot' &&
+        type != 'memory:snapshot' &&
+        type != 'memory_update' &&
+        type != 'token_usage' &&
+        type != 'token_count' &&
+        type != 'approval_request' &&
+        type != 'credential_required' &&
+        type != 'credential_auth_required' &&
+        type != 'error' &&
+        type != 'abort' &&
+        type != 'turn_complete' &&
+        type != 'result' &&
+        type != 'message_merged' &&
+        type != 'message_replaced' &&
+        // Hooks (compact_context, context_status, lsp_diagnose, log, …)
+        // are sidebar / toast signals — must never spawn a chat bubble.
+        type != 'hook' &&
+        type != 'hook_notification' &&
+        type != 'context_status') {
       _ensureBubble();
     }
     _responseTimeout?.cancel(); // Response received — cancel timeout
@@ -1653,21 +2104,48 @@ class _ChatPanelState extends State<ChatPanel> {
     // stale interrupted badge from an earlier crash.
     _noteLiveActivity();
 
+    // The "agent is thinking" skeleton stays visible until the FIRST
+    // concrete sign of a response. ``status: requesting`` / echo
+    // events don't count — they fire before the model has produced
+    // anything. Content, error, or terminal events close the window.
+    if (_awaitingAgentResponse && !fromReplay) {
+      const responseStartedEvents = {
+        'token', 'out_token',
+        'thinking', 'thinking_started', 'thinking_delta',
+        'tool_start', 'tool_call',
+        'assistant_stream_snapshot',
+        'agent_event',
+        'result', 'turn_complete',
+        'error', 'abort',
+        'message_done', 'message_cancelled',
+      };
+      if (responseStartedEvents.contains(type)) {
+        setState(() => _awaitingAgentResponse = false);
+      }
+    }
+
     switch (type) {
       // ── Thinking ───────────────────────────────────────────────────
       case 'thinking_started':
+        _ensureBubble();
         _currentMsg?.setThinkingState(true);
         if (mounted) setState(() => _statusPhase = 'thinking');
         _scrollToBottom();
         break;
       case 'thinking_delta':
         final delta = data['delta'] as String? ?? '';
-        if (delta.isNotEmpty) _currentMsg?.appendThinking(delta);
+        if (delta.isNotEmpty) {
+          _ensureBubble();
+          _currentMsg?.appendThinking(delta);
+        }
         _scrollToBottom();
         break;
       case 'thinking':
         final text = data['text'] as String? ?? '';
-        if (text.isNotEmpty) _currentMsg?.setThinkingText(text);
+        if (text.isNotEmpty) {
+          _ensureBubble();
+          _currentMsg?.setThinkingText(text);
+        }
         _scrollToBottom();
         break;
 
@@ -1706,11 +2184,14 @@ class _ChatPanelState extends State<ChatPanel> {
           if (cmd.isNotEmpty) WorkspaceService().setPendingCommand(cmd);
         }
 
-        if (!hideFromChat && _currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(
-              type, data, _currentMsg!,
-              envelopeTs: event['ts'] as String?);
-          _scrollToBottom();
+        if (!hideFromChat) {
+          _ensureBubble();
+          if (_currentMsg != null) {
+            DigitornApiClient().handleStreamEvent(
+                type, data, _currentMsg!,
+                envelopeTs: event['ts'] as String?);
+            _scrollToBottom();
+          }
         }
         break;
 
@@ -1782,25 +2263,29 @@ class _ChatPanelState extends State<ChatPanel> {
           }
         }
 
-        if (!hideFromChat && _currentMsg != null) {
-          DigitornApiClient().handleStreamEvent(
-              type, data, _currentMsg!,
-              envelopeTs: event['ts'] as String?);
-          _scrollToBottom();
+        if (!hideFromChat) {
+          _ensureBubble();
+          if (_currentMsg != null) {
+            DigitornApiClient().handleStreamEvent(
+                type, data, _currentMsg!,
+                envelopeTs: event['ts'] as String?);
+            _scrollToBottom();
+          }
         }
         break;
 
       // ── Text tokens (update spinner) ───────────────────────────────
       case 'token':
         _hadTokens = true;
-        // Only flip to 'responding' if we're not currently showing a
-        // more specific phase (tool_use, thinking). A stray token
-        // during a tool execution shouldn't wipe the tool label.
         if (mounted && !_statusPhase.startsWith('tool_use:') &&
             _statusPhase != 'thinking' &&
             _statusPhase != 'responding') {
           setState(() => _statusPhase = 'responding');
         }
+        // Lazy-create the bubble for daemon-initiated streams (cron,
+        // background triggers, post-reconnect mid-turn). For user
+        // sends, the bubble already exists from ``_send()``.
+        _ensureBubble();
         if (_currentMsg != null) {
           DigitornApiClient().handleStreamEvent(
               type, data, _currentMsg!,
@@ -1876,21 +2361,17 @@ class _ChatPanelState extends State<ChatPanel> {
           ContextState().updateFromJson(details);
           SessionMetrics().updateContext(details);
         } else if (actionType == 'compact_context' && phase == 'start') {
-          // Compaction started — show compacting spinner
+          // Compaction started — show compacting spinner in status bar
+          // AND an in-progress line in the chat so the user sees
+          // exactly what's happening, not just a cryptic phase change.
           if (mounted) setState(() => _statusPhase = 'compacting');
+          _onCompactionStarted(details, envelopeSeq: envSeq);
         } else if (actionType == 'compact_context' && phase == 'end') {
-          // Compaction completed — update context + show toast.
-          // Skip the toast during replay so old compactions don't
-          // spam the user with "Context compacted" on every reload.
-          if (!_isReplaying) {
-            _onCompactionCompleted(details,
-                emergency: false, envelopeSeq: envSeq);
-          }
+          _onCompactionCompleted(details,
+              emergency: false, envelopeSeq: envSeq);
         } else if (actionType == 'emergency_compaction') {
-          if (!_isReplaying) {
-            _onCompactionCompleted(details,
-                emergency: true, envelopeSeq: envSeq);
-          }
+          _onCompactionCompleted(details,
+              emergency: true, envelopeSeq: envSeq);
         }
         break;
 
@@ -1899,8 +2380,16 @@ class _ChatPanelState extends State<ChatPanel> {
       case 'turn_complete':
         final content = data['content'] as String? ?? '';
         final resultError = data['error'] as String?;
-        if (!_hadTokens && content.isNotEmpty && _currentMsg != null) {
-          _currentMsg!.appendText(content);
+        // Some providers don't stream — they emit the full reply as a
+        // single ``result.content`` with no preceding ``token`` events.
+        // During replay (and live on non-streaming providers), this is
+        // the ONLY chance to materialise the assistant bubble, so
+        // lazy-create it here when there's content and no current
+        // bubble. Without this, history replay loses every non-streamed
+        // assistant message.
+        if (!_hadTokens && content.isNotEmpty) {
+          _ensureBubble();
+          _currentMsg?.appendText(content);
         }
         // Scout bilan: some agents (digitorn-builder coordinator)
         // ship a final `thinking` snapshot that concatenates the
@@ -1963,6 +2452,9 @@ class _ChatPanelState extends State<ChatPanel> {
         _currentMsg = null;
         _hadTokens = false;
         _responseTimeout?.cancel();
+        // Sweep any leftover empty-streaming assistant bubbles so
+        // their typing skeletons stop animating at turn's end.
+        _finalizeOrphanStreamingBubbles();
         // Mark all remaining active agents as completed
         WorkspaceState().finishAllAgents();
         // Keep `_isSending` armed if there's still work ahead in the
@@ -1994,6 +2486,7 @@ class _ChatPanelState extends State<ChatPanel> {
 
       // ── Error (structured from daemon) ────────────────────────────
       case 'error':
+        debugPrint('[ERROR_EVENT] received payload=${data.toString().substring(0, (data.toString().length > 200 ? 200 : data.toString().length))}');
         _responseTimeout?.cancel();
         final code = data['code'] as String? ??
             data['error'] as String? ??
@@ -2011,12 +2504,29 @@ class _ChatPanelState extends State<ChatPanel> {
         _currentMsg?.setThinkingState(false);
         _currentMsg = null;
         _hadTokens = false;
+        _finalizeOrphanStreamingBubbles();
         WorkspaceState().finishAllAgents();
+        // Persistent inline marker in the history so the error is
+        // visible when the user scrolls back — the top banner is
+        // transient and only shown for LIVE turns. The daemon never
+        // re-sees this marker because it lives in the client's
+        // ``_messages`` list, not in ``session.messages``.
+        final errEnvSeq = (event['seq'] as num?)?.toInt();
+        final errLabel = daemonErr.category.isNotEmpty
+            ? '${daemonErr.category}: ${daemonErr.error}'
+            : daemonErr.error;
+        _addSystemMarker(
+          idPrefix: 'error',
+          text: 'Turn failed — $errLabel',
+          envelopeSeq: errEnvSeq,
+        );
         if (mounted) {
           setState(() {
             _isSending = false;
             _statusPhase = '';
-            _activeError = daemonErr;
+            // Banner only for LIVE errors, not replay — replay would
+            // pop a stale red banner on every session reopen.
+            if (!fromReplay) _activeError = daemonErr;
           });
         }
         break;
@@ -2026,6 +2536,16 @@ class _ChatPanelState extends State<ChatPanel> {
         final sid =
             event['session_id'] as String? ?? _currentSessionId ?? '';
         if (sid.isNotEmpty) QueueService().onAbort(sid, data);
+        // Persistent inline marker — visible when scrolling history.
+        final abortEnvSeq = (event['seq'] as num?)?.toInt();
+        final reason = (data['reason'] as String? ?? '').trim();
+        _addSystemMarker(
+          idPrefix: 'abort',
+          text: reason.isEmpty
+              ? 'Turn interrupted by user'
+              : 'Turn interrupted — $reason',
+          envelopeSeq: abortEnvSeq,
+        );
         // Soft abort (default): the daemon will emit `message_started`
         // for the next queued message within ~200 ms, so we only tear
         // down the spinner UI if the queue was explicitly purged OR
@@ -2079,9 +2599,8 @@ class _ChatPanelState extends State<ChatPanel> {
             // daemon's authoritative seq. sortKey flips from the
             // provisional micro-tick (tail) to `envSeq`, slotting
             // the bubble at its canonical chronological position.
-            if (envSeq > 0) existing.updateSortKey(envSeq);
+            if (envSeq > 0) _pinBubbleSeq(existing, envSeq);
             _pinOrphanAssistantAbove(envSeq);
-            _resortMessages();
           });
           _scrollToBottom();
           break;
@@ -2194,19 +2713,26 @@ class _ChatPanelState extends State<ChatPanel> {
         }
 
         // Un-dim any matching optimistic bubble (pending → active).
+        // Wrap in setState so the UI actually rebuilds — without it
+        // the bubble kept its dimmed look until the next unrelated
+        // rebuild.
         if (corrId != null && corrId.isNotEmpty) {
+          bool changed = false;
           for (final m in _messages) {
             if (m.role == MessageRole.user &&
                 m.correlationId == corrId &&
                 m.pending) {
               m.pending = false;
+              changed = true;
               break;
             }
           }
+          if (changed && mounted) {
+            setState(() {});
+          }
         }
         if (_currentMsg != null && envSeq > 0) {
-          _currentMsg!.updateSortKey(envSeq);
-          setState(_resortMessages);
+          _pinBubbleSeq(_currentMsg!, envSeq);
         }
         if (mounted) {
           setState(() {
@@ -2311,6 +2837,50 @@ class _ChatPanelState extends State<ChatPanel> {
           if (req.isAskUser && req.hasLongContent) {
             _openAskUserContent(req);
           }
+          // Persistent marker — visible at replay too, so scrolling
+          // history shows that an approval was asked for.
+          final apprEnvSeq = (event['seq'] as num?)?.toInt();
+          _addSystemMarker(
+            idPrefix: 'approval-req',
+            text: 'Approval requested: ${req.toolName}',
+            envelopeSeq: apprEnvSeq,
+          );
+        }
+        break;
+
+      // ── Approval resolved ─────────────────────────────────────────
+      case 'approval_resolved':
+      case 'approval_progress':
+        final reqId = data['request_id'] as String? ??
+            data['approval_id'] as String? ?? '';
+        final approved = data['approved'] == true;
+        final reason = (data['reason'] as String? ?? '').trim();
+        // Drop the resolved request from the pending list so the
+        // inline card disappears (both live and at replay).
+        if (reqId.isNotEmpty) {
+          setState(() {
+            _pendingApprovals.removeWhere((a) => a.id == reqId);
+          });
+        }
+        // Only the terminal ``approval_resolved`` leaves a history
+        // marker — ``approval_progress`` is a heartbeat-keepalive and
+        // shouldn't clutter the timeline.
+        if (type == 'approval_resolved') {
+          final apprEnvSeq = (event['seq'] as num?)?.toInt();
+          final tool = data['tool_name'] as String?
+              ?? data['tool'] as String? ?? '';
+          final toolSuffix = tool.isNotEmpty ? ' — $tool' : '';
+          final verdict = approved
+              ? 'Approval granted$toolSuffix'
+              : (reason.toLowerCase().contains('time') &&
+                      reason.toLowerCase().contains('out')
+                  ? 'Approval timed out$toolSuffix'
+                  : 'Approval denied$toolSuffix${reason.isEmpty ? '' : ' ($reason)'}');
+          _addSystemMarker(
+            idPrefix: 'approval-res',
+            text: verdict,
+            envelopeSeq: apprEnvSeq,
+          );
         }
         break;
 
@@ -2515,12 +3085,122 @@ class _ChatPanelState extends State<ChatPanel> {
     }
   }
 
+  /// True when [msg] is an assistant bubble that never got any
+  /// content (no text, no thinking, no tool calls, no agent events,
+  /// no inline widgets) but is still flagged as streaming. These are
+  /// the orphans that would render a stuck typing-skeleton forever
+  /// because tokens would land in a NEW bubble instead.
+  ///
+  /// Must mirror the `isEmptyStreaming` predicate used by the
+  /// typing-skeleton renderer in `chat_bubbles.dart`: if either side
+  /// diverges, we either leave skeletons animating on bubbles that
+  /// won't get adopted, or we adopt bubbles that are actually showing
+  /// a widget the user already sees (which would then grow a
+  /// second render of the same content).
+  bool _isOrphanStreamingAssistant(ChatMessage msg) {
+    if (msg.role != MessageRole.assistant) return false;
+    if (!msg.isStreaming) return false;
+    if (msg.text.isNotEmpty) return false;
+    if (msg.thinkingText.isNotEmpty) return false;
+    if (msg.toolCalls.isNotEmpty) return false;
+    if (msg.agentEvents.isNotEmpty) return false;
+    for (final b in msg.timeline) {
+      if (b.type == ContentBlockType.widget) return false;
+    }
+    return true;
+  }
+
+  /// Sweep every orphan streaming assistant bubble in [_messages] —
+  /// flip `isStreaming` / `isThinking` to false so the typing skeleton
+  /// stops animating. Called from every terminal turn handler
+  /// (turn_complete, error, abort cleanup, session:snapshot with
+  /// turn_running=false, etc.) as a safety net: the main path only
+  /// finalises `_currentMsg`, so any bubble that escaped adoption
+  /// stays stuck with the skeleton unless we explicitly finalise it
+  /// here. Optionally excludes [keep] so a caller can exempt the
+  /// bubble it's about to fill with content.
+  void _finalizeOrphanStreamingBubbles({ChatMessage? keep}) {
+    for (final m in _messages) {
+      if (identical(m, keep)) continue;
+      if (!_isOrphanStreamingAssistant(m)) continue;
+      m.setStreamingState(false);
+      m.setThinkingState(false);
+    }
+  }
+
   void _ensureBubble() {
     if (_currentMsg != null) return;
-    // During replay we must not spawn a bubble on our own — the
-    // replay creates them from `turn_start` events and any extra
-    // bubble would render an orphan "thinking…" card at the bottom.
-    if (_isReplaying) return;
+    // The daemon NO LONGER emits `turn_start` events (the event-log
+    // is unified under kind='event' rows; the lifecycle is carried
+    // by `user_message` + `message_started` + `assistant_stream_snapshot`
+    // + `message_done`). Previously this guard short-circuited bubble
+    // creation during replay, counting on a turn_start event that
+    // never arrived — so sessions reopened with ONLY user bubbles
+    // visible and no assistant replies at all, which is what the user
+    // sees as "the session looks empty". Let the orphan-adoption
+    // logic below run during replay too — _messages was just cleared,
+    // so no orphan will be found and we'll mint a fresh assistant
+    // bubble the first token/snapshot event can populate.
+
+    // Orphan sweep + adoption.
+    //
+    // Two kinds of streaming-empty assistant bubbles may exist in the
+    // list when we get here:
+    //
+    //   (a) "leftover from a previous turn" — its `sortKey` is
+    //       anchored to a daemon seq that pre-dates the most recent
+    //       user message. Adopting it would cause the incoming
+    //       tokens to render ABOVE the user's question, which is
+    //       visually broken. These must be FINALISED (stop the
+    //       typing skeleton) but not reused.
+    //
+    //   (b) "current turn's placeholder" — sits AFTER the most
+    //       recent user message in sort order. Adopting it is
+    //       exactly the point: tokens land in the bubble the user
+    //       is already seeing, and no duplicate appears. If several
+    //       exist we pick the one with the highest sortKey (i.e.
+    //       the most recently created) and silence the others.
+    //
+    // To classify each orphan we need the highest sortKey among user
+    // messages — orphans below that threshold are (a), above are (b).
+    int lastUserSortKey = -1;
+    for (final m in _messages) {
+      if (m.role == MessageRole.user) {
+        final k = m.sortKey;
+        if (k > lastUserSortKey) lastUserSortKey = k;
+      }
+    }
+
+    ChatMessage? adopt;
+    int adoptSortKey = -1;
+    final stale = <ChatMessage>[];
+    for (final m in _messages) {
+      if (!_isOrphanStreamingAssistant(m)) continue;
+      if (m.sortKey <= lastUserSortKey) {
+        stale.add(m);
+        continue;
+      }
+      if (adopt == null || m.sortKey > adoptSortKey) {
+        if (adopt != null) stale.add(adopt);
+        adopt = m;
+        adoptSortKey = m.sortKey;
+      } else {
+        stale.add(m);
+      }
+    }
+
+    // Silence every orphan we didn't adopt so their typing skeletons
+    // stop animating.
+    for (final s in stale) {
+      s.setStreamingState(false);
+      s.setThinkingState(false);
+    }
+
+    if (adopt != null) {
+      _currentMsg = adopt;
+      return;
+    }
+
     // Seed the assistant bubble with the seq of the event that
     // triggered it (typically the first token/thinking/tool for the
     // turn — `_lastPersistedSeq` was just bumped at the top of
@@ -2700,6 +3380,16 @@ class _ChatPanelState extends State<ChatPanel> {
     });
     _armSpinnerWatchdog();
 
+    // Product rule: dedicated "agent is thinking" indicator.
+    // Activates the moment a non-queued message leaves — rendered as
+    // a standalone 3-bar skeleton bar in the chat area. Independent
+    // of any ChatMessage bubble; flipped off by the first response
+    // signal in ``_onEvent`` (token / thinking / tool_start / result
+    // / error / message_done / turn_complete).
+    if (!busy && replacing == null) {
+      setState(() => _awaitingAgentResponse = true);
+    }
+
     final images = _attachments
         .where((a) => a.isImage)
         .map((a) => a.path)
@@ -2708,6 +3398,10 @@ class _ChatPanelState extends State<ChatPanel> {
         .where((a) => !a.isImage)
         .map((a) => a.path)
         .toList();
+    // Snapshot the full attachment list so we can restore it if the
+    // POST fails — otherwise the user's images/files vanish from the
+    // composer with no way to retry without re-selecting each one.
+    final attachmentsSnapshot = List.of(_attachments);
     setState(() => _attachments.clear());
     _scrollToBottom();
     _focus.requestFocus();
@@ -2815,6 +3509,13 @@ class _ChatPanelState extends State<ChatPanel> {
       _resortMessages();
       _isSending = false;
       _statusPhase = '';
+      // Restore the attachments the user had picked — the POST
+      // failed, they should be able to retry without re-selecting
+      // every file. Also restore the composer text below if we
+      // cleared it optimistically.
+      if (_attachments.isEmpty && attachmentsSnapshot.isNotEmpty) {
+        _attachments.addAll(attachmentsSnapshot);
+      }
     });
     _scrollToBottom();
   }
@@ -3002,6 +3703,7 @@ class _ChatPanelState extends State<ChatPanel> {
       _currentMsg!.setThinkingState(false);
     }
     _currentMsg = null;
+    _finalizeOrphanStreamingBubbles();
     WorkspaceState().finishAllAgents();
     _hadTokens = false;
     _responseTimeout?.cancel();
@@ -3068,6 +3770,71 @@ class _ChatPanelState extends State<ChatPanel> {
     if (path.isNotEmpty) wsSvc.closeBuffer(path);
   }
 
+  /// Insert a UI-only system marker into the chat timeline — these
+  /// lines are rendered by [_SystemMessage] as a centered italic
+  /// divider and are PURELY client-side. They persist across session
+  /// reopens (because the source ``hook`` / ``error`` / ``abort`` event
+  /// is in history_log and replays through [_onEvent]), but they NEVER
+  /// reach the LLM because the daemon composes its prompt from
+  /// ``session.messages`` (user/assistant/tool roles only).
+  ///
+  /// The id is keyed on the daemon envelope's ``seq`` so replay is
+  /// idempotent — seeing the same event twice never duplicates the
+  /// marker in the list.
+  void _addSystemMarker({
+    required String idPrefix,
+    required String text,
+    int? envelopeSeq,
+  }) {
+    if (!mounted) {
+      debugPrint('[MARKER] SKIP (not mounted) $idPrefix: $text');
+      return;
+    }
+    final id = envelopeSeq != null && envelopeSeq > 0
+        ? '$idPrefix-$envelopeSeq'
+        : '$idPrefix-${DateTime.now().microsecondsSinceEpoch}';
+    if (_messages.any((m) => m.id == id)) {
+      debugPrint('[MARKER] DEDUP $id (already present)');
+      return;
+    }
+    debugPrint('[MARKER] ADD id=$id seq=$envelopeSeq text="$text"');
+    setState(() {
+      _messages.add(ChatMessage(
+        id: id,
+        role: MessageRole.system,
+        initialText: text,
+        daemonSeq: envelopeSeq,
+      ));
+    });
+  }
+
+  /// Phase=start of ``compact_context``. Drops an in-progress system
+  /// line in the chat ("⟳ Compacting context…") that will be upgraded
+  /// into the final "Context compacted: X → Y" line by the matching
+  /// phase=end. Pinned to the hook envelope's ``daemonSeq`` so it
+  /// slots in chronologically between the two turns and can't drift
+  /// to the bottom.
+  void _onCompactionStarted(Map<String, dynamic> details, {int? envelopeSeq}) {
+    if (!mounted || _isReplaying) return;
+    final strategy = details['strategy'] as String? ?? 'truncate';
+    final strat = strategy == 'summarize' ? 'summary' : 'truncate';
+    final id = envelopeSeq != null && envelopeSeq > 0
+        ? 'compact-$envelopeSeq'
+        : 'compact-pending-${DateTime.now().millisecondsSinceEpoch}';
+    if (_messages.any((m) => m.id == id)) return;
+    final msg = ChatMessage(
+      id: id,
+      role: MessageRole.system,
+      initialText: 'Compacting context… ($strat)',
+      daemonSeq: envelopeSeq,
+    );
+    msg.setStreamingState(true);
+    setState(() {
+      _messages.add(msg);
+      _pendingCompactionBubbleId = id;
+    });
+  }
+
   void _onCompactionCompleted(Map<String, dynamic> details,
       {required bool emergency, int? envelopeSeq}) {
     final before = details['tokens_before'] as int? ?? 0;
@@ -3090,32 +3857,68 @@ class _ChatPanelState extends State<ChatPanel> {
     // Reset spinner phase
     if (mounted) setState(() => _statusPhase = _isSending ? 'requesting' : '');
 
-    // Show compaction message in chat if significant
-    if (reduced > 5000 || emergency) {
+    // Surface significant compactions as a persistent system line in
+    // the chat timeline. Pinned via ``daemonSeq`` (the hook envelope's
+    // authoritative seq) so it lands between the two turns where the
+    // compaction actually happened — no more "figé en bas" drift.
+    // Also emit a transient SnackBar for live notification when the
+    // user is watching.
+    if ((reduced > 5000 || emergency) && mounted) {
       final fmtBefore = ContextState().fmt(before);
       final fmtAfter = ContextState().fmt(after);
       final fmtReduced = ContextState().fmt(reduced);
       final icon = emergency ? 'Emergency compaction' : 'Context compacted';
       final strat = strategy == 'summarize' ? 'summary' : 'truncate';
-      // Anchor to the daemon envelope's seq when we know it — the
-      // scout confirmed a compaction hook can fire while hundreds
-      // of higher-seq events (thinking_delta, out_token, preview:*)
-      // are already in the stream. Falling back to
-      // `_anchorForNewLocalBubble()` in that case would pin the
-      // bubble to the CURRENT max, which sends it to the bottom of
-      // the chat regardless of when the compaction actually
-      // happened in the timeline (the exact symptom reported).
-      final anchor = (envelopeSeq != null && envelopeSeq > 0)
-          ? envelopeSeq
-          : _anchorForNewLocalBubble();
-      _messages.add(ChatMessage(
-        id: 'compact-${DateTime.now().millisecondsSinceEpoch}',
-        role: MessageRole.system,
-        initialText: '$icon: $fmtBefore → $fmtAfter tokens (-$fmtReduced, $strat)',
-        anchorSeq: anchor,
-      ));
-      if (mounted) setState(_resortMessages);
-      _scrollToBottom();
+      final text =
+          '$icon: $fmtBefore → $fmtAfter tokens (-$fmtReduced, $strat)';
+
+      // Upgrade the in-progress line if one exists (normal case:
+      // compact_context:start created the placeholder). Otherwise
+      // create a fresh line — covers emergency_compaction (which has
+      // no start phase) and replay of a session whose :start event
+      // was lost / filtered.
+      ChatMessage? pending;
+      if (_pendingCompactionBubbleId != null) {
+        for (final m in _messages) {
+          if (m.id == _pendingCompactionBubbleId) {
+            pending = m;
+            break;
+          }
+        }
+      }
+
+      if (pending != null) {
+        setState(() {
+          pending!.replaceText(text);
+          pending.setStreamingState(false);
+          _pendingCompactionBubbleId = null;
+        });
+      } else {
+        final markerId = envelopeSeq != null && envelopeSeq > 0
+            ? 'compact-$envelopeSeq'
+            : 'compact-${DateTime.now().millisecondsSinceEpoch}';
+        if (!_messages.any((m) => m.id == markerId)) {
+          setState(() {
+            _messages.add(ChatMessage(
+              id: markerId,
+              role: MessageRole.system,
+              initialText: text,
+              daemonSeq: envelopeSeq,
+            ));
+          });
+        }
+      }
+
+      // Live toast — only when not replaying history, so reopening a
+      // session doesn't pop a toast for every past compaction.
+      if (!_isReplaying) {
+        final messenger = ScaffoldMessenger.maybeOf(context);
+        messenger?.showSnackBar(SnackBar(
+          content: Text(text, style: GoogleFonts.firaCode(fontSize: 12)),
+          duration: const Duration(seconds: 4),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
     }
   }
 
@@ -3208,6 +4011,18 @@ class _ChatPanelState extends State<ChatPanel> {
           // '(interrupted — reconnect detected)' marker was
           // noisy and fired on every app open.
           cur.pending = false;
+          // CRITICAL: stop the streaming flag BEFORE dropping the
+          // reference. Otherwise the bubble stays in ``_messages``
+          // with ``isStreaming=true`` and ``text=""`` which is the
+          // exact trigger for the 3-bar ``_TypingSkeleton`` —
+          // animating forever on its own because no further event
+          // will ever close it (we just severed the pointer). This
+          // was the root cause of "ça s'anime seul alors que je n'ai
+          // envoyé aucun message" on session open: the phantom
+          // queue:snapshot -> _ensureBubble -> reconcile sequence
+          // left an orphan streaming bubble every time.
+          cur.setStreamingState(false);
+          cur.setThinkingState(false);
           _currentMsg = null;
           _statusPhase = '';
           _hadTokens = false;
@@ -3251,7 +4066,22 @@ class _ChatPanelState extends State<ChatPanel> {
     }
   }
 
-  void _scrollToBottom() {
+  /// Returns true when the scroll view is at (or within 160px of) the bottom.
+  /// Used to decide whether a streaming auto-scroll should fire — if the user
+  /// has scrolled up to read history we must not yank them back down on
+  /// every token.
+  bool get _isNearBottom {
+    if (!_scroll.hasClients) return true;
+    return _scroll.position.pixels >=
+        _scroll.position.maxScrollExtent - 160;
+  }
+
+  /// Scroll to bottom. Respects the user's scroll position by default: if
+  /// they've scrolled up, we leave them alone. Pass [force] when the caller
+  /// knows the user should always end up at the bottom (e.g. just sent a
+  /// message, tapped the scroll-down FAB, restored a session).
+  void _scrollToBottom({bool force = false}) {
+    if (!force && !_isNearBottom) return;
     Future.delayed(const Duration(milliseconds: 300), () {
       if (mounted && _scroll.hasClients) {
         _scroll.animateTo(
@@ -3351,8 +4181,12 @@ class _ChatPanelState extends State<ChatPanel> {
         const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
           setState(() {
             _messages.clear();
-      _messageKeys.clear();
+            _messageKeys.clear();
+            _pendingApprovals.clear();
             _currentMsg = null;
+            _isSending = false;
+            _hadTokens = false;
+            _statusPhase = '';
           });
           if (context.mounted) showToast(context, 'Chat cleared');
         },
@@ -3471,15 +4305,13 @@ class _ChatPanelState extends State<ChatPanel> {
               child: KeyedSubtree(
                 key: ValueKey(_currentSessionId ?? '__no_session__'),
                 child: _messages.isEmpty
-                    ? _buildEmptyState(
-                        activeApp, workspace, workspaceRequired)
-                    // The chat never renders a loading animation of
-                    // its own — history-fetch feedback belongs in the
-                    // session drawer (see [_SessionTile] for the
-                    // per-tile loading dot on the active entry).
-                    // Showing a fake-conversation shimmer inside the
-                    // chat looked like the agent was already writing
-                    // a response on session open.
+                    ? (_isReplaying &&
+                            (SessionService().activeSession?.messageCount ??
+                                    0) >
+                                0
+                        ? _buildHistoryLoading()
+                        : _buildEmptyState(
+                            activeApp, workspace, workspaceRequired))
                     : _buildMessageArea(
                         activeApp: activeApp,
                         workspace: workspace,
@@ -3787,6 +4619,56 @@ class _ChatPanelState extends State<ChatPanel> {
     );
   }
 
+  Widget _buildHistoryLoading() {
+    final c = context.colors;
+    final session = SessionService().activeSession;
+    final total = _replayTotal;
+    final done = _replayDone;
+    final progress = (total > 0) ? (done / total).clamp(0.0, 1.0) : null;
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              value: progress,
+              color: c.textMuted,
+              backgroundColor: c.border,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            'Loading conversation…',
+            style: GoogleFonts.inter(
+              fontSize: 12.5,
+              color: c.textMuted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          if (session?.title.isNotEmpty ?? false) ...[
+            const SizedBox(height: 6),
+            Text(
+              session!.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.inter(fontSize: 11, color: c.textDim),
+            ),
+          ],
+          if (total > 0) ...[
+            const SizedBox(height: 4),
+            Text(
+              '$done / $total events',
+              style: GoogleFonts.firaCode(fontSize: 10, color: c.textDim),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildEmptyState(AppSummary? app, String workspace, bool workspaceRequired) {
     final isSmall = MediaQuery.of(context).size.width < 600;
     final c = context.colors;
@@ -3997,8 +4879,25 @@ class _ChatPanelState extends State<ChatPanel> {
                   child: ListView.builder(
         controller: _scroll,
         padding: EdgeInsets.only(top: 20, bottom: 24, left: hPad, right: hPad),
-        itemCount: _messages.length,
+        itemCount: _messages.length +
+            (_awaitingAgentResponse ? 1 : 0),
         itemBuilder: (_, i) {
+          // Trailing "agent is thinking" row — shown only when the
+          // user just sent a non-queued message and the first
+          // response signal hasn't landed yet. Rendered as a plain
+          // 3-bar typing skeleton so it matches the in-bubble style.
+          if (i == _messages.length) {
+            return Center(
+              child: SizedBox(
+                width: maxW,
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 12),
+                  child: _ChatTypingSkeleton(),
+                ),
+              ),
+            );
+          }
           final msg = _messages[i];
           // Retry: find the user message before this assistant error message
           VoidCallback? onRetry;
@@ -4980,6 +5879,7 @@ class _ApprovalBannerState extends State<_ApprovalBanner>
   bool _showDenyInput = false;
   int _remainingSeconds = 300;
   Timer? _timer;
+  Timer? _pulseStopTimer;
   late AnimationController _pulseCtrl;
 
   // ── Enhanced ask_user state ───────────────────────────────────────────
@@ -5002,7 +5902,7 @@ class _ApprovalBannerState extends State<_ApprovalBanner>
       _pulseCtrl.repeat(reverse: true);
     } else {
       _pulseCtrl.repeat(reverse: true);
-      Future.delayed(const Duration(milliseconds: 3600), () {
+      _pulseStopTimer = Timer(const Duration(milliseconds: 3600), () {
         if (mounted) _pulseCtrl.stop();
       });
     }
@@ -5027,6 +5927,7 @@ class _ApprovalBannerState extends State<_ApprovalBanner>
   @override
   void dispose() {
     _timer?.cancel();
+    _pulseStopTimer?.cancel();
     _pulseCtrl.dispose();
     _inputCtrl.dispose();
     super.dispose();
@@ -6165,11 +7066,19 @@ class _ApprovalCodeBlock extends StatefulWidget {
 
 class _ApprovalCodeBlockState extends State<_ApprovalCodeBlock> {
   bool _copied = false;
+  Timer? _copyResetTimer;
+
+  @override
+  void dispose() {
+    _copyResetTimer?.cancel();
+    super.dispose();
+  }
 
   void _copy() {
     Clipboard.setData(ClipboardData(text: widget.content));
     setState(() => _copied = true);
-    Future.delayed(const Duration(seconds: 2), () {
+    _copyResetTimer?.cancel();
+    _copyResetTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) setState(() => _copied = false);
     });
   }
@@ -6534,8 +7443,8 @@ class _ChatInputState extends State<_ChatInput> {
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
               child: Shortcuts(
-                shortcuts: {
-                  LogicalKeySet(LogicalKeyboardKey.enter): const _SendIntent(),
+                shortcuts: const {
+                  SingleActivator(LogicalKeyboardKey.enter): _SendIntent(),
                 },
                 child: Actions(
                   actions: {
@@ -8679,6 +9588,99 @@ class _ArtifactsFloatingChip extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+}
+
+/// Standalone 3-bar "agent is thinking" skeleton rendered at the
+/// bottom of the chat list while we wait for the first response
+/// signal. Independent of any ChatMessage — driven purely by
+/// ``_awaitingAgentResponse``.
+class _ChatTypingSkeleton extends StatefulWidget {
+  const _ChatTypingSkeleton();
+
+  @override
+  State<_ChatTypingSkeleton> createState() => _ChatTypingSkeletonState();
+}
+
+class _ChatTypingSkeletonState extends State<_ChatTypingSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return SizedBox(
+      width: 180,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ChatSkeletonBar(
+              ctrl: _ctrl, delayFraction: 0.00, widthFactor: 0.55, c: c),
+          const SizedBox(height: 6),
+          _ChatSkeletonBar(
+              ctrl: _ctrl, delayFraction: 0.15, widthFactor: 0.85, c: c),
+          const SizedBox(height: 6),
+          _ChatSkeletonBar(
+              ctrl: _ctrl, delayFraction: 0.30, widthFactor: 0.70, c: c),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatSkeletonBar extends StatelessWidget {
+  final AnimationController ctrl;
+  final double delayFraction;
+  final double widthFactor;
+  final AppColors c;
+  const _ChatSkeletonBar({
+    required this.ctrl,
+    required this.delayFraction,
+    required this.widthFactor,
+    required this.c,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ctrl,
+      builder: (_, _) {
+        // Triangular wave with the leading edge offset by ``delayFraction``
+        // so the three bars ripple one after another.
+        double t = (ctrl.value - delayFraction) % 1.0;
+        if (t < 0) t += 1.0;
+        final pulse = t < 0.5 ? t * 2 : (1 - t) * 2;
+        final opacity = 0.25 + 0.55 * pulse;
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: FractionallySizedBox(
+            widthFactor: widthFactor,
+            child: Container(
+              height: 10,
+              decoration: BoxDecoration(
+                color: c.textMuted.withValues(alpha: opacity),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

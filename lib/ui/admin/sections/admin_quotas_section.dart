@@ -6,6 +6,7 @@ library;
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../services/auth_service.dart';
@@ -42,7 +43,19 @@ class _AdminQuotasSectionState extends State<AdminQuotasSection> {
   }
 
   void _onChange() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // The service flips `_loading = true; notifyListeners();` at the
+    // top of listAll() — when initState() triggers that, the
+    // notification fires synchronously while this widget is still
+    // building. Defer the setState to the next frame in that case.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      setState(() {});
+    }
   }
 
   List<UserQuota> get _filtered {
@@ -200,17 +213,32 @@ class _AdminQuotasSectionState extends State<AdminQuotasSection> {
   }
 
   Future<void> _create() async {
-    // Reuse the dialog from the standalone admin page — same form
-    // with all 3 scopes / 3 periods.
     final isAdmin = AuthService().currentUser?.isAdmin ?? false;
     if (!isAdmin) return;
-    // Open the standalone page's dialog by going through the page
-    // briefly. Alternatively, we could lift the dialog into a
-    // shared file — for now we re-use through navigation.
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const admin_page.QuotasAdminPage()),
+    final result = await showDialog<admin_page.QuotaFormResult>(
+      context: context,
+      builder: (_) => const admin_page.QuotaCreateDialog(),
     );
-    if (mounted) _svc.listAll();
+    if (result == null || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final q = await _svc.create(
+      scopeType: result.scopeType,
+      scopeId: result.scopeId,
+      period: result.period,
+      tokensLimit: result.tokensLimit,
+      appId: result.appId,
+    );
+    if (!mounted) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          q != null ? 'Quota created' : 'Create failed (admin only?)',
+          style: GoogleFonts.inter(fontSize: 12),
+        ),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+    _svc.listAll();
   }
 
   Future<void> _confirmDelete(UserQuota q) async {

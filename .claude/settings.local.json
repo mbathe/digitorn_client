@@ -130,7 +130,29 @@
       "Read(//c/Users/ASUS/AppData/**)",
       "Bash(pip install *)",
       "Bash(pip3 install *)",
-      "Bash(grep -o \"\\\\\"admin\\\\\\\\.[a-z_]*users_[a-z_]*\\\\\"\" \"C:\\\\Users\\\\ASUS\\\\Documents\\\\digitorn_client\\\\assets\\\\translations\\\\fr.json\")"
+      "Bash(grep -o \"\\\\\"admin\\\\\\\\.[a-z_]*users_[a-z_]*\\\\\"\" \"C:\\\\Users\\\\ASUS\\\\Documents\\\\digitorn_client\\\\assets\\\\translations\\\\fr.json\")",
+      "Bash(pkill -f \"flutter.*windows\")",
+      "Bash(pkill -f \"dart.exe\")",
+      "Bash(npx --yes create-next-app@latest digitorn_web --ts --tailwind --app --eslint --src-dir --turbopack --import-alias \"@/*\" --use-npm --no-interactive --yes)",
+      "Bash(npx --yes shadcn@latest init --base-color neutral --yes)",
+      "Bash(npx --yes shadcn@latest init --yes --defaults)",
+      "Bash(npx --yes shadcn@latest add button input label card dialog dropdown-menu sheet select tabs badge avatar separator skeleton toggle toggle-group tooltip alert alert-dialog form textarea checkbox radio-group switch table sidebar scroll-area command popover sonner breadcrumb collapsible accordion navigation-menu progress slider chart --yes --overwrite)",
+      "Bash(npm install *)",
+      "Bash(mkdir -p /c/Users/ASUS/Documents/digitorn_web/messages)",
+      "Bash(cp /c/Users/ASUS/Documents/digitorn_client/assets/translations/fr.json /c/Users/ASUS/Documents/digitorn_web/messages/fr.json)",
+      "Bash(cp /c/Users/ASUS/Documents/digitorn_client/assets/translations/en.json /c/Users/ASUS/Documents/digitorn_web/messages/en.json)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"EXITCODE=$?\")",
+      "Bash(npm run *)",
+      "Bash(echo \"PID=$!\" sleep 6 echo \"--- log tail ---\" tail -30 /tmp/digitorn_web.log echo \"--- port check ---\" netstat -ano)",
+      "Bash(kill 327317)",
+      "Bash(awk '/^  \"settings\": \\\\{/,/^  \\\\},/' /c/Users/ASUS/Documents/digitorn_web/messages/fr.json)",
+      "Bash(awk '/^  \"settings\": \\\\{/,/^  \\\\},/' /c/Users/ASUS/Documents/digitorn_web/messages/en.json)",
+      "Bash(awk '/^  \"hub\": \\\\{/,/^  \\\\},/' /c/Users/ASUS/Documents/digitorn_web/messages/fr.json)",
+      "Bash(break)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); apps=d.get\\('data',[]\\); print\\('count:',len\\(apps\\)\\); print\\(json.dumps\\(apps[0] if apps else {}, indent=2, ensure_ascii=False\\)\\)\")",
+      "Bash(python3 -c \"import json; d=json.load\\(open\\('messages/en.json','r',encoding='utf-8'\\)\\); print\\('hub keys:', list\\(d.get\\('hub',{}\\).keys\\(\\)\\)[:20]\\); print\\('common keys:', list\\(d.get\\('common',{}\\).keys\\(\\)\\)[:10]\\)\")",
+      "Bash(python3 *)"
     ]
   }
 }

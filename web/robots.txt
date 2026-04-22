@@ -1,0 +1,22 @@
+# Robots policy for the Digitorn client.
+#
+# The app is a single-page authenticated SaaS — every route behind the
+# landing is dynamic JS content that crawlers can't index meaningfully
+# anyway, but we spell out the intent explicitly so search previews
+# stay clean and don't surface raw session / workspace URLs.
+
+User-agent: *
+Allow: /$
+Disallow: /api/
+Disallow: /auth/
+Disallow: /chat
+Disallow: /workspace
+Disallow: /sessions
+Disallow: /admin
+
+# Preview/rendering bots (Slack, Discord, Twitter, LinkedIn) need the
+# index.html meta tags — the rest of the app is invisible to them
+# because Flutter renders on canvas, so there's nothing to restrict
+# beyond the routes above.
+
+Sitemap: https://digitorn.dev/sitemap.xml

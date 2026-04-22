@@ -4,9 +4,14 @@
 /// + app_id + period + tokens_limit) and delete existing ones.
 library;
 
+import 'dart:async';
+
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../../services/admin_service.dart';
 import '../../services/apps_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/quotas_service.dart';
@@ -40,7 +45,18 @@ class _QuotasAdminPageState extends State<QuotasAdminPage> {
   }
 
   void _onChange() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // Service notifies synchronously at the top of listAll(), which
+    // fires while this widget is still in its first build when the
+    // call chains from initState. Defer in that case.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      setState(() {});
+    }
   }
 
   List<UserQuota> get _filtered {
@@ -106,14 +122,14 @@ class _QuotasAdminPageState extends State<QuotasAdminPage> {
             children: [
               Icon(Icons.shield_outlined, size: 48, color: c.orange),
               const SizedBox(height: 14),
-              Text('Admin only',
+              Text('admin.qd_forbidden_title'.tr(),
                   style: GoogleFonts.inter(
                       fontSize: 14,
                       fontWeight: FontWeight.w700,
                       color: c.textBright)),
               const SizedBox(height: 6),
               Text(
-                'You need admin permissions to manage quotas.',
+                'admin.qd_forbidden_body'.tr(),
                 textAlign: TextAlign.center,
                 style: GoogleFonts.inter(
                     fontSize: 12, color: c.textMuted, height: 1.5),
@@ -131,13 +147,13 @@ class _QuotasAdminPageState extends State<QuotasAdminPage> {
             children: [
               Icon(Icons.error_outline_rounded, size: 36, color: c.red),
               const SizedBox(height: 12),
-              Text(_svc.error ?? 'Unknown error',
+              Text(_svc.error ?? 'admin.qd_unknown_error'.tr(),
                   style: GoogleFonts.firaCode(
                       fontSize: 11, color: c.textMuted)),
               const SizedBox(height: 14),
               ElevatedButton(
                 onPressed: () => _svc.listAll(),
-                child: Text('Retry',
+                child: Text('admin.qd_retry'.tr(),
                     style: GoogleFonts.inter(fontSize: 12)),
               ),
             ],
@@ -224,8 +240,9 @@ class _QuotasAdminPageState extends State<QuotasAdminPage> {
                         padding: const EdgeInsets.all(30),
                         child: Text(
                           _query.isNotEmpty
-                              ? 'No quota matches "$_query"'
-                              : 'No quota defined yet. Click + to create one.',
+                              ? 'admin.qd_no_match'
+                                  .tr(namedArgs: {'q': _query})
+                              : 'admin.quotas_empty_hint'.tr(),
                           style: GoogleFonts.inter(
                               fontSize: 12, color: c.textMuted),
                         ),
@@ -241,9 +258,9 @@ class _QuotasAdminPageState extends State<QuotasAdminPage> {
   }
 
   Future<void> _createQuota() async {
-    final result = await showDialog<_QuotaFormResult>(
+    final result = await showDialog<QuotaFormResult>(
       context: context,
-      builder: (_) => const _QuotaCreateDialog(),
+      builder: (_) => const QuotaCreateDialog(),
     );
     if (result == null) return;
     if (!mounted) return;
@@ -259,7 +276,9 @@ class _QuotasAdminPageState extends State<QuotasAdminPage> {
     messenger.showSnackBar(
       SnackBar(
         content: Text(
-          q != null ? 'Quota created' : 'Create failed (admin only?)',
+          q != null
+              ? 'admin.qd_created_ok'.tr()
+              : 'admin.qd_created_fail'.tr(),
           style: GoogleFonts.inter(fontSize: 12),
         ),
         duration: const Duration(seconds: 2),
@@ -467,13 +486,13 @@ class _QuotaRow extends StatelessWidget {
   }
 }
 
-class _QuotaFormResult {
+class QuotaFormResult {
   final String scopeType;
   final String scopeId;
   final String? appId;
   final String period;
   final int tokensLimit;
-  const _QuotaFormResult({
+  const QuotaFormResult({
     required this.scopeType,
     required this.scopeId,
     required this.period,
@@ -482,26 +501,113 @@ class _QuotaFormResult {
   });
 }
 
-class _QuotaCreateDialog extends StatefulWidget {
-  const _QuotaCreateDialog();
+class QuotaCreateDialog extends StatefulWidget {
+  const QuotaCreateDialog({super.key});
 
   @override
-  State<_QuotaCreateDialog> createState() => _QuotaCreateDialogState();
+  State<QuotaCreateDialog> createState() => _QuotaCreateDialogState();
 }
 
-class _QuotaCreateDialogState extends State<_QuotaCreateDialog> {
+class _QuotaCreateDialogState extends State<QuotaCreateDialog> {
   String _scopeType = 'user';
   String _period = 'month';
   String? _appId;
   final _scopeIdCtrl = TextEditingController();
   final _tokensCtrl = TextEditingController(text: '1000000');
+  final _userSearchCtrl = TextEditingController();
   String? _error;
+
+  // User picker state — mirrors the one in admin_quota_dialog.dart.
+  AdminUser? _pickedUser;
+  List<AdminUser> _userResults = const [];
+  bool _userSearchLoading = false;
+  String? _userSearchError;
+  Timer? _userSearchDebounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchUsers('');
+  }
 
   @override
   void dispose() {
     _scopeIdCtrl.dispose();
     _tokensCtrl.dispose();
+    _userSearchCtrl.dispose();
+    _userSearchDebounce?.cancel();
     super.dispose();
+  }
+
+  void _onUserSearchChanged(String q) {
+    _userSearchDebounce?.cancel();
+    _userSearchDebounce = Timer(
+      const Duration(milliseconds: 250),
+      () => _searchUsers(q.trim()),
+    );
+  }
+
+  Future<void> _searchUsers(String q) async {
+    debugPrint('[quota-new] searching users q="$q"');
+    setState(() {
+      _userSearchLoading = true;
+      _userSearchError = null;
+    });
+    try {
+      final res = await AdminService()
+          .listUsersFiltered(UserFilters(q: q, limit: 25));
+      debugPrint('[quota-new] got ${res.users.length} users '
+          '(total=${res.total})');
+      if (!mounted) return;
+      setState(() {
+        _userResults = res.users;
+        _userSearchLoading = false;
+      });
+    } on AdminUserException catch (e) {
+      debugPrint('[quota-new] AdminUserException: ${e.message} '
+          '(status=${e.statusCode})');
+      if (!mounted) return;
+      setState(() {
+        _userResults = const [];
+        _userSearchError = e.message;
+        _userSearchLoading = false;
+      });
+    } catch (e, st) {
+      debugPrint('[quota-new] unexpected: $e\n$st');
+      if (!mounted) return;
+      setState(() {
+        _userResults = const [];
+        _userSearchError = e.toString();
+        _userSearchLoading = false;
+      });
+    }
+  }
+
+  void _pickUser(AdminUser u) {
+    setState(() {
+      _pickedUser = u;
+      _scopeIdCtrl.text = u.userId;
+    });
+  }
+
+  void _clearPickedUser() {
+    setState(() {
+      _pickedUser = null;
+      _scopeIdCtrl.text = '';
+    });
+  }
+
+  void _switchScope(String next) {
+    if (_scopeType == next) return;
+    final goingToApp = next == 'app';
+    final leavingApp = _scopeType == 'app';
+    setState(() {
+      _scopeType = next;
+      if (goingToApp || leavingApp) {
+        _pickedUser = null;
+        _scopeIdCtrl.text = '';
+      }
+    });
   }
 
   @override
@@ -512,9 +618,9 @@ class _QuotaCreateDialogState extends State<_QuotaCreateDialog> {
       context,
       title: 'New quota',
       content: SizedBox(
-        width: MediaQuery.sizeOf(context).width < 460
+        width: MediaQuery.sizeOf(context).width < 520
             ? MediaQuery.sizeOf(context).width - 48
-            : 420,
+            : 480,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -534,7 +640,7 @@ class _QuotaCreateDialogState extends State<_QuotaCreateDialog> {
                   sub: 'cross-app',
                   value: 'user',
                   selected: _scopeType == 'user',
-                  onTap: () => setState(() => _scopeType = 'user'),
+                  onTap: () => _switchScope('user'),
                 ),
                 const SizedBox(width: 8),
                 _ScopeOption(
@@ -542,7 +648,7 @@ class _QuotaCreateDialogState extends State<_QuotaCreateDialog> {
                   sub: 'per user, per app',
                   value: 'user_app',
                   selected: _scopeType == 'user_app',
-                  onTap: () => setState(() => _scopeType = 'user_app'),
+                  onTap: () => _switchScope('user_app'),
                 ),
                 const SizedBox(width: 8),
                 _ScopeOption(
@@ -550,14 +656,14 @@ class _QuotaCreateDialogState extends State<_QuotaCreateDialog> {
                   sub: 'shared team',
                   value: 'app',
                   selected: _scopeType == 'app',
-                  onTap: () => setState(() => _scopeType = 'app'),
+                  onTap: () => _switchScope('app'),
                 ),
               ],
             ),
             const SizedBox(height: 14),
             // Scope id
             Text(
-              _scopeType == 'app' ? 'App id' : 'User id',
+              _scopeType == 'app' ? 'App id' : 'User',
               style: GoogleFonts.firaCode(
                   fontSize: 10,
                   color: c.textMuted,
@@ -565,16 +671,29 @@ class _QuotaCreateDialogState extends State<_QuotaCreateDialog> {
                   letterSpacing: 0.6),
             ),
             const SizedBox(height: 6),
-            TextField(
-              controller: _scopeIdCtrl,
-              style: GoogleFonts.firaCode(fontSize: 12, color: c.textBright),
-              decoration: themedInputDecoration(
-                context,
-                hintText: _scopeType == 'app'
-                    ? 'e.g. digitorn-code'
-                    : 'e.g. alice',
+            if (_scopeType == 'app')
+              TextField(
+                controller: _scopeIdCtrl,
+                style: GoogleFonts.firaCode(
+                    fontSize: 12, color: c.textBright),
+                decoration: themedInputDecoration(
+                  context,
+                  hintText: 'e.g. digitorn-code',
+                ),
+              )
+            else if (_pickedUser != null)
+              _PickedUserBanner(
+                  user: _pickedUser!, onClear: _clearPickedUser)
+            else
+              _UserPickerBox(
+                controller: _userSearchCtrl,
+                onSearch: _onUserSearchChanged,
+                results: _userResults,
+                loading: _userSearchLoading,
+                error: _userSearchError,
+                onPick: _pickUser,
+                scopeIdCtrl: _scopeIdCtrl,
               ),
-            ),
             if (_scopeType == 'user_app') ...[
               const SizedBox(height: 14),
               Text('App',
@@ -681,7 +800,7 @@ class _QuotaCreateDialogState extends State<_QuotaCreateDialog> {
             }
             Navigator.pop(
               context,
-              _QuotaFormResult(
+              QuotaFormResult(
                 scopeType: _scopeType,
                 scopeId: scopeId,
                 appId: _scopeType == 'user_app' ? _appId : null,
@@ -759,3 +878,314 @@ class _ScopeOption extends StatelessWidget {
     );
   }
 }
+
+class _UserPickerBox extends StatelessWidget {
+  final TextEditingController controller;
+  final ValueChanged<String> onSearch;
+  final List<AdminUser> results;
+  final bool loading;
+  final String? error;
+  final ValueChanged<AdminUser> onPick;
+  final TextEditingController scopeIdCtrl;
+
+  const _UserPickerBox({
+    required this.controller,
+    required this.onSearch,
+    required this.results,
+    required this.loading,
+    required this.error,
+    required this.onPick,
+    required this.scopeIdCtrl,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: c.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+            child: Row(
+              children: [
+                Icon(Icons.person_search_rounded,
+                    size: 14, color: c.textMuted),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    onChanged: onSearch,
+                    style: GoogleFonts.inter(
+                        fontSize: 12, color: c.textBright),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      border: InputBorder.none,
+                      hintText: 'Search by name, email or id…',
+                      hintStyle: GoogleFonts.inter(
+                          fontSize: 11, color: c.textMuted),
+                    ),
+                  ),
+                ),
+                if (loading)
+                  SizedBox(
+                    width: 11,
+                    height: 11,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 1.3, color: c.textMuted),
+                  ),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: c.border),
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Icon(Icons.error_outline_rounded,
+                      size: 14, color: c.red),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(error!,
+                        style: GoogleFonts.inter(
+                            fontSize: 11, color: c.red)),
+                  ),
+                ],
+              ),
+            )
+          else if (loading && results.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 1.3, color: c.textMuted),
+                  ),
+                  const SizedBox(width: 8),
+                  Text('Loading users…',
+                      style: GoogleFonts.inter(
+                          fontSize: 11, color: c.textMuted)),
+                ],
+              ),
+            )
+          else if (results.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Text('No users found.',
+                  style: GoogleFonts.inter(
+                      fontSize: 11, color: c.textMuted)),
+            )
+          else
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220),
+              child: ListView.separated(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: results.length,
+                separatorBuilder: (_, _) =>
+                    Divider(height: 1, color: c.border),
+                itemBuilder: (_, i) =>
+                    _UserPickerRow(user: results[i], onTap: onPick),
+              ),
+            ),
+          Divider(height: 1, color: c.border),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+            child: Row(
+              children: [
+                Icon(Icons.edit_rounded, size: 12, color: c.textDim),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: TextField(
+                    controller: scopeIdCtrl,
+                    style: GoogleFonts.firaCode(
+                        fontSize: 11, color: c.textBright),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      border: InputBorder.none,
+                      hintText: 'Or paste a user id',
+                      hintStyle: GoogleFonts.inter(
+                          fontSize: 10.5, color: c.textDim),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _UserPickerRow extends StatelessWidget {
+  final AdminUser user;
+  final ValueChanged<AdminUser> onTap;
+  const _UserPickerRow({required this.user, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return InkWell(
+      onTap: () => onTap(user),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        child: Row(
+          children: [
+            _Avatar(user: user),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(user.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.inter(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: c.textBright)),
+                      ),
+                      if (user.isAdmin) ...[
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: 'Admin',
+                          child: Icon(Icons.shield_rounded,
+                              size: 11, color: c.blue),
+                        ),
+                      ],
+                      if (!user.active) ...[
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: 'Inactive',
+                          child: Icon(Icons.block_rounded,
+                              size: 11, color: c.orange),
+                        ),
+                      ],
+                    ],
+                  ),
+                  Text(user.email ?? user.userId,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.firaCode(
+                          fontSize: 9.5, color: c.textDim)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PickedUserBanner extends StatelessWidget {
+  final AdminUser user;
+  final VoidCallback onClear;
+  const _PickedUserBanner({required this.user, required this.onClear});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: c.border),
+      ),
+      child: Row(
+        children: [
+          _Avatar(user: user),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(user.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.inter(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: c.textBright)),
+                Text(user.userId,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.firaCode(
+                        fontSize: 10, color: c.textDim)),
+              ],
+            ),
+          ),
+          TextButton.icon(
+            onPressed: onClear,
+            icon: Icon(Icons.swap_horiz_rounded,
+                size: 13, color: c.blue),
+            label: Text('Change',
+                style: GoogleFonts.inter(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: c.blue)),
+            style: TextButton.styleFrom(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              minimumSize: const Size(0, 28),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Avatar extends StatelessWidget {
+  final AdminUser user;
+  const _Avatar({required this.user});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final src = (user.displayName?.trim().isNotEmpty ?? false)
+        ? user.displayName!
+        : (user.email ?? user.userId);
+    final parts = src
+        .split(RegExp(r'[\s@._-]+'))
+        .where((p) => p.isNotEmpty)
+        .toList();
+    final initials = parts.isEmpty
+        ? '?'
+        : parts.length == 1
+            ? parts.first.substring(0, 1).toUpperCase()
+            : (parts[0].substring(0, 1) + parts[1].substring(0, 1))
+                .toUpperCase();
+    return Container(
+      width: 26,
+      height: 26,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: c.surface,
+        shape: BoxShape.circle,
+        border: Border.all(color: c.border),
+      ),
+      child: Text(initials,
+          style: GoogleFonts.firaCode(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w700,
+              color: c.textMuted)),
+    );
+  }
+}
+

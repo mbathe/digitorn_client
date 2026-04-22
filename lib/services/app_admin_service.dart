@@ -24,6 +24,7 @@ library;
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
+import '../models/quota.dart';
 import 'api_client.dart';
 
 enum AdminScope {
@@ -151,6 +152,110 @@ class AppAdminService {
     } catch (e) {
       debugPrint('Admin.clearUserQuota: $e');
       return false;
+    }
+  }
+
+  // ── Typed quota API (2026-04 spec, live-validated) ──────────────
+  //
+  // These complement the legacy Map-based methods above. The daemon
+  // accepts BOTH shapes on PUT (wrapped `{"quota": {...}}` and the
+  // bare map), but the wrapped form is what the 2026-04 spec
+  // documents, and responses always come wrapped. Use the typed
+  // methods for new code — the old Map-based ones stay for back-
+  // compat with [AdminQuotaDialog].
+
+  /// Self-service — ANY authenticated user can read their own
+  /// quota + current usage on an app. Used by the Settings → Quota
+  /// view.
+  Future<QuotaResponse?> getMyQuota(String appId) async {
+    try {
+      final r = await _dio.get(
+        '/api/apps/$appId/quota/me',
+        options: _opts(),
+      );
+      final data = _data(r);
+      return data == null ? null : QuotaResponse.fromJson(data);
+    } catch (e) {
+      debugPrint('Admin.getMyQuota: $e');
+      return null;
+    }
+  }
+
+  Future<QuotaResponse?> getAppQuotaTyped(
+    String appId, {
+    AdminScope scope = AdminScope.owner,
+  }) async {
+    try {
+      final r = await _dio.get(
+        '/api/${_scope(scope)}/$appId/quota',
+        options: _opts(),
+      );
+      final data = _data(r);
+      return data == null ? null : QuotaResponse.fromJson(data);
+    } catch (e) {
+      debugPrint('Admin.getAppQuotaTyped: $e');
+      return null;
+    }
+  }
+
+  Future<QuotaResponse?> setAppQuotaTyped(
+    String appId,
+    QuotaDefinition definition, {
+    AdminScope scope = AdminScope.owner,
+  }) async {
+    try {
+      final r = await _dio.put(
+        '/api/${_scope(scope)}/$appId/quota',
+        data: {'quota': definition.toJson()},
+        options: _opts(),
+      );
+      final data = _data(r);
+      if (data == null) return null;
+      return QuotaResponse.fromJson(data);
+    } catch (e) {
+      debugPrint('Admin.setAppQuotaTyped: $e');
+      return null;
+    }
+  }
+
+  Future<QuotaResponse?> getUserQuotaTyped(
+    String appId,
+    String userId, {
+    AdminScope scope = AdminScope.owner,
+  }) async {
+    try {
+      final r = await _dio.get(
+        '/api/${_scope(scope)}/$appId/quota/user/'
+        '${Uri.encodeComponent(userId)}',
+        options: _opts(),
+      );
+      final data = _data(r);
+      return data == null ? null : QuotaResponse.fromJson(data);
+    } catch (e) {
+      debugPrint('Admin.getUserQuotaTyped: $e');
+      return null;
+    }
+  }
+
+  Future<QuotaResponse?> setUserQuotaTyped(
+    String appId,
+    String userId,
+    QuotaDefinition definition, {
+    AdminScope scope = AdminScope.owner,
+  }) async {
+    try {
+      final r = await _dio.put(
+        '/api/${_scope(scope)}/$appId/quota/user/'
+        '${Uri.encodeComponent(userId)}',
+        data: {'quota': definition.toJson()},
+        options: _opts(),
+      );
+      final data = _data(r);
+      if (data == null) return null;
+      return QuotaResponse.fromJson(data);
+    } catch (e) {
+      debugPrint('Admin.setUserQuotaTyped: $e');
+      return null;
     }
   }
 

@@ -152,22 +152,56 @@ class _EditorPaneState extends State<EditorPane> {
     }
   }
 
-  /// Reconstruct DiffLines using the daemon's unified diff when
-  /// available; otherwise compare baseline to content with the local
-  /// LCS so edits without a pending diff still render.
+  /// Reconstruct DiffLines. Priority order:
   ///
-  /// The daemon exposes the same diff under two names depending on
-  /// the transport (scout-confirmed on `digitorn-builder`):
-  ///   * HTTP `GET …/workspace/files/{path}?include_baseline=true`
-  ///     carries it as `unified_diff_pending` at the top level
-  ///     (wrapped by `WorkspaceFileContent`).
-  ///   * `preview:resource_set` / `preview:resource_patched` events
-  ///     carry it as `unified_diff` inside the payload (wrapped by
-  ///     `WorkspaceFile`).
-  /// Both are byte-for-byte identical when both are present. Try the
-  /// HTTP-side field first (the authoritative "pending" marker),
-  /// fall through to the preview-side field, then to the local LCS.
+  ///   1. **Local LCS over (baseline, content)** — guaranteed to
+  ///      surface BOTH insertions and deletions for every modified
+  ///      region. This is the only source that survives daemon
+  ///      builds where `unified_diff_pending` rewrites a "-old/+new"
+  ///      replace as a plain "+new" (silently dropping the deletion
+  ///      row), which is exactly what the user was seeing.
+  ///
+  ///   2. **Daemon's unified diff** — kept as a fallback for files
+  ///      where we don't have the baseline locally (e.g. files
+  ///      fetched before the baseline endpoint was plumbed, or
+  ///      binary blobs the client skips).
+  ///
+  ///   3. Empty — the caller renders "No diff available".
+  ///
+  /// We read `content` from [WorkspaceModule] when available instead
+  /// of from the fetched [WorkspaceFileContent]: the module tracks
+  /// the daemon's streaming `preview:resource_patched` events and is
+  /// guaranteed to carry the latest content, while `_content` can
+  /// lag by one round-trip if the file-content cache didn't see a
+  /// fresh `updatedAt` bump. That mismatch was the "diff stuck on
+  /// first edit" symptom users were hitting.
   List<DiffLine> _buildDiff(WorkspaceFileContent c) {
+    final module = WorkspaceModule();
+    final moduleFile = module.files[widget.path];
+    final content = moduleFile?.content ?? c.file.content;
+
+    // Baseline resolution order (most specific first):
+    //   1. Daemon's `baseline` on the fetched content — the
+    //      authoritative "last approved" state when one exists.
+    //   2. Our session baseline snapshot — the file's content
+    //      BEFORE the agent's first edit in this session, seeded
+    //      from `previous_content` in the initial event. Gives us
+    //      true deletions even when the daemon never stored an
+    //      approved baseline.
+    //   3. Empty string — brand-new file, nothing to compare against;
+    //      the diff will show every line as added.
+    final daemonBaseline = c.baseline;
+    final sessionBaseline = module.sessionBaselineFor(widget.path);
+    final baseline = daemonBaseline.isNotEmpty
+        ? daemonBaseline
+        : (sessionBaseline.isNotEmpty ? sessionBaseline : '');
+
+    if (baseline.isNotEmpty || content.isNotEmpty) {
+      final local = computeLineDiff(baseline, content);
+      final hasEdits = local.any((l) =>
+          l.type == DiffLineType.added || l.type == DiffLineType.removed);
+      if (hasEdits) return local;
+    }
     for (final diff in [c.unifiedDiffPending, c.file.unifiedDiff ?? '']) {
       if (diff.isNotEmpty && looksLikeUnifiedDiff(diff)) {
         final parsed = parseUnifiedDiff(diff);
@@ -175,8 +209,8 @@ class _EditorPaneState extends State<EditorPane> {
       }
     }
     return chooseDiff(
-      previousContent: c.baseline,
-      newContent: c.file.content,
+      previousContent: baseline,
+      newContent: content,
     );
   }
 
@@ -265,35 +299,48 @@ class _EditorPaneState extends State<EditorPane> {
     );
 
     // Diff overlay takes over the whole surface when active.
+    // Wrapped in a ListenableBuilder on WorkspaceModule so every
+    // streaming edit (preview:resource_patched) re-renders the diff
+    // in place instead of getting stuck on whatever `_content` was
+    // cached at open time.
     Widget? diffOverlay;
     if (_diffMode && content != null) {
-      final diff = _buildDiff(content);
-      final unified = content.unifiedDiffPending.isNotEmpty
-          ? content.unifiedDiffPending
-          : (content.file.unifiedDiff ?? '');
-      final hunks = unified.isEmpty
-          ? const <UnifiedDiffHunk>[]
-          : parseUnifiedDiffHunks(unified);
-      final diffView = diff.isEmpty
-          ? Container(
-              color: c.bg,
-              alignment: Alignment.center,
-              padding: const EdgeInsets.all(14),
-              child: Text(
-                'No diff available — content matches the baseline.',
-                style: GoogleFonts.inter(fontSize: 12, color: c.textDim),
-              ),
-            )
-          : LineDiffView(diff: diff);
-      diffOverlay = Container(
-        color: c.bg,
-        child: Column(
-          children: [
-            if (!autoApprove && hunks.isNotEmpty)
-              _HunksBar(path: widget.path, hunks: hunks),
-            Expanded(child: diffView),
-          ],
-        ),
+      diffOverlay = ListenableBuilder(
+        listenable: WorkspaceModule(),
+        builder: (_, _) {
+          final mod = WorkspaceModule();
+          final diff = _buildDiff(content);
+          final unified = content.unifiedDiffPending.isNotEmpty
+              ? content.unifiedDiffPending
+              : (content.file.unifiedDiff ?? '');
+          final hunks = unified.isEmpty
+              ? const <UnifiedDiffHunk>[]
+              : parseUnifiedDiffHunks(unified);
+          final ins = mod.pendingInsertionsFor(widget.path);
+          final del = mod.pendingDeletionsFor(widget.path);
+          final diffView = diff.isEmpty
+              ? Container(
+                  color: c.bg,
+                  alignment: Alignment.center,
+                  padding: const EdgeInsets.all(14),
+                  child: Text(
+                    'No diff available — content matches the baseline.',
+                    style: GoogleFonts.inter(fontSize: 12, color: c.textDim),
+                  ),
+                )
+              : LineDiffView(diff: diff);
+          return Container(
+            color: c.bg,
+            child: Column(
+              children: [
+                _DiffSummaryBar(insertions: ins, deletions: del),
+                if (!autoApprove && hunks.isNotEmpty)
+                  _HunksBar(path: widget.path, hunks: hunks),
+                Expanded(child: diffView),
+              ],
+            ),
+          );
+        },
       );
     }
 
@@ -1010,6 +1057,58 @@ class _ToolbarAction extends StatelessWidget {
           onPressed: onTap,
           icon: Icon(icon, color: color),
         ),
+      ),
+    );
+  }
+}
+
+/// Running total of pending insertions / deletions for the file,
+/// shown at the top of the diff overlay. Sourced from the client-
+/// side aggregate in [WorkspaceModule] so it always matches the
+/// `+N -M` badge in the explorer tree.
+class _DiffSummaryBar extends StatelessWidget {
+  final int insertions;
+  final int deletions;
+  const _DiffSummaryBar({
+    required this.insertions,
+    required this.deletions,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final hasChanges = insertions > 0 || deletions > 0;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: c.surface,
+        border: Border(bottom: BorderSide(color: c.border)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.difference_rounded, size: 12, color: c.textDim),
+          const SizedBox(width: 6),
+          Text(
+            hasChanges ? 'Pending changes since last approval' : 'No pending changes',
+            style: GoogleFonts.inter(
+                fontSize: 10.5, color: c.textDim, fontWeight: FontWeight.w600),
+          ),
+          const Spacer(),
+          if (insertions > 0) ...[
+            Text('+$insertions',
+                style: GoogleFonts.firaCode(
+                    fontSize: 11,
+                    color: c.green,
+                    fontWeight: FontWeight.w700)),
+            if (deletions > 0) const SizedBox(width: 6),
+          ],
+          if (deletions > 0)
+            Text('-$deletions',
+                style: GoogleFonts.firaCode(
+                    fontSize: 11,
+                    color: c.red,
+                    fontWeight: FontWeight.w700)),
+        ],
       ),
     );
   }

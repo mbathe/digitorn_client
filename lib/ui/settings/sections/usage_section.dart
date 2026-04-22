@@ -22,6 +22,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../../services/quotas_service.dart';
 import '../../../services/usage_service.dart';
 import '../../../theme/app_theme.dart';
+import '../widgets/my_quotas_card.dart';
 import '_shared.dart';
 
 class UsageSection extends StatefulWidget {
@@ -98,6 +99,11 @@ class _UsageSectionState extends State<UsageSection> {
             const SizedBox(height: 18),
             _buildMyQuotasCard(c),
           ],
+          // Per-app quotas (new 2026-04 schema — messages / tokens /
+          // cost_usd / requests × custom/named windows). Self-polls
+          // every 30 s against `/api/apps/{id}/quota/me`.
+          const SizedBox(height: 24),
+          const MyQuotasCard(),
           const SizedBox(height: 24),
           _build30dChart(c, snap),
           const SizedBox(height: 18),

@@ -96,7 +96,13 @@ class _RecentConversationsPageState extends State<RecentConversationsPage> {
       } catch (_) {}
     }
     if (app == null || !mounted) return;
-    await state.setApp(app);
+    // Skip the throwaway new-session creation inside setApp — we
+    // already have a session id to open. Otherwise setApp would
+    // create a fresh session, fire _sessionChangeCtrl for it, and
+    // race with setActiveSession(session) below; whichever history
+    // load finished last won, which intermittently wiped the real
+    // session's bubbles and showed the welcome screen.
+    await state.setApp(app, createNewSession: false, clearSession: false);
     SessionService().setActiveSession(session);
     state.setPanel(ActivePanel.chat);
   }

@@ -150,18 +150,41 @@ class _SystemMessage extends StatelessWidget {
             flex: 3,
             child: Padding(
               padding: EdgeInsets.symmetric(horizontal: isSmall ? 6 : 12),
-              child: Text(
-                message.text,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: GoogleFonts.inter(
-                  fontSize: 12.5,
-                  color: c.text,
-                  fontStyle: FontStyle.italic,
-                  letterSpacing: 0.1,
-                  height: 1.4,
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Leading spinner for in-progress system events
+                  // (e.g. ``Compacting context…``). The marker's
+                  // ``isStreaming`` flag is flipped to false by the
+                  // matching terminal event, which hides the spinner.
+                  if (message.isStreaming) ...[
+                    SizedBox(
+                      width: 11,
+                      height: 11,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.4,
+                        color: c.textMuted,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Flexible(
+                    child: Text(
+                      message.text,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(
+                        fontSize: 12.5,
+                        color: c.text,
+                        fontStyle: FontStyle.italic,
+                        letterSpacing: 0.1,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -583,14 +606,13 @@ class _AssistantBubbleState extends State<_AssistantBubble> {
       }
     }
 
-    // No placeholder skeleton for an empty-streaming bubble. The
-    // send button's rotating ring already tells the user a turn is
-    // in flight, and the old 3-line shimmer kept leaking past its
-    // welcome on orphan bubbles created by the replay-drain (status
-    // events re-arming the spinner for turns the daemon had long
-    // since finished). If we ever want an in-bubble cue again, add
-    // one that's explicitly gated on a post-send signal, not on the
-    // bubble's streaming flag alone.
+    // In-bubble typing skeleton removed — the "agent is thinking"
+    // cue is now a standalone row at the bottom of the chat list,
+    // driven by ``_awaitingAgentResponse`` in ChatPanel. The in-bubble
+    // version leaked onto ghost bubbles spawned by replay-drained
+    // status events on long-finished turns, even after every guard
+    // we added. One indicator, one owner, one flag — easier to keep
+    // correct.
 
     // ── Token footer (subtle badges with in/out counts) ────────────────
     // Only when a turn is fully complete AND we have real counts, so
@@ -1072,7 +1094,13 @@ class _ToolCallSectionState extends State<_ToolCallSection> {
     required ToolCall tool,
     required AppColors c,
   }) {
-    final isRunning = tool.status == 'started';
+    // ``started`` (legacy) and ``running`` (newer) both mean in-flight.
+    // ``pending_approval`` means the daemon is waiting on a user
+    // approval — surface that as its own state so the chip shows the
+    // waiting-on-you signal rather than "done" styling.
+    final isRunning =
+        tool.status == 'started' || tool.status == 'running';
+    final isPendingApproval = tool.status == 'pending_approval';
     var isError = tool.status == 'failed';
     if (!isError && tool.result is Map) {
       final r = tool.result as Map;
@@ -1082,7 +1110,10 @@ class _ToolCallSectionState extends State<_ToolCallSection> {
         isError = true;
       }
     }
-    final isDone = !isRunning;
+    // Treat pending_approval as "not done" so the preview/brief paths
+    // don't try to render a non-existent result and the chip stays in
+    // the hold-up visual state.
+    final isDone = !isRunning && !isPendingApproval;
     final isExpanded = _expandedTools.contains(tool.id);
     final isFullyExpanded = _fullyExpandedPreviews.contains(tool.id);
 
@@ -1097,8 +1128,18 @@ class _ToolCallSectionState extends State<_ToolCallSection> {
     // Label = bright/prominent (white in dark, black in light)
     // Detail = blue/cyan tint (clearly distinct from label)
     // Brief = muted pill background
-    final labelColor = isError ? c.red : (isRunning ? c.blue : c.textBright);
-    final detailColor = isError ? c.red.withValues(alpha: 0.7) : c.blue.withValues(alpha: 0.7);
+    // pending_approval gets the warning (amber) tint so the user
+    // notices the chip is waiting on them rather than the agent.
+    final labelColor = isError
+        ? c.red
+        : (isPendingApproval
+            ? c.orange
+            : (isRunning ? c.blue : c.textBright));
+    final detailColor = isError
+        ? c.red.withValues(alpha: 0.7)
+        : (isPendingApproval
+            ? c.orange.withValues(alpha: 0.7)
+            : c.blue.withValues(alpha: 0.7));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1835,6 +1876,7 @@ class _CodeBlockState extends State<_CodeBlock> {
 
   bool _copied = false;
   bool _expanded = false;
+  Timer? _copyResetTimer;
 
   int get _lineCount {
     if (widget.code.isEmpty) return 0;
@@ -1844,11 +1886,18 @@ class _CodeBlockState extends State<_CodeBlock> {
   bool get _shouldCollapse =>
       _lineCount > _collapseThreshold && !_expanded;
 
+  @override
+  void dispose() {
+    _copyResetTimer?.cancel();
+    super.dispose();
+  }
+
   void _copy() {
     Clipboard.setData(ClipboardData(text: widget.code));
     if (context.mounted) showToast(context, 'Copied to clipboard');
     setState(() => _copied = true);
-    Future.delayed(const Duration(seconds: 2), () {
+    _copyResetTimer?.cancel();
+    _copyResetTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) setState(() => _copied = false);
     });
   }
@@ -4666,4 +4715,9 @@ class _InlineWidgetBlock extends StatelessWidget {
     );
   }
 }
+
+// _TypingSkeleton / _SkeletonBar removed — the chat's "agent is
+// thinking" cue is now a single top-level row rendered by ChatPanel
+// from the ``_awaitingAgentResponse`` flag. See the new
+// ``_ChatTypingSkeleton`` at the bottom of chat_panel.dart.
 

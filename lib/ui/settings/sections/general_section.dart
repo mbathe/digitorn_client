@@ -96,6 +96,12 @@ class GeneralSection extends StatelessWidget {
                             label: 'joined ${_shortDate(user!.createdAt!)}',
                             tint: c.textMuted,
                           ),
+                        if (user?.updatedAt != null)
+                          _Pill(
+                            icon: Icons.edit_calendar_outlined,
+                            label: 'updated ${_shortDate(user!.updatedAt!)}',
+                            tint: c.textMuted,
+                          ),
                       ],
                     ),
                   ],
@@ -170,6 +176,28 @@ class GeneralSection extends StatelessWidget {
               onTap: () => _editTimezone(context, auth),
             ),
           ],
+        ),
+
+        // ── Notification preferences ─────────────────────────────
+        // The daemon's 2026-04 profile schema added
+        // `attributes.notification_prefs` — server-synced so the
+        // same preferences follow the user across devices. Deep-merge
+        // means we only send the keys that change.
+        _NotificationPrefsCard(
+          prefs: user?.notificationPrefs ?? const <String, dynamic>{},
+          onToggle: (key, value) async {
+            final current = Map<String, dynamic>.from(
+                user?.notificationPrefs ?? const <String, dynamic>{});
+            current[key] = value;
+            final ok = await auth.updateProfile(notificationPrefs: current);
+            if (!context.mounted) return;
+            _toast(
+              context,
+              ok
+                  ? 'settings.saved'.tr()
+                  : 'Failed: ${auth.lastError ?? ''}',
+            );
+          },
         ),
 
         // ── Registered devices ───────────────────────────────────
@@ -248,7 +276,12 @@ class GeneralSection extends StatelessWidget {
       contentType: _mimeFor(file.name),
     );
     if (!context.mounted) return;
-    _toast(context, ok ? 'Avatar updated' : 'Upload failed: ${auth.lastError ?? ''}');
+    _toast(
+        context,
+        ok
+            ? 'settings.toast_avatar_updated'.tr()
+            : 'settings.toast_upload_failed'
+                .tr(namedArgs: {'error': auth.lastError ?? ''}));
   }
 
   Future<void> _editDisplayName(
@@ -256,52 +289,72 @@ class GeneralSection extends StatelessWidget {
     final value = await _promptText(
       context,
       title: 'settings.display_name'.tr(),
-      hint: 'How you\'re shown to collaborators',
+      hint: 'settings.hint_display_name'.tr(),
       initial: auth.currentUser?.displayName ?? '',
     );
     if (value == null) return;
     final ok = await auth.updateProfile(displayName: value);
     if (!context.mounted) return;
-    _toast(context, ok ? 'Display name saved' : 'Failed: ${auth.lastError ?? ''}');
+    _toast(
+        context,
+        ok
+            ? 'settings.toast_display_name_saved'.tr()
+            : 'settings.toast_update_failed'
+                .tr(namedArgs: {'error': auth.lastError ?? ''}));
   }
 
   Future<void> _editPhone(BuildContext context, AuthService auth) async {
     final value = await _promptText(
       context,
       title: 'settings.phone'.tr(),
-      hint: 'Optional — used by MFA and activity alerts',
+      hint: 'settings.hint_phone'.tr(),
       initial: auth.currentUser?.phone ?? '',
     );
     if (value == null) return;
     final ok = await auth.updateProfile(phone: value);
     if (!context.mounted) return;
-    _toast(context, ok ? 'Phone saved' : 'Failed: ${auth.lastError ?? ''}');
+    _toast(
+        context,
+        ok
+            ? 'settings.toast_phone_saved'.tr()
+            : 'settings.toast_update_failed'
+                .tr(namedArgs: {'error': auth.lastError ?? ''}));
   }
 
   Future<void> _editLocale(BuildContext context, AuthService auth) async {
     final value = await _promptText(
       context,
       title: 'settings.locale'.tr(),
-      hint: 'BCP-47 tag (e.g. fr-FR, en-US, de-DE)',
+      hint: 'settings.hint_locale'.tr(),
       initial: auth.currentUser?.locale ?? '',
     );
     if (value == null) return;
     final ok = await auth.updateProfile(locale: value);
     if (!context.mounted) return;
-    _toast(context, ok ? 'Locale saved' : 'Failed: ${auth.lastError ?? ''}');
+    _toast(
+        context,
+        ok
+            ? 'settings.toast_locale_saved'.tr()
+            : 'settings.toast_update_failed'
+                .tr(namedArgs: {'error': auth.lastError ?? ''}));
   }
 
   Future<void> _editTimezone(BuildContext context, AuthService auth) async {
     final value = await _promptText(
       context,
       title: 'settings.timezone'.tr(),
-      hint: 'IANA tz (e.g. Europe/Paris, America/New_York)',
+      hint: 'settings.hint_timezone'.tr(),
       initial: auth.currentUser?.timezone ?? '',
     );
     if (value == null) return;
     final ok = await auth.updateProfile(timezone: value);
     if (!context.mounted) return;
-    _toast(context, ok ? 'Timezone saved' : 'Failed: ${auth.lastError ?? ''}');
+    _toast(
+        context,
+        ok
+            ? 'settings.toast_timezone_saved'.tr()
+            : 'settings.toast_update_failed'
+                .tr(namedArgs: {'error': auth.lastError ?? ''}));
   }
 
   Future<void> _changePassword(
@@ -316,8 +369,14 @@ class GeneralSection extends StatelessWidget {
       newPassword: result.$2,
     );
     if (!context.mounted) return;
-    _toast(context,
-        ok ? 'Password changed' : 'Failed: ${auth.lastError ?? 'rejected'}');
+    _toast(
+        context,
+        ok
+            ? 'settings.toast_password_changed'.tr()
+            : 'settings.toast_update_failed'.tr(namedArgs: {
+                'error':
+                    auth.lastError ?? 'settings.toast_rejected'.tr()
+              }));
   }
 
   Future<String?> _promptText(
@@ -789,6 +848,84 @@ class _ReadOnlyChip extends StatelessWidget {
           fontWeight: FontWeight.w700,
           letterSpacing: 0.5,
         ),
+      ),
+    );
+  }
+}
+
+// ─── Notification preferences card ──────────────────────────────
+//
+// Renders three toggles backed by `attributes.notification_prefs.*`.
+// Each toggle fires a deep-merge PUT so untouched keys (marketing
+// etc.) are preserved. The card is the primary surface exposing
+// the daemon's 2026-04 server-synced notification bag to the user.
+
+class _NotificationPrefsCard extends StatelessWidget {
+  final Map<String, dynamic> prefs;
+  final Future<void> Function(String key, bool value) onToggle;
+
+  const _NotificationPrefsCard({
+    required this.prefs,
+    required this.onToggle,
+  });
+
+  bool _read(String key, {bool defaultValue = false}) {
+    final raw = prefs[key];
+    if (raw is bool) return raw;
+    return defaultValue;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsCard(
+      label: 'settings.notification_prefs'.tr(),
+      children: [
+        _Toggle(
+          icon: Icons.mail_outline_rounded,
+          label: 'settings.notify_email'.tr(),
+          value: _read('email', defaultValue: true),
+          onChanged: (v) => onToggle('email', v),
+        ),
+        _Toggle(
+          icon: Icons.notifications_active_outlined,
+          label: 'settings.notify_push'.tr(),
+          value: _read('push', defaultValue: false),
+          onChanged: (v) => onToggle('push', v),
+        ),
+        _Toggle(
+          icon: Icons.campaign_outlined,
+          label: 'settings.notify_marketing'.tr(),
+          value: _read('marketing', defaultValue: false),
+          onChanged: (v) => onToggle('marketing', v),
+        ),
+      ],
+    );
+  }
+}
+
+class _Toggle extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  const _Toggle({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsRow(
+      icon: icon,
+      label: label,
+      subtitle: value
+          ? 'settings.toggle_on'.tr()
+          : 'settings.toggle_off'.tr(),
+      trailing: Switch(
+        value: value,
+        onChanged: onChanged,
       ),
     );
   }

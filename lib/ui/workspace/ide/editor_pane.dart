@@ -68,6 +68,13 @@ class _EditorPaneState extends State<EditorPane> {
     debugPrint('EditorPane.initState path=${widget.path}');
     FileContentService().addListener(_onContentChanged);
     AppUiConfigService().addListener(_onConfigChanged);
+    // Rebuild on every module mutation — the diff view needs to
+    // repaint when the daemon ships a new ``unified_diff_pending``
+    // via ``preview:resource_patched``. Without this the editor
+    // stays frozen on the first-load diff and subsequent writes
+    // only update the underlying content without repainting the
+    // gutter overlay.
+    WorkspaceModule().addListener(_onModuleChanged);
     _load();
   }
 
@@ -76,7 +83,18 @@ class _EditorPaneState extends State<EditorPane> {
     debugPrint('EditorPane.dispose path=${widget.path}');
     FileContentService().removeListener(_onContentChanged);
     AppUiConfigService().removeListener(_onConfigChanged);
+    WorkspaceModule().removeListener(_onModuleChanged);
     super.dispose();
+  }
+
+  /// Light rebuild — we only read the module's live ``content`` /
+  /// ``unifiedDiffPending`` for the diff overlay, no HTTP round-trip
+  /// needed. A full reload is still triggered by
+  /// [FileContentService] when the baseline changes (approve /
+  /// reject / session switch).
+  void _onModuleChanged() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _onConfigChanged() {
@@ -154,42 +172,53 @@ class _EditorPaneState extends State<EditorPane> {
 
   /// Reconstruct DiffLines. Priority order:
   ///
-  ///   1. **Local LCS over (baseline, content)** — guaranteed to
-  ///      surface BOTH insertions and deletions for every modified
-  ///      region. This is the only source that survives daemon
-  ///      builds where `unified_diff_pending` rewrites a "-old/+new"
-  ///      replace as a plain "+new" (silently dropping the deletion
-  ///      row), which is exactly what the user was seeing.
+  ///   1. **Daemon's `unified_diff_pending`** (via the LIVE module
+  ///      payload, with fetched-content as fallback) — computed
+  ///      server-side as ``_safe_unified_diff(baseline, current)``,
+  ///      so it's the canonical cumulative diff vs the last-approved
+  ///      baseline. Using this source makes multi-write edits show
+  ///      every change since the last approval, not just the last
+  ///      operation (which is what the previous local-LCS priority
+  ///      produced whenever the fetched `baseline` lagged behind).
   ///
-  ///   2. **Daemon's unified diff** — kept as a fallback for files
-  ///      where we don't have the baseline locally (e.g. files
-  ///      fetched before the baseline endpoint was plumbed, or
-  ///      binary blobs the client skips).
+  ///   2. **Local LCS over (baseline, current_content)** — kept as a
+  ///      fallback for files that have no daemon diff yet (never
+  ///      approved AND the diff endpoint returned empty) so the UI
+  ///      still shows something.
   ///
   ///   3. Empty — the caller renders "No diff available".
   ///
-  /// We read `content` from [WorkspaceModule] when available instead
-  /// of from the fetched [WorkspaceFileContent]: the module tracks
-  /// the daemon's streaming `preview:resource_patched` events and is
+  /// ``content`` reads from [WorkspaceModule] when available instead
+  /// of the fetched [WorkspaceFileContent]: the module tracks the
+  /// daemon's streaming `preview:resource_patched` events and is
   /// guaranteed to carry the latest content, while `_content` can
-  /// lag by one round-trip if the file-content cache didn't see a
-  /// fresh `updatedAt` bump. That mismatch was the "diff stuck on
-  /// first edit" symptom users were hitting.
+  /// lag by one round-trip if the cache didn't see a fresh
+  /// `updatedAt` bump.
   List<DiffLine> _buildDiff(WorkspaceFileContent c) {
     final module = WorkspaceModule();
     final moduleFile = module.files[widget.path];
     final content = moduleFile?.content ?? c.file.content;
 
-    // Baseline resolution order (most specific first):
-    //   1. Daemon's `baseline` on the fetched content — the
-    //      authoritative "last approved" state when one exists.
-    //   2. Our session baseline snapshot — the file's content
-    //      BEFORE the agent's first edit in this session, seeded
-    //      from `previous_content` in the initial event. Gives us
-    //      true deletions even when the daemon never stored an
-    //      approved baseline.
-    //   3. Empty string — brand-new file, nothing to compare against;
-    //      the diff will show every line as added.
+    // Daemon's unified_diff_pending — live first (module tracks the
+    // latest resource_patched payload), then the fetched version as
+    // fallback for the first render after file open when the module
+    // hasn't seen an event yet.
+    for (final diff in [
+      moduleFile?.unifiedDiffPending ?? '',
+      c.unifiedDiffPending,
+      c.file.unifiedDiff ?? '',
+    ]) {
+      if (diff.isNotEmpty && looksLikeUnifiedDiff(diff)) {
+        final parsed = parseUnifiedDiff(diff);
+        if (parsed.isNotEmpty) return parsed;
+      }
+    }
+
+    // Fallback — no daemon diff available. Recompute locally against
+    // the best baseline we have (daemon `c.baseline` is the approved
+    // one; our session snapshot captures the file's state BEFORE the
+    // agent's first edit so deletions render even for never-approved
+    // files; empty string means brand-new file).
     final daemonBaseline = c.baseline;
     final sessionBaseline = module.sessionBaselineFor(widget.path);
     final baseline = daemonBaseline.isNotEmpty
@@ -201,12 +230,6 @@ class _EditorPaneState extends State<EditorPane> {
       final hasEdits = local.any((l) =>
           l.type == DiffLineType.added || l.type == DiffLineType.removed);
       if (hasEdits) return local;
-    }
-    for (final diff in [c.unifiedDiffPending, c.file.unifiedDiff ?? '']) {
-      if (diff.isNotEmpty && looksLikeUnifiedDiff(diff)) {
-        final parsed = parseUnifiedDiff(diff);
-        if (parsed.isNotEmpty) return parsed;
-      }
     }
     return chooseDiff(
       previousContent: baseline,

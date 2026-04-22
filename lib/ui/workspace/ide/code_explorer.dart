@@ -691,17 +691,20 @@ class _FileTileState extends State<_FileTile> {
                   ),
                 ),
               ),
-              // Gutter counters — "+N -M". The WorkspaceModule
-              // tracks these client-side by summing per-op
-              // insertions/deletions across consecutive writes (see
-              // `_updatePendingAggregate`). This replaces the
-              // daemon's `insertions_pending` / `deletions_pending`
-              // fields, which on several builds reset to the last
-              // operation's count instead of accumulating.
+              // Gutter counters — "+N -M" since the last approval.
+              // Daemon-authoritative: ``insertions_pending`` /
+              // ``deletions_pending`` are computed server-side via
+              // ``SequenceMatcher(baseline, current)`` so they're
+              // ALWAYS cumulative vs the last-approved baseline.
+              // ``pendingInsertionsEffective`` prefers the count
+              // parsed from ``unified_diff_pending`` (the canonical
+              // source) and falls back to the raw integer counters.
+              // The old client-side aggregate accumulated deltas
+              // across rebuilds which either drifted or showed only
+              // the last op depending on event order.
               Builder(builder: (ctx) {
-                final mod = WorkspaceModule();
-                final ins = mod.pendingInsertionsFor(file.path);
-                final del = mod.pendingDeletionsFor(file.path);
+                final ins = file.pendingInsertionsEffective;
+                final del = file.pendingDeletionsEffective;
                 if (ins <= 0 && del <= 0) return const SizedBox.shrink();
                 return Padding(
                   padding: const EdgeInsets.only(left: 6),

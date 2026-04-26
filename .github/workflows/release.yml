@@ -1,0 +1,174 @@
+# Build & publish Flutter desktop binaries on every `vX.Y.Z` tag.
+#
+# How to release:
+#   1. Bump `version:` in pubspec.yaml (e.g. 1.0.0+1 → 1.1.0+2)
+#   2. Commit + push
+#   3. Tag and push the tag:
+#        git tag v1.1.0
+#        git push origin v1.1.0
+#   4. Workflow runs ~12-15 min on 3 parallel runners
+#   5. A GitHub Release appears with 3 attached binaries
+#   6. The web landing's "Download for X" buttons immediately point to it
+#      via the /releases/latest/download/... URL pattern.
+#
+# Manual run:
+#   Actions → "Release Flutter Desktop" → Run workflow
+#
+# No code-signing yet:
+#   - macOS: users get Gatekeeper warning → right-click → Open
+#   - Windows: users get SmartScreen → More info → Run anyway
+#   - Linux: AppImage runs as-is
+# See docs/RELEASE.md for adding signing later.
+
+name: Release Flutter Desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  FLUTTER_CHANNEL: stable
+
+jobs:
+  # ─── macOS DMG ─────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - run: flutter --version
+      - run: flutter config --enable-macos-desktop
+      - run: flutter pub get
+
+      - name: Install flutter_distributor
+        run: dart pub global activate flutter_distributor
+
+      - name: Package as DMG
+        run: flutter_distributor package --platform=macos --targets=dmg
+
+      - name: Normalize artifact name
+        run: |
+          mkdir -p out
+          mv dist/*/*.dmg out/digitorn-macos.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: out/digitorn-macos.dmg
+          retention-days: 7
+
+  # ─── Windows EXE installer ─────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - run: flutter --version
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Install flutter_distributor
+        run: dart pub global activate flutter_distributor
+
+      - name: Package as EXE installer
+        run: flutter_distributor package --platform=windows --targets=exe
+
+      - name: Normalize artifact name
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $exe = Get-ChildItem -Path dist -Recurse -Filter *.exe | Select-Object -First 1
+          Move-Item $exe.FullName out/digitorn-windows.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: out/digitorn-windows.exe
+          retention-days: 7
+
+  # ─── Linux AppImage ────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libgtk-3-dev \
+            libsecret-1-dev \
+            libjsoncpp-dev \
+            libstdc++-12-dev \
+            libfuse2 \
+            file \
+            wget
+
+      - run: flutter --version
+      - run: flutter config --enable-linux-desktop
+      - run: flutter pub get
+
+      - name: Install flutter_distributor
+        run: dart pub global activate flutter_distributor
+
+      - name: Package as AppImage
+        run: flutter_distributor package --platform=linux --targets=appimage
+
+      - name: Normalize artifact name
+        run: |
+          mkdir -p out
+          mv dist/*/*.AppImage out/digitorn-linux.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: out/digitorn-linux.AppImage
+          retention-days: 7
+
+  # ─── Publish GitHub Release with all 3 binaries ────────────
+  release:
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Inspect artifacts
+        run: ls -R artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/macos-dmg/digitorn-macos.dmg
+            artifacts/windows-exe/digitorn-windows.exe
+            artifacts/linux-appimage/digitorn-linux.AppImage
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -19,6 +19,7 @@ import 'package:flutter/foundation.dart';
 import '../models/app_package.dart' show PermissionsRequired;
 import '../models/app_summary.dart';
 import 'auth_service.dart';
+import 'cache/swr_cache.dart';
 
 /// Raised by anything that hits the unified app API and fails in a
 /// way the UI needs to react to beyond "show a toast". Carries the
@@ -124,6 +125,18 @@ class AppCatalogService extends ChangeNotifier {
 
   // ─── In-memory cache shared by Hub + App Panel ───────────────────────
   List<AppSummary> _apps = const [];
+
+  /// Stale-while-revalidate cache for the ``/api/apps`` endpoint.
+  /// Tab switches used to hit the daemon every time; now the cached
+  /// list is served immediately and revalidated in background only
+  /// when it's older than [_listCacheTtl]. Invalidated by
+  /// [invalidateListCache] on explicit lifecycle changes (install,
+  /// uninstall, enable, disable, redeploy).
+  static const Duration _listCacheTtl = Duration(minutes: 5);
+  final SwrCache<String, List<AppSummary>> _listCache = SwrCache(
+    ttl: _listCacheTtl,
+    name: 'apps_list',
+  );
   List<AppSummary> get apps => List.unmodifiable(_apps);
 
   /// `runtime_status == "running"` subset — the only view surfaced to
@@ -151,11 +164,26 @@ class AppCatalogService extends ChangeNotifier {
   Future<List<AppSummary>> refresh({
     bool includeInstalled = true,
     bool includeDisabled = false,
+    /// Force a network round-trip, skipping the SWR cache. Used by
+    /// the pull-to-refresh gesture and right after explicit lifecycle
+    /// mutations (install, uninstall, enable, disable).
+    bool force = false,
   }) async {
-    isLoading = true;
+    final cacheKey = 'apps:installed=$includeInstalled:disabled=$includeDisabled';
+    // When the cache is fresh we return instantly and skip all the
+    // loading-flag / notify churn — the UI already has the right
+    // data. This is what makes tab-switching feel instant.
+    if (!force && _listCache.isFresh(cacheKey)) {
+      final cached = _listCache.peek(cacheKey);
+      if (cached != null) {
+        _apps = cached;
+        return _apps;
+      }
+    }
+
     lastError = null;
-    notifyListeners();
-    try {
+
+    Future<List<AppSummary>> fetch() async {
       final resp = await _dio.get(
         '$_base/api/apps',
         queryParameters: {
@@ -166,10 +194,30 @@ class AppCatalogService extends ChangeNotifier {
       final envelope = _envelope(resp);
       final rawList = envelope['data'];
       final list = rawList is List ? rawList : const [];
-      _apps = list
+      return list
           .whereType<Map>()
           .map((m) => AppSummary.fromJson(m.cast<String, dynamic>()))
           .toList();
+    }
+
+    // Serve stale-if-present immediately, revalidate in background.
+    // On cold miss we await the fetch and show the spinner.
+    final hadCache = _listCache.peek(cacheKey) != null;
+    if (!hadCache) {
+      isLoading = true;
+      notifyListeners();
+    }
+    try {
+      final result = await _listCache.getOrFetch(
+        key: cacheKey,
+        fetcher: fetch,
+        force: force,
+        onRevalidated: (fresh) {
+          _apps = fresh;
+          notifyListeners();
+        },
+      );
+      _apps = result;
       return _apps;
     } on AppCatalogException catch (e) {
       lastError = e.message;
@@ -179,9 +227,18 @@ class AppCatalogService extends ChangeNotifier {
       debugPrint('AppCatalogService.refresh error: $e');
       return _apps;
     } finally {
-      isLoading = false;
+      if (isLoading) {
+        isLoading = false;
+      }
       notifyListeners();
     }
+  }
+
+  /// Drop the SWR cache — the next ``refresh()`` call will hit the
+  /// daemon. Call after any mutation that changes the apps list:
+  /// install, uninstall, enable, disable, redeploy.
+  void invalidateListCache() {
+    _listCache.clear();
   }
 
   // ─── GET /api/apps/{id} — canonical detail with drift + metadata ────
@@ -254,8 +311,12 @@ class AppCatalogService extends ChangeNotifier {
     final app = AppSummary.fromJson(appJson);
     // Refresh the cache so the Hub sees the new row without a second
     // round-trip. Cheap because the list is typically small (<50).
+    // The server just mutated the apps list — drop the SWR cache so
+    // the refresh actually goes to the network instead of serving the
+    // stale copy from before the enable/disable.
+    invalidateListCache();
     // ignore: discarded_futures
-    refresh();
+    refresh(force: true);
     return InstallResult(
       app: app,
       deployed: deployed,
@@ -288,8 +349,12 @@ class AppCatalogService extends ChangeNotifier {
     final deployed = data['deployed'] == true;
     final deployError = data['deploy_error'] as String?;
     final app = AppSummary.fromJson(appJson);
+    // The server just mutated the apps list — drop the SWR cache so
+    // the refresh actually goes to the network instead of serving the
+    // stale copy from before the enable/disable.
+    invalidateListCache();
     // ignore: discarded_futures
-    refresh();
+    refresh(force: true);
     return InstallResult(
       app: app,
       deployed: deployed,
@@ -356,8 +421,12 @@ class AppCatalogService extends ChangeNotifier {
         if (scope != null && scope.isNotEmpty) 'scope': scope,
       },
     );
+    // The server just mutated the apps list — drop the SWR cache so
+    // the refresh actually goes to the network instead of serving the
+    // stale copy from before the enable/disable.
+    invalidateListCache();
     // ignore: discarded_futures
-    refresh();
+    refresh(force: true);
     return _envelope(resp)['success'] == true;
   }
 
@@ -368,8 +437,12 @@ class AppCatalogService extends ChangeNotifier {
         if (scope != null && scope.isNotEmpty) 'scope': scope,
       },
     );
+    // The server just mutated the apps list — drop the SWR cache so
+    // the refresh actually goes to the network instead of serving the
+    // stale copy from before the enable/disable.
+    invalidateListCache();
     // ignore: discarded_futures
-    refresh();
+    refresh(force: true);
     return _envelope(resp)['success'] == true;
   }
 
@@ -412,8 +485,12 @@ class AppCatalogService extends ChangeNotifier {
         errorCode: env['error'] as String?,
       );
     }
+    // The server just mutated the apps list — drop the SWR cache so
+    // the refresh actually goes to the network instead of serving the
+    // stale copy from before the enable/disable.
+    invalidateListCache();
     // ignore: discarded_futures
-    refresh();
+    refresh(force: true);
     return true;
   }
 
@@ -440,8 +517,12 @@ class AppCatalogService extends ChangeNotifier {
         errorCode: env['error'] as String?,
       );
     }
+    // The server just mutated the apps list — drop the SWR cache so
+    // the refresh actually goes to the network instead of serving the
+    // stale copy from before the enable/disable.
+    invalidateListCache();
     // ignore: discarded_futures
-    refresh();
+    refresh(force: true);
     return true;
   }
 
@@ -508,13 +589,20 @@ class AppCatalogService extends ChangeNotifier {
     // 2xx success or 2xx idempotent no-op — both surface the same map
     // shape; caller can read `success` to branch.
     if (status >= 200 && status < 300) return env;
-    // 4xx / 5xx — unwrap error/detail if present.
-    final detail =
-        (env['detail'] as Map?)?.cast<String, dynamic>() ?? const {};
+    // 4xx / 5xx — unwrap error/detail if present. FastAPI's
+    // HTTPException(detail="...") sends a String, while structured
+    // errors (HTTPException(detail={...})) send a Map. Handle both
+    // shapes so checkUpdate doesn't blow up on plain-string details.
+    final rawDetail = env['detail'];
+    final Map<String, dynamic> detail = rawDetail is Map
+        ? rawDetail.cast<String, dynamic>()
+        : const {};
+    final detailMsg = rawDetail is String ? rawDetail : null;
     final err = (detail['error'] as String?) ??
         (env['error'] as String?) ??
         'http_$status';
     final msg = (detail['message'] as String?) ??
+        detailMsg ??
         (env['message'] as String?) ??
         err;
     if (status == 501) {
@@ -532,7 +620,13 @@ class AppCatalogService extends ChangeNotifier {
     if (resp.statusCode != 409) return;
     final body = resp.data;
     if (body is! Map) return;
-    final detail = (body['detail'] as Map?)?.cast<String, dynamic>();
+    // detail may be a Map (structured) or a String (plain message) —
+    // only Maps carry an `error` field, so a String detail just falls
+    // through to the body-level fallback.
+    final rawDetail = body['detail'];
+    final detail = rawDetail is Map
+        ? rawDetail.cast<String, dynamic>()
+        : null;
     final error = detail?['error'] ?? body['error'];
     if (error == 'permissions_required') {
       final payload = detail ?? body.cast<String, dynamic>();

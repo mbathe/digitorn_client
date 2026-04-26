@@ -146,7 +146,6 @@ class _RecordingRow extends StatelessWidget {
   }
 }
 
-// ─── Processing state (after Stop, while daemon transcribes) ──────
 
 class _ProcessingRow extends StatelessWidget {
   final Color color;

@@ -4,6 +4,7 @@
 
 import '../../models/chat_message.dart';
 import '../../services/queue_service.dart';
+import '../../services/session_state_controller.dart';
 
 /// True while the daemon is visibly doing something for the current
 /// turn. Used by the response-timeout to avoid a false "no response"
@@ -29,15 +30,40 @@ bool hasLiveAgentActivity({required bool hadTokens, required String phase}) {
 
 /// Decides whether the next send must be routed through the queue
 /// (busy=true) or can hit the daemon directly (busy=false).
+///
+/// Three independent signals, logically OR-ed — true if ANY says
+/// "a turn is in flight":
+///
+///   * ``isSending``           — local send in progress
+///   * ``pendingCountFor > 0`` — queued messages waiting
+///   * ``isTurnActive``        — authoritative state envelope from
+///                               the daemon (covers cross-device
+///                               and missed-event cases)
+///
+/// Notably absent: ``queue.runningFor(sessionId) != null``. That
+/// signal lags: the daemon emits ``turn_complete`` first (our local
+/// ``isSending`` flips false) and ``message_done`` ~200 ms later
+/// (``runningFor`` finally clears). A user who types a follow-up
+/// inside that 200 ms window would have seen it queued for no
+/// reason — which is exactly the "my message went to queue but the
+/// turn was already done" bug. ``isTurnActive`` covers the same
+/// case without the lag because the daemon clears its ``TurnState``
+/// synchronously when the turn ends.
 bool computeBusy({
   required bool isSending,
   required String sessionId,
   QueueService? queue,
 }) {
   final q = queue ?? QueueService();
-  return isSending ||
-      q.runningFor(sessionId) != null ||
-      q.pendingCountFor(sessionId) > 0;
+  final envelopeTurnActive = SessionStateController().isTurnActive(sessionId);
+  final pendingCount = q.pendingCountFor(sessionId);
+  final busy = isSending || pendingCount > 0 || envelopeTurnActive;
+  if (busy) {
+    // ignore: avoid_print
+    print('[BUSY] sid=$sessionId isSending=$isSending '
+        'pendingCount=$pendingCount envelopeTurnActive=$envelopeTurnActive');
+  }
+  return busy;
 }
 
 /// Walks the dedupe cascade over [messages] to find the optimistic

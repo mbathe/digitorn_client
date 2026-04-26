@@ -24,6 +24,18 @@ import '../../theme/app_theme.dart';
 import 'credential_picker_dialog.dart';
 
 class CredentialsGateV2 {
+  /// Per-app TTL cache for a successful gate result.
+  /// Key = appId, value = when the "all secrets OK" was last confirmed.
+  /// The common path (app already configured) skips the HTTP call entirely
+  /// for 5 minutes, eliminating the blocking network round-trip on every
+  /// app open.
+  static final Map<String, DateTime> _okCache = {};
+  static const _cacheTtl = Duration(minutes: 5);
+
+  /// Invalidate the cache for [appId] — call this after the user
+  /// removes or rotates a credential for that app.
+  static void invalidate(String appId) => _okCache.remove(appId);
+
   /// Run the full gate for [appId]. Returns `true` when the app is
   /// ready to start (no missing secrets remain), `false` when the
   /// user cancelled or a missing secret could not be resolved.
@@ -31,6 +43,14 @@ class CredentialsGateV2 {
     BuildContext context, {
     required String appId,
   }) async {
+    // Fast path: if this app was already confirmed ready recently, skip
+    // the HTTP call. This eliminates the blocking network round-trip that
+    // delays every app open when credentials are already in place.
+    final cached = _okCache[appId];
+    if (cached != null && DateTime.now().difference(cached) < _cacheTtl) {
+      return true;
+    }
+
     RequiredSecretsInfo info;
     try {
       info = await CredentialsV2Service().fetchRequiredSecrets(appId);
@@ -39,12 +59,18 @@ class CredentialsGateV2 {
       // in its flow). Everything else: swallow and proceed so we
       // don't block on a transient daemon hiccup.
       if (e.statusCode == 404) return true;
+      _okCache[appId] = DateTime.now();
       return true;
     } catch (_) {
+      _okCache[appId] = DateTime.now();
       return true;
     }
 
-    if (info.missingCount == 0) return true;
+    if (info.missingCount == 0) {
+      // Cache the "all OK" result so the next open skips the HTTP call.
+      _okCache[appId] = DateTime.now();
+      return true;
+    }
 
     // Make sure we have the provider catalogue so the inline "create
     // new" form can render the right fields.
@@ -60,6 +86,8 @@ class CredentialsGateV2 {
       );
       if (!resolved) return false;
     }
+    // All secrets resolved — cache the result.
+    _okCache[appId] = DateTime.now();
     return true;
   }
 

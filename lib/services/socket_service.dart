@@ -3,6 +3,7 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'package:flutter/foundation.dart';
 import 'auth_service.dart';
 import 'session_service.dart';
+import 'session_state_controller.dart';
 import 'user_events_service.dart';
 
 /// Single Socket.IO connection to the daemon's `/events` namespace.
@@ -103,8 +104,30 @@ class DigitornSocketService extends ChangeNotifier {
     _disposeSocket();
     _lastTokenUsed = token;
 
+    // Transport selection:
+    //   - Native (desktop / mobile): WebSocket only is fine. dart:io
+    //     handles the handshake, custom Authorization headers work,
+    //     no CORS preflight.
+    //   - Web: browsers forbid custom headers on the WebSocket
+    //     upgrade handshake (the W3C WebSocket API just drops them),
+    //     and some corporate proxies block bare `ws://` altogether.
+    //     Defaulting to ``['polling', 'websocket']`` lets socket.io
+    //     handshake over HTTP first (where headers DO pass AND CORS
+    //     preflight succeeds via the daemon's allow-list) and then
+    //     upgrade to WebSocket transparently. Forcing websocket-only
+    //     was making Flutter Web stay stuck at "Socket connect error"
+    //     indefinitely — the exact symptom the user reported.
+    //
+    // ``setAuth({token})`` and ``setQuery({token})`` work on every
+    // transport/platform, so even when the Authorization header is
+    // dropped by the browser the daemon still authenticates the
+    // connection.
+    final transports = kIsWeb
+        ? const ['polling', 'websocket']
+        : const ['websocket'];
+
     final options = io.OptionBuilder()
-        .setTransports(['websocket'])
+        .setTransports(transports)
         .disableAutoConnect()
         .setAuth({'token': token})
         .setQuery({'token': token})
@@ -262,7 +285,19 @@ class DigitornSocketService extends ChangeNotifier {
     if (app != null) joinApp(app);
     final sid = _currentSessionId;
     final sAppId = _currentSessionAppId;
-    if (sid != null && sAppId != null) joinSession(sAppId, sid);
+    if (sid != null && sAppId != null) {
+      joinSession(sAppId, sid);
+      // Force an HTTP resync alongside the Socket.IO rejoin. The
+      // rejoin emits state:snapshot and replays missed events via the
+      // bus, but network blips can lose both — belt-and-braces
+      // HTTP pull guarantees the UI converges even if the socket
+      // replay is dropped.
+      try {
+        SessionStateController().onReconnect(
+          appId: sAppId, sessionId: sid,
+        );
+      } catch (_) {}
+    }
   }
 
   // ── Event routing ──────────────────────────────────────────────────────────
@@ -273,7 +308,7 @@ class DigitornSocketService extends ChangeNotifier {
     // Agent (17 types)
     'token', 'out_token', 'in_token', 'stream_done', 'token_usage',
     'thinking_started', 'thinking_delta', 'thinking',
-    'tool_start', 'tool_call',
+    'tool_start', 'tool_call', 'tool_call_streaming',
     'status', 'hook', 'hook_notification',
     'result', 'turn_complete', 'error', 'abort',
     'memory_update', 'agent_event', 'terminal_output', 'diagnostics',
@@ -305,7 +340,12 @@ class DigitornSocketService extends ChangeNotifier {
       type.startsWith('queue:') ||
       type.startsWith('memory:') ||
       type.startsWith('session:') ||
-      type.startsWith('active_ops:');
+      type.startsWith('active_ops:') ||
+      // state:snapshot / turn:heartbeat — the session state envelope
+      // contract. Routed to SessionStateController alongside the
+      // existing consumers.
+      type.startsWith('state:') ||
+      type.startsWith('turn:');
 
   /// Visible for testing — routes a raw Socket.IO envelope to the
   /// appropriate consumer stream.
@@ -355,12 +395,48 @@ class DigitornSocketService extends ChangeNotifier {
     final ts = raw['ts'] as String?;
 
     // Fan out preview events to the dedicated stream.
+    //
+    // CRITICAL: pass ``session_id`` through so PreviewStore can drop
+    // events that belong to a session the user has since left. Without
+    // this, a late ``preview:resource_set`` for session A arriving
+    // after the user switched to session B overwrites B's workspace
+    // with A's files. Every preview envelope the daemon emits carries
+    // ``session_id`` at the top level (see ``socketio_bus.py``
+    // ``_envelope`` contract) — we just need to forward it.
     if (type.startsWith('preview:')) {
       debugPrint('Socket: preview event → $type (payload keys: ${payload.keys})');
-      _previewEventsCtrl.add({'type': type, 'payload': payload, 'seq': seq});
+      _previewEventsCtrl.add({
+        'type': type,
+        'payload': payload,
+        'seq': seq,
+        'session_id': sessionId,
+        'app_id': appId,
+      });
     }
 
     if (_sessionEventTypes.contains(type) || _isSessionPrefixed(type)) {
+      // Route state-envelope events to the SessionStateController in
+      // PARALLEL with the legacy SessionService path so the UI has an
+      // authoritative source of truth for turn/queue state. The
+      // legacy path still runs so existing reducers / bubble updates
+      // keep working — the controller is additive, not a replacement.
+      if (sessionId != null && sessionId.isNotEmpty) {
+        try {
+          if (type == 'state:snapshot') {
+            SessionStateController().applySnapshotJson(payload);
+          } else {
+            SessionStateController().applyEvent(
+              sessionId: sessionId,
+              seq: seq ?? 0,
+              type: type,
+              payload: payload,
+            );
+          }
+        } catch (e) {
+          debugPrint('state controller route failed for $type: $e');
+        }
+      }
+
       SessionService().injectSocketEvent({
         'type': type,
         'data': payload,

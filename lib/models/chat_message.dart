@@ -10,6 +10,11 @@ enum MessageRole { user, assistant, system }
 enum ContentBlockType {
   text,
   toolCall,
+  /// Live placeholder while the LLM is composing a tool call's args
+  /// JSON, BEFORE execution. Carries `callId`, `toolName`,
+  /// `thinkingTokens` (per-call litellm count of args). Replaced by a
+  /// real `toolCall` block when the matching `tool_start` event lands.
+  toolCallStreaming,
   thinking,
   agentEvent,
   hookEvent,
@@ -46,8 +51,18 @@ class ContentBlock {
   // Tool call block
   ToolCall? toolCall;
 
+  // Tool-call-streaming placeholder
+  String? streamingCallId;
+  String? streamingToolName;
+
   // Thinking block
   bool thinkingActive;
+  /// Per-block cumulative completion-token count, sourced from the
+  /// daemon's SSE `thinking_delta`/`thinking` events `payload.count`.
+  /// Each thinking block has its OWN counter — it does NOT accumulate
+  /// across blocks or include the assistant's text-response tokens.
+  /// Mutated post-construction via [ChatMessage.setActiveThinkingTokens].
+  int thinkingTokens = 0;
 
   // Agent event block
   AgentEventData? agentEvent;
@@ -63,6 +78,8 @@ class ContentBlock {
     this.textContent = '',
     this.toolCall,
     this.thinkingActive = false,
+    this.streamingCallId,
+    this.streamingToolName,
     this.agentEvent,
     this.hookEvent,
     this.widget,
@@ -73,6 +90,16 @@ class ContentBlock {
 
   factory ContentBlock.tool(ToolCall call) =>
       ContentBlock._(type: ContentBlockType.toolCall, toolCall: call);
+
+  factory ContentBlock.toolCallStreaming({
+    required String callId,
+    required String toolName,
+  }) =>
+      ContentBlock._(
+        type: ContentBlockType.toolCallStreaming,
+        streamingCallId: callId,
+        streamingToolName: toolName,
+      );
 
   factory ContentBlock.thinking({String text = '', bool active = true}) =>
       ContentBlock._(
@@ -649,6 +676,135 @@ class ChatMessage extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Set the per-block cumulative thinking-token count from the
+  /// daemon's `thinking_delta`/`thinking` event `payload.count`.
+  /// Lands on the same block currently being filled by
+  /// [appendThinking]/[setThinkingText] — never accumulates across
+  /// blocks, never includes text-response tokens. Monotonically
+  /// increasing — drops are ignored. If no active thinking block
+  /// exists yet, the count is silently buffered onto a fresh block
+  /// created right now (so the very first thinking_delta of a turn
+  /// still gets a place to land before any text or thinking-final
+  /// event has materialized one).
+  void setActiveThinkingTokens(int count) {
+    if (count <= 0) return;
+    ContentBlock? target;
+    for (final b in _timeline.reversed) {
+      if (b.type == ContentBlockType.thinking && b.thinkingActive) {
+        target = b;
+        break;
+      }
+    }
+    if (target == null) {
+      target = ContentBlock.thinking(active: true);
+      _timeline.add(target);
+      _freezePriorThinking(target);
+    }
+    if (count <= target.thinkingTokens) return;
+    target.thinkingTokens = count;
+    notifyListeners();
+  }
+
+  /// Upsert a `toolCallStreaming` placeholder block (one per
+  /// `callId`). Each `tool_call_streaming` SSE event from the daemon
+  /// updates the same block via callId; the count is monotonically
+  /// rising (litellm-tokenized server-side, never goes down). When
+  /// the real `tool_start` arrives, [removeToolCallStreaming] swaps
+  /// the placeholder for the real toolCall block.
+  ///
+  /// Reuses the existing [ContentBlock.thinkingTokens] field as the
+  /// count storage to avoid adding a third token-count field — it's
+  /// per-block and never mixed with thinking-blocks (different
+  /// `type`).
+  void upsertToolCallStreaming({
+    required String callId,
+    required String toolName,
+    required int tokenCount,
+  }) {
+    if (callId.isEmpty) return;
+    ContentBlock? target;
+    for (var i = _timeline.length - 1; i >= 0; i--) {
+      final b = _timeline[i];
+      if (b.type == ContentBlockType.toolCallStreaming &&
+          b.streamingCallId == callId) {
+        target = b;
+        break;
+      }
+    }
+    if (target == null) {
+      target = ContentBlock.toolCallStreaming(
+        callId: callId,
+        toolName: toolName,
+      );
+      _timeline.add(target);
+    } else if (toolName.isNotEmpty &&
+        (target.streamingToolName == null ||
+            target.streamingToolName!.isEmpty)) {
+      target.streamingToolName = toolName;
+    }
+    if (tokenCount > target.thinkingTokens) {
+      target.thinkingTokens = tokenCount;
+    }
+    notifyListeners();
+  }
+
+  /// Drop the placeholder for a given callId. Called when the real
+  /// `tool_start` event arrives — the proper tool card takes over.
+  void removeToolCallStreaming(String callId) {
+    if (callId.isEmpty) return;
+    final before = _timeline.length;
+    _timeline.removeWhere((b) =>
+        b.type == ContentBlockType.toolCallStreaming &&
+        b.streamingCallId == callId);
+    if (_timeline.length != before) notifyListeners();
+  }
+
+  /// Replace the streaming placeholder for a given callId with the
+  /// real toolCall block — atomically and in-place. Keeps the same
+  /// timeline index so the UI doesn't jump when the chip swaps to
+  /// the full card. Falls back to [addOrUpdateToolCall] (append) if
+  /// no placeholder is found (e.g. the chip was filtered or never
+  /// shown for this call).
+  void replaceToolCallStreamingWithCall(ToolCall call) {
+    final id = call.id;
+    if (id.isEmpty) {
+      addOrUpdateToolCall(call);
+      return;
+    }
+    final idx = _timeline.indexWhere((b) =>
+        b.type == ContentBlockType.toolCallStreaming &&
+        b.streamingCallId == id);
+    if (idx < 0) {
+      addOrUpdateToolCall(call);
+      return;
+    }
+    _timeline[idx] = ContentBlock.tool(call);
+    notifyListeners();
+  }
+
+  /// Open a brand-new active thinking block at the end of the
+  /// timeline, freezing every previous thinking block. Called on
+  /// every `thinking_started` SSE event so multi-block turns (think →
+  /// tool → think → tool → ...) get distinct, independently-counted
+  /// thinking sections. Does nothing if the timeline already ends
+  /// with an active thinking block (idempotent — duplicate
+  /// `thinking_started` from a noisy provider doesn't multiply
+  /// blocks).
+  void beginThinkingBlock() {
+    final last = _timeline.isNotEmpty ? _timeline.last : null;
+    if (last != null &&
+        last.type == ContentBlockType.thinking &&
+        last.thinkingActive &&
+        last.textContent.isEmpty &&
+        last.thinkingTokens == 0) {
+      return; // empty block already open — reuse it
+    }
+    final block = ContentBlock.thinking(active: true);
+    _timeline.add(block);
+    _freezePriorThinking(block);
+    notifyListeners();
+  }
+
   /// Apply a `thinking` snapshot (full text for the current reasoning
   /// step). Same rule as [appendThinking] — reuse the tail block only
   /// when it is itself an ACTIVE thinking block; otherwise open a new
@@ -761,6 +917,17 @@ class ChatMessage extends ChangeNotifier {
   /// regress the status (completed/failed never drop back to started
   /// even if events arrive out of order).
   void addOrUpdateToolCall(ToolCall call) {
+    // First check for a streaming placeholder with this call_id —
+    // if found, swap it in-place. Keeps the same timeline index so
+    // the chip → real card transition has zero visual jump.
+    final streamingIdx = _timeline.indexWhere((b) =>
+        b.type == ContentBlockType.toolCallStreaming &&
+        b.streamingCallId == call.id);
+    if (streamingIdx >= 0) {
+      _timeline[streamingIdx] = ContentBlock.tool(call);
+      notifyListeners();
+      return;
+    }
     final i = _timeline.indexWhere(
       (b) =>
           b.type == ContentBlockType.toolCall &&
@@ -884,6 +1051,17 @@ class ChatMessage extends ChangeNotifier {
   void addTokens({int out = 0, int inT = 0}) {
     _outTokens += out;
     if (inT > 0) _inTokens = inT;
+    notifyListeners();
+  }
+
+  /// Set the cumulative completion-token count from the daemon's
+  /// streaming `token` event payload. Monotonically increasing — the
+  /// daemon may emit the same value for several deltas in a row before
+  /// the next litellm tick advances it. Only fires `notifyListeners`
+  /// when the value actually changes, to avoid useless rebuilds.
+  void setOutTokensCumulative(int count) {
+    if (count <= _outTokens) return;
+    _outTokens = count;
     notifyListeners();
   }
 

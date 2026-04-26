@@ -17,13 +17,22 @@ class StarterAppsStep extends StatefulWidget {
 }
 
 class _StarterAppsStepState extends State<StarterAppsStep> {
+  // Pre-checked by default on first visit. Builder + Chat are the
+  // two apps every user actually uses — skipping them means the
+  // Hub is empty after Finish. Users can uncheck Chat if they
+  // really don't want it; Builder stays mandatory.
+  static const Set<String> _defaultSelection = {
+    'digitorn-builder',
+    'digitorn-chat',
+  };
+
   final Set<String> _selected = {};
 
   @override
   void initState() {
     super.initState();
     _selected.addAll(OnboardingService().installedApps);
-    if (_selected.isEmpty) _selected.addAll(_defaultsForRole());
+    if (_selected.isEmpty) _selected.addAll(_defaultSelection);
     // Builder is pre-installed — always part of the runtime.
     _selected.add('digitorn-builder');
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -31,21 +40,6 @@ class _StarterAppsStepState extends State<StarterAppsStep> {
       _syncOut();
       WizardNav.of(context).setCanAdvance(true);
     });
-  }
-
-  Set<String> _defaultsForRole() {
-    switch (OnboardingService().role) {
-      case 'developer':
-        return {'code-review', 'shell-agent', 'doc-writer'};
-      case 'analyst':
-        return {'data-explorer', 'research-assistant'};
-      case 'operator':
-        return {'shell-agent', 'monitor-ops'};
-      case 'researcher':
-        return {'research-assistant', 'doc-writer'};
-      default:
-        return {'chat-general'};
-    }
   }
 
   void _syncOut() {
@@ -68,7 +62,7 @@ class _StarterAppsStepState extends State<StarterAppsStep> {
 
   @override
   Widget build(BuildContext context) {
-    final apps = _appsForRole(OnboardingService().role);
+    final apps = _starterApps();
     final count = _selected.length;
     return WizardStepScaffold(
       eyebrow: 'STEP 03',
@@ -96,21 +90,45 @@ class _StarterAppsStepState extends State<StarterAppsStep> {
             trailing: '6 curated for you',
           ),
           SizedBox(height: DsSpacing.x4),
-          Wrap(
-            spacing: DsSpacing.x3,
-            runSpacing: DsSpacing.x3,
-            children: [
-              for (final a in apps)
-                SizedBox(
-                  width: 240,
-                  child: _AppCard(
-                    app: a,
-                    selected: _selected.contains(a.id),
-                    onTap: () => _toggle(a.id),
+          // LayoutBuilder so the card row adapts to the available
+          // space — on compact screens we get a single-column stack
+          // where cards fill the row, on wide screens the Wrap flows
+          // 2-3 cards per row as designed. A fixed 240 px child
+          // inside a 200 px wide parent used to RenderFlex-overflow
+          // the wizard column on narrow windows.
+          LayoutBuilder(builder: (ctx, constraints) {
+            final w = constraints.maxWidth;
+            if (w < 260) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final a in apps) ...[
+                    _AppCard(
+                      app: a,
+                      selected: _selected.contains(a.id),
+                      onTap: () => _toggle(a.id),
+                    ),
+                    SizedBox(height: DsSpacing.x3),
+                  ],
+                ],
+              );
+            }
+            return Wrap(
+              spacing: DsSpacing.x3,
+              runSpacing: DsSpacing.x3,
+              children: [
+                for (final a in apps)
+                  SizedBox(
+                    width: 240,
+                    child: _AppCard(
+                      app: a,
+                      selected: _selected.contains(a.id),
+                      onTap: () => _toggle(a.id),
+                    ),
                   ),
-                ),
-            ],
-          ),
+              ],
+            );
+          }),
         ],
       ),
     );
@@ -198,11 +216,13 @@ class _BuilderFeatureCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Row(
+                    Wrap(
+                      spacing: DsSpacing.x3,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         Text('Digitorn Builder',
                             style: DsType.h2(color: c.textBright)),
-                        SizedBox(width: DsSpacing.x3),
                         Container(
                           padding: EdgeInsets.symmetric(
                             horizontal: DsSpacing.x3,
@@ -316,6 +336,7 @@ class _BuilderPromptDemoState extends State<_BuilderPromptDemo>
   Widget build(BuildContext context) {
     final c = context.colors;
     final text = _prompts[_promptIndex].substring(0, _charCount);
+    final baseStyle = DsType.body(color: c.textBright);
     return Container(
       decoration: BoxDecoration(
         color: c.inputBg,
@@ -344,26 +365,38 @@ class _BuilderPromptDemoState extends State<_BuilderPromptDemo>
           ),
           SizedBox(width: DsSpacing.x3),
           Expanded(
-            child: DefaultTextStyle(
-              style: DsType.body(color: c.textBright),
-              child: Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
+            // Text.rich gives proper text-level line-wrapping. The
+            // previous ``Wrap`` implementation treated the whole text
+            // as ONE widget child, so as the typed prompt grew
+            // character-by-character the widget expanded past the
+            // available width and RenderFlex overflowed by ~100 k px
+            // (the "99907 pixels on the right" the step 3 crash log
+            // shows). ``WidgetSpan`` lets the blinking cursor flow
+            // inline with the text, moving to the next line
+            // naturally as the prompt wraps.
+            child: Text.rich(
+              TextSpan(
+                style: baseStyle,
                 children: [
-                  Text(text),
-                  AnimatedBuilder(
-                    animation: _cursor,
-                    builder: (_, _) => Opacity(
-                      opacity: _cursor.value > 0.5 ? 1 : 0,
-                      child: Container(
-                        margin: const EdgeInsets.only(left: 1, bottom: 2),
-                        width: 2,
-                        height: 16,
-                        color: c.accentPrimary,
+                  TextSpan(text: text),
+                  WidgetSpan(
+                    alignment: PlaceholderAlignment.middle,
+                    child: AnimatedBuilder(
+                      animation: _cursor,
+                      builder: (_, _) => Opacity(
+                        opacity: _cursor.value > 0.5 ? 1 : 0,
+                        child: Container(
+                          margin: const EdgeInsets.only(left: 1),
+                          width: 2,
+                          height: 16,
+                          color: c.accentPrimary,
+                        ),
                       ),
                     ),
                   ),
                 ],
               ),
+              softWrap: true,
             ),
           ),
         ],
@@ -380,49 +413,27 @@ class _StarterApp {
   const _StarterApp(this.id, this.name, this.desc, this.icon);
 }
 
-List<_StarterApp> _appsForRole(String role) {
-  const all = [
-    _StarterApp('code-review', 'Code Reviewer',
-        'Reviews PRs, suggests fixes.', Icons.rate_review_outlined),
-    _StarterApp('shell-agent', 'Shell Agent',
-        'Runs commands with approval.', Icons.terminal),
-    _StarterApp('doc-writer', 'Doc Writer',
-        'Drafts and edits docs.', Icons.description_outlined),
-    _StarterApp('data-explorer', 'Data Explorer',
-        'Queries CSVs, sheets, SQL.', Icons.insights_outlined),
-    _StarterApp('research-assistant', 'Research Assistant',
-        'Finds, reads, synthesizes.', Icons.menu_book_outlined),
-    _StarterApp('monitor-ops', 'Ops Monitor',
-        'Alerts on anomalies.', Icons.monitor_heart_outlined),
-    _StarterApp('chat-general', 'General Chat',
-        'Plain chat with any model.', Icons.chat_outlined),
-    _StarterApp('meeting-notes', 'Meeting Notes',
-        'Transcribes and summarises.', Icons.mic_outlined),
+/// The curated starter-app list.
+///
+/// Every ID here MUST match a real builtin bundle the daemon can
+/// resolve via ``POST /api/apps/install`` with
+/// ``sourceType: 'builtin'`` and the ID as ``sourceUri``.
+/// Previously this list mixed fictional IDs
+/// like ``code-review`` / ``shell-agent`` that 404-ed on install
+/// — confusing users into thinking the onboarding was broken.
+/// These IDs live under ``packages/digitorn/builtins/`` on the
+/// daemon and ship with every release.
+List<_StarterApp> _starterApps() {
+  return const [
+    _StarterApp('digitorn-chat', 'Chat',
+        'General-purpose chat with any model.', Icons.chat_outlined),
+    _StarterApp('digitorn-code', 'Code',
+        'Coding agent with workspace + terminal.', Icons.code),
+    _StarterApp('digitorn-deepresearch', 'Deep Research',
+        'Multi-source reading + synthesis.', Icons.menu_book_outlined),
+    _StarterApp('digitorn-react-sandbox', 'React Sandbox',
+        'Live-preview React playground.', Icons.web_asset_outlined),
   ];
-  final order = <String>[];
-  switch (role) {
-    case 'developer':
-      order.addAll(['code-review', 'shell-agent', 'doc-writer',
-          'chat-general', 'meeting-notes', 'research-assistant']);
-      break;
-    case 'analyst':
-      order.addAll(['data-explorer', 'research-assistant', 'doc-writer',
-          'chat-general', 'meeting-notes', 'shell-agent']);
-      break;
-    case 'operator':
-      order.addAll(['shell-agent', 'monitor-ops', 'meeting-notes',
-          'chat-general', 'doc-writer', 'research-assistant']);
-      break;
-    case 'researcher':
-      order.addAll(['research-assistant', 'doc-writer', 'meeting-notes',
-          'chat-general', 'data-explorer', 'code-review']);
-      break;
-    default:
-      order.addAll(['chat-general', 'meeting-notes', 'doc-writer',
-          'research-assistant', 'data-explorer', 'code-review']);
-  }
-  final byId = {for (final a in all) a.id: a};
-  return [for (final id in order) if (byId[id] != null) byId[id]!];
 }
 
 class _AppCard extends StatelessWidget {

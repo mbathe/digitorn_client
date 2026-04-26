@@ -352,10 +352,16 @@ class AuthService extends ChangeNotifier {
         }
         final decoded = utf8.decode(base64Url.decode(payload));
         final Map<String, dynamic> claims = jsonDecode(decoded);
-        final exp = claims['exp'] as int? ?? 0;
+        // No `exp` claim → daemon issued a never-expiring token (dev
+        // mode `access_token_ttl: 0`). Don't refresh — the prior
+        // logic computed `0 - now = -1.7e9 < 120 → true` and spammed
+        // /auth/refresh on every check, which raced with itself,
+        // 401'd the second call, and bounced the user back to login.
+        final expRaw = claims['exp'];
+        if (expRaw is! int) return;
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         // Refresh if less than 120s left (increased margin)
-        if (exp - now < 120) {
+        if (expRaw - now < 120) {
           await _safeRefresh();
         }
       }
@@ -447,6 +453,32 @@ class AuthService extends ChangeNotifier {
       debugPrint('/auth/me error: $e');
       // Token likely invalid — clear
       await _clearTokens();
+    }
+  }
+
+  /// GET the full profile row from ``/api/users/me/profile`` — the
+  /// richer endpoint that carries the ``attributes`` bag the client
+  /// uses to hydrate theme / language / density / onboarding choices
+  /// across devices. Returns the raw ``attributes`` map (already
+  /// stripped of daemon-reserved keys by the server) or ``null`` on
+  /// any failure. The caller is responsible for applying values to
+  /// the local stores — keeping that logic out of AuthService
+  /// avoids a circular import with ThemeService / PreferencesService
+  /// / OnboardingService (which all pull ``baseUrl`` from here).
+  Future<Map<String, dynamic>?> fetchProfileAttributes() async {
+    try {
+      final r = await _dio.get(
+        '$baseUrl/api/users/me/profile',
+        options: _authOptions,
+      );
+      if (r.statusCode != 200 || r.data is! Map) return null;
+      final body = Map<String, dynamic>.from(r.data as Map);
+      final data = (body['data'] ?? body) as Map? ?? const {};
+      final attrs = (data['attributes'] as Map?)?.cast<String, dynamic>();
+      return attrs;
+    } catch (e) {
+      debugPrint('fetchProfileAttributes failed: $e');
+      return null;
     }
   }
 

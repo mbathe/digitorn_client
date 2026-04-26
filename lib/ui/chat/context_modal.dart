@@ -73,13 +73,19 @@ class ContextPanel extends StatelessWidget {
                     fontSize: 13, fontWeight: FontWeight.w600, color: c.textBright)),
                 const SizedBox(width: 8),
                 if (m.model.isNotEmpty)
-                  Text(m.model,
-                    style: GoogleFonts.firaCode(fontSize: 10, color: c.textDim)),
+                  Flexible(
+                    child: Text(m.model,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.firaCode(fontSize: 10, color: c.textDim)),
+                  ),
                 const Spacer(),
                 if (cs.compactions > 0)
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
                     child: Text('${cs.compactions} compactions',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.firaCode(fontSize: 10, color: c.textDim)),
                   ),
                 Tooltip(
@@ -110,8 +116,16 @@ class ContextPanel extends StatelessWidget {
                   width: 72,
                   height: 72,
                   child: TweenAnimationBuilder<double>(
+                    // Ring = raw usage ``used / limit`` clamped to
+                    // [0,1]. The previous display showed the
+                    // threshold-relative ``displayPressure`` which
+                    // happily blew past 100 % (e.g. 91 % usage with
+                    // a 75 % trigger read "121 %"), confusing users
+                    // who expected "% of context consumed". Color
+                    // still escalates with threshold proximity via
+                    // ``pressureColor``.
                     tween: Tween<double>(
-                        begin: 0, end: displayPressure.clamp(0.0, 1.2)),
+                        begin: 0, end: rawPressure.clamp(0.0, 1.0)),
                     duration: const Duration(milliseconds: 360),
                     curve: Curves.easeOutCubic,
                     builder: (_, animDisplay, _) {
@@ -146,7 +160,7 @@ class ContextPanel extends StatelessWidget {
                                     ),
                                   ),
                                   Text(
-                                    'to compact',
+                                    'of context',
                                     style: GoogleFonts.inter(
                                       fontSize: 9,
                                       color: c.textDim,

@@ -132,21 +132,31 @@ class _SessionDrawerState extends State<SessionDrawer>
       path = await pickWorkspace(context);
       if (path == null || path.isEmpty) return;
     }
-    final ok = await SessionService().createAndSetSession(
-      widget.appId,
-      workspacePath: path,
-    );
-    if (ok && mounted) widget.onClose();
+    // Atomic-create contract: a session can no longer be created
+    // empty. We stash the chosen workspace on AppState so ``_send``
+    // picks it up when the user types their first message; the
+    // daemon then creates the session + dispatches the message in
+    // one POST. Until that happens the chat panel sits in its empty
+    // welcome state.
+    if (path != null && path.isNotEmpty) {
+      state.setWorkspace(path);
+    }
+    SessionService().clearActiveSession();
+    if (mounted) widget.onClose();
   }
 
   Future<void> _addProject() async {
+    // Capture the AppState ref BEFORE the async picker — the
+    // ``use_build_context_synchronously`` lint flags any context
+    // crossing an await boundary, and the picker reaches off to
+    // the platform file dialog which may yield for seconds.
+    final state = Provider.of<AppState>(context, listen: false);
     final path = await pickWorkspace(context);
     if (path == null || path.isEmpty) return;
-    final ok = await SessionService().createAndSetSession(
-      widget.appId,
-      workspacePath: path,
-    );
-    if (ok && mounted) widget.onClose();
+    if (!mounted) return;
+    state.setWorkspace(path);
+    SessionService().clearActiveSession();
+    widget.onClose();
   }
 
   @override
@@ -559,6 +569,7 @@ class _DrawerBody extends StatelessWidget {
           }
           return Scrollbar(
             thumbVisibility: false,
+            thickness: 4,
             child: ListView.builder(
               padding: const EdgeInsets.only(
                   top: DsSpacing.x3, bottom: DsSpacing.x4),
@@ -670,7 +681,10 @@ class _DrawerBody extends StatelessWidget {
         return Scrollbar(
           thumbVisibility: false,
           radius: const Radius.circular(2),
-          thickness: 6,
+          // 4px to match the web's `.thin-scrollbar` rule applied to
+          // the session list — the side rail is only 320 px wide so a
+          // 6-8 px scrollbar reads as visual clutter.
+          thickness: 4,
           child: ListView(
             padding: const EdgeInsets.only(
                 top: DsSpacing.x3, bottom: DsSpacing.x7),

@@ -104,13 +104,19 @@ class ThemeService extends ChangeNotifier {
   /// Build the `ThemeData` for the current palette in the given
   /// brightness. Both are registered on `MaterialApp` so Flutter can
   /// hot-swap when `themeMode` changes without a reload.
-  ThemeData buildTheme(Brightness brightness) {
+  ///
+  /// [density] modulates Material widgets (buttons, list tiles,
+  /// inputs…) via `VisualDensity`. Passed in by the caller because
+  /// the value lives in `PreferencesService`, not here. Mirror of
+  /// the web `data-density` attribute on `<html>`.
+  ThemeData buildTheme(Brightness brightness, {String density = 'comfortable'}) {
     final colors = AppPalettes.resolve(_palette, brightness);
     final base = brightness == Brightness.dark
         ? ThemeData.dark(useMaterial3: true)
         : ThemeData.light(useMaterial3: true);
     return base.copyWith(
       scaffoldBackgroundColor: colors.bg,
+      visualDensity: visualDensityFor(density),
       colorScheme: (brightness == Brightness.dark
               ? ColorScheme.dark(
                   surface: colors.surface,
@@ -134,6 +140,37 @@ class ThemeService extends ChangeNotifier {
       dialogTheme: DialogThemeData(backgroundColor: colors.surface),
       extensions: [colors],
     );
+  }
+
+  /// Resolve a `VisualDensity` from the `compact|comfortable|spacious`
+  /// preference. Compact uses Material's built-in compact preset
+  /// (-2,-2). Spacious adds +1 horizontal/vertical for breathing room.
+  /// Comfortable sticks to the platform default (`adaptivePlatformDensity`)
+  /// so we don't fight Flutter's own per-OS tuning.
+  static VisualDensity visualDensityFor(String density) {
+    switch (density) {
+      case 'compact':
+        return VisualDensity.compact;
+      case 'spacious':
+        return const VisualDensity(horizontal: 1, vertical: 1);
+      default:
+        return VisualDensity.adaptivePlatformDensity;
+    }
+  }
+
+  /// Linear text-scale factor matching web's html font-size scaling
+  /// (16 / 14.5 / 17.5). Used by `MaterialApp.builder` to wrap the
+  /// child in a `MediaQuery` with this scaler so all text sizes
+  /// across the tree (Material + custom widgets) react.
+  static double textScaleFor(String density) {
+    switch (density) {
+      case 'compact':
+        return 14.5 / 16;
+      case 'spacious':
+        return 17.5 / 16;
+      default:
+        return 1.0;
+    }
   }
 
   /// Legacy accessor — prefer `buildTheme(Brightness.dark)` so the

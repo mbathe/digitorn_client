@@ -152,9 +152,13 @@ class _CommandRowState extends State<_CommandRow> {
             children: [
               Icon(cmd.icon, size: 16, color: c.blue),
               const SizedBox(width: 10),
-              Text(cmd.command,
-                style: GoogleFonts.firaCode(
-                  fontSize: 13, fontWeight: FontWeight.w500, color: c.text)),
+              Flexible(
+                child: Text(cmd.command,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.firaCode(
+                    fontSize: 13, fontWeight: FontWeight.w500, color: c.text)),
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(cmd.description,

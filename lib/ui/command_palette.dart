@@ -59,7 +59,12 @@ class _CommandPaletteState extends State<CommandPalette> {
       if (inChat) ...[
         _Command('New Session', 'Create a new conversation',
             Icons.add_rounded, () async {
-          await SessionService().createAndSetSession(app.appId);
+          // Atomic-create contract — the daemon refuses to spawn
+          // empty sessions. ``New Session`` just resets the chat
+          // panel to its empty welcome state; the daemon row is
+          // created when the user types their first message and
+          // ``_send`` posts ``message + workspace`` together.
+          SessionService().clearActiveSession();
         }),
         _Command('Clear Chat', 'Clear current messages',
             Icons.clear_all_rounded, () {
@@ -126,7 +131,10 @@ class _CommandPaletteState extends State<CommandPalette> {
           MaterialPageRoute(builder: (_) => const BuilderDraftsPage()),
         ),
       ),
-      if (ArtifactService().hasAny)
+      // Artifacts are per-session (extracted from a specific chat
+      // transcript). Hide outside the chat view — you can't open a
+      // session artifact from the Hub or the Admin console.
+      if (inChat && ArtifactService().hasAny)
         _Command(
           'Show artifacts panel',
           '${ArtifactService().artifacts.length} extracted from this session',
@@ -164,10 +172,13 @@ class _CommandPaletteState extends State<CommandPalette> {
         ),
       ],
 
-      // ── Panels / navigation ──────────────────────────────────────
-      // Sessions and Tools only matter when there's an active app —
-      // they are sub-views of the chat shell, not standalone routes.
-      if (app != null) ...[
+      // ── Panels / navigation (chat-scoped) ────────────────────────
+      // Sessions / Tools / Workspace are sub-views of the chat shell
+      // and make no sense outside of it. Previously gated only on
+      // ``app != null`` which leaked them into Settings / Hub /
+      // Admin views — confusing because the commands fired a panel
+      // switch that threw the user back into chat without warning.
+      if (inChat) ...[
         _Command('Sessions', 'Open session drawer', Icons.history_rounded,
             () => appState.setPanel(ActivePanel.sessions)),
         _Command('Tools', 'Browse available tools', Icons.build_outlined,
@@ -201,14 +212,18 @@ class _CommandPaletteState extends State<CommandPalette> {
         Icons.keyboard_alt_outlined,
         () => KeyboardShortcutsSheet.show(context),
       ),
-      _Command('Workspace', 'Toggle workspace panel', Icons.code_rounded,
-          () {
-        if (appState.isWorkspaceVisible) {
-          appState.closeWorkspace();
-        } else {
-          appState.showWorkspace();
-        }
-      }),
+      // Workspace toggle is a chat-shell control — it flips the
+      // side pane that shows the current session's files / preview /
+      // terminal. Pointless outside the chat view.
+      if (inChat)
+        _Command('Workspace', 'Toggle workspace panel', Icons.code_rounded,
+            () {
+          if (appState.isWorkspaceVisible) {
+            appState.closeWorkspace();
+          } else {
+            appState.showWorkspace();
+          }
+        }),
       _Command('Back to Apps', 'Return to app selector',
           Icons.apps_rounded, appState.goHome),
 
@@ -240,8 +255,22 @@ class _CommandPaletteState extends State<CommandPalette> {
   }
 
   void _execute(_Command cmd) {
-    Navigator.pop(context);
-    cmd.action();
+    // Close the palette FIRST via the ROOT navigator (not a nested
+    // one that might sit inside the dialog), then defer the action
+    // one frame so the pop animation fully commits before any
+    // follow-up navigation / modal fires.
+    //
+    // Previous code popped + ran the action synchronously. Many
+    // commands call ``Navigator.of(context).push(...)`` using the
+    // context captured at ``_buildCommands()`` time — a context
+    // INSIDE the dialog route. Pushing on that context BEFORE the
+    // pop finishes could target the dying dialog's local navigator
+    // rather than the root one, which left the palette visible
+    // behind the pushed page (the "ça reste affiché" symptom).
+    Navigator.of(context, rootNavigator: true).pop();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      cmd.action();
+    });
   }
 
   @override

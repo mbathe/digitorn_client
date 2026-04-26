@@ -160,7 +160,7 @@ class _AboutSectionState extends State<AboutSection> {
             _LinkRow(
               icon: Icons.book_outlined,
               label: 'settings.about_documentation'.tr(),
-              url: 'https://docs.digitorn.io',
+              url: 'https://docs.digitorn.ai',
             ),
             _LinkRow(
               icon: Icons.bug_report_outlined,

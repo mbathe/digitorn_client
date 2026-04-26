@@ -1,5 +1,5 @@
 /// Admin → Activity log. Full feed of admin actions sourced from
-/// `GET /api/admin/audit`. Filterable by action prefix.
+/// `GET /api/admin/audit-log`. Filterable by action prefix.
 library;
 
 import 'package:easy_localization/easy_localization.dart';

@@ -5,6 +5,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../../design/tokens.dart';
 import '../../theme/app_theme.dart';
+import 'app_menu_bar.dart';
 
 /// Premium custom window title bar.
 ///
@@ -53,6 +54,13 @@ class DigitornTitleBar extends StatelessWidget {
               // Reserve space for macOS traffic lights (native, rendered
               // by the OS at fixed offsets). Windows / Linux start flush.
               if (_isMac) const SizedBox(width: 76),
+              // Menu bar — Windows / Linux desktop only. Renders nothing
+              // on macOS (native menu lives at the OS top bar) or on
+              // mobile / web. Sits flush with the title bar's leading
+              // edge so File / Window / Tools / Admin / Help are the
+              // first thing the eye lands on, like every other desktop
+              // app the user already knows.
+              const AppMenuBar(),
               Expanded(
                 child: _DragRegion(child: centre ?? const SizedBox.shrink()),
               ),

@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import '../services/app_config.dart';
 import '../services/auth_service.dart';
 import '../services/socket_service.dart';
+import '../services/session_state_controller.dart';
 import '../services/queue_service.dart';
 import '../services/preview_store.dart';
 import '../services/workspace_module.dart';
@@ -321,8 +322,40 @@ class SessionService extends ChangeNotifier {
   SessionService._internal();
 
   List<AppSession> sessions = [];
-  AppSession? activeSession;
+
+  AppSession? _activeSession;
+  AppSession? get activeSession => _activeSession;
+  // Routes every write through the session-change stream so UI that
+  // subscribes to ``onSessionChange`` (chat panel, queue chip, state
+  // controller) reacts even when callers ASSIGN the field directly —
+  // e.g. ``setApp`` wipes the session to null before joining a fresh
+  // app, which previously fired no event and left the chat panel
+  // showing the old session's transcript for the new app.
+  set activeSession(AppSession? next) {
+    final prevId = _activeSession?.sessionId;
+    _activeSession = next;
+    final nextId = next?.sessionId;
+    if (prevId != nextId) {
+      _sessionChangeCtrl.add(nextId);
+    }
+  }
+
   bool isLoading = false;
+
+  /// Per-appId timestamp of the last successful loadSessions() call.
+  /// Prevents redundant fetches when the user navigates away and back
+  /// to the sessions drawer within the TTL window.
+  final Map<String, DateTime> _sessionsCachedAt = {};
+  // 2-minute TTL — past this point a NEW navigation to the app
+  // triggers a background revalidation, but the cached list is
+  // always rendered immediately. Invalidation happens event-driven
+  // when we create / delete / receive an inbox "session_updated"
+  // for the app, so the 2 min is just a belt-and-braces fallback.
+  static const _sessionsCacheTtl = Duration(minutes: 2);
+  // Track in-flight fetches per app to dedup — if two widgets
+  // mount simultaneously and both call loadSessions, we want one
+  // HTTP call, not two.
+  final Set<String> _sessionsInFlight = <String>{};
 
   /// Session ids we inserted optimistically via POST /sessions but
   /// that the server has not yet persisted (commit-on-first-success).
@@ -331,6 +364,13 @@ class SessionService extends ChangeNotifier {
   /// refetch so the daemon's LLM-generated title replaces our raw
   /// preview, (c) drop the entry on failure/close with no trace.
   final Set<String> _draftSessionIds = {};
+  /// Companion to [_draftSessionIds] — maps a draft ``session_id`` to
+  /// its ``app_id`` so the first-message-done watcher can schedule a
+  /// ``loadSessions(appId)`` refetch without having the draft in the
+  /// visible ``sessions`` list. Drafts are deliberately absent from
+  /// that list (per "not a session until message+reply"); this map
+  /// keeps the correlation alive for as long as the draft exists.
+  final Map<String, String> _draftAppIdById = {};
 
   /// Whether [sessionId] is a client-local draft (not yet persisted
   /// on the server). Sidebar widgets read this to render the draft
@@ -352,12 +392,12 @@ class SessionService extends ChangeNotifier {
   void _onDraftFirstMessageDone(String sessionId) {
     if (_draftCommitPending.contains(sessionId)) return;
     _draftCommitPending.add(sessionId);
-    final appId = sessions
-        .firstWhere(
-          (s) => s.sessionId == sessionId,
-          orElse: () => AppSession(sessionId: '', appId: ''),
-        )
-        .appId;
+    // Drafts are no longer kept in the visible ``sessions`` list, so
+    // we consult the dedicated draft→appId map instead. Fall back to
+    // the active session's appId only as a last resort.
+    final appId = _draftAppIdById[sessionId]
+        ?? (activeSession?.sessionId == sessionId ? activeSession?.appId : null)
+        ?? '';
     if (appId.isEmpty) {
       debugPrint(
           'SessionService: draft $sessionId committed but appId unknown, skipping refetch');
@@ -427,9 +467,33 @@ class SessionService extends ChangeNotifier {
   /// 1–5 s after daemon start). 404 → throws
   /// [AppNotDeployedException] so the caller can pop back to the app
   /// picker instead of retrying forever.
-  Future<void> loadSessions(String appId) async {
-    isLoading = true;
-    notifyListeners();
+  Future<void> loadSessions(String appId, {bool force = false}) async {
+    // Dedup — two concurrent callers for the same appId share one
+    // HTTP round-trip instead of racing.
+    if (_sessionsInFlight.contains(appId) && !force) {
+      return;
+    }
+
+    // SWR: if we have cached data, SHOW IT IMMEDIATELY and decide
+    // whether to revalidate in background based on TTL.
+    final cached = _sessionsCachedAt[appId];
+    final hasData = sessions.isNotEmpty;
+    final isFresh = cached != null &&
+        DateTime.now().difference(cached) < _sessionsCacheTtl;
+
+    if (!force && hasData && isFresh) {
+      // Fresh cache hit — absolutely nothing to do. The UI already
+      // has the correct list.
+      return;
+    }
+
+    final isBackgroundRevalidation = !force && hasData && !isFresh;
+    if (!isBackgroundRevalidation) {
+      // Cold load — show the spinner so the user knows we're working.
+      isLoading = true;
+      notifyListeners();
+    }
+    _sessionsInFlight.add(appId);
     try {
       Response resp = await _dio.get(
         '$_base/api/apps/$appId/sessions',
@@ -462,17 +526,19 @@ class SessionService extends ChangeNotifier {
         final fromServer =
             list.map((j) => AppSession.fromJson(j)).toList();
         final serverIds = fromServer.map((s) => s.sessionId).toSet();
-        // Any draft that the server now knows about → drop the draft
-        // flag (server title/preview wins from here).
+        // Any draft that the server now knows about = the first turn
+        // just committed (daemon now lists it). Drop the draft flag
+        // so the server row becomes the single source of truth for
+        // title / preview / counts.
         _draftSessionIds.removeWhere((d) => serverIds.contains(d));
-        // Drafts the server does NOT yet know about → keep the local
-        // entry prepended so the sidebar is stable across refetches.
-        final stillDraft = sessions
-            .where((s) =>
-                _draftSessionIds.contains(s.sessionId) &&
-                !serverIds.contains(s.sessionId))
-            .toList();
-        sessions = [...stillDraft, ...fromServer];
+        _draftAppIdById.removeWhere((d, _) => serverIds.contains(d));
+        // Drafts the server still doesn't know about are genuinely
+        // empty (user never sent a message). Per the product rule
+        // "not a real session until there's a message + reply" they
+        // are NOT added to the sidebar. They remain in
+        // ``_draftSessionIds`` so ``activeSession`` keeps working,
+        // but the drawer shows ONLY committed sessions.
+        sessions = [...fromServer];
 
         // Keep `activeSession` pointing at the canonical server row
         // after a refetch. Without this step the sidebar (which reads
@@ -494,12 +560,25 @@ class SessionService extends ChangeNotifier {
         }
       }
     } on AppNotDeployedException {
+      _sessionsInFlight.remove(appId);
+      if (!isBackgroundRevalidation) isLoading = false;
       rethrow;
     } catch (e) {
       debugPrint('SessionService.loadSessions error: $e');
     }
-    isLoading = false;
+    _sessionsInFlight.remove(appId);
+    if (!isBackgroundRevalidation) {
+      isLoading = false;
+    }
+    _sessionsCachedAt[appId] = DateTime.now();
     notifyListeners();
+  }
+
+  /// Drop the per-app sessions cache so the next [loadSessions] goes
+  /// to the network. Call after any mutation that could change the
+  /// list (create session, delete session, bulk clear).
+  void invalidateSessionsCache(String appId) {
+    _sessionsCachedAt.remove(appId);
   }
 
   /// Drop a still-draft session locally. Call when the user closes
@@ -579,22 +658,38 @@ class SessionService extends ChangeNotifier {
     }
     activeSession = session;
     notifyListeners();
-    // On a real switch, force the daemon to replay every event for
-    // the incoming session (`since: 0`). Without this, stores that
-    // just got reset by the session-change handler would stay empty
-    // because the daemon only replays deltas since our last visit —
-    // and the pre-visit snapshot is gone from PreviewStore.
-    if (isSwitch) {
-      resetSeqFor(session.sessionId);
-    }
+    // Historically we reset the per-session seq here so the daemon
+    // would replay EVERY event of the session on ``join_session``.
+    // That was necessary back when the daemon didn't send snapshot
+    // events on join — wiping the stores meant the ONLY way to
+    // rehydrate them was a full event replay. Now the daemon sends
+    // ``preview:snapshot``, ``queue:snapshot`` and ``state:snapshot``
+    // immediately after ``join_session`` (see ``socketio_bus.py``) —
+    // those snapshots carry the full per-session state in ONE payload
+    // each. So we can let the seq cursor advance normally and the
+    // daemon will only replay events the client genuinely missed
+    // since its last visit to this session — a handful, not thousands.
+    // Net win: switching to a session with 5 000 historical events
+    // used to emit 5 000 frames on the socket; now it emits 3
+    // snapshot events + whatever is actually new.
     _joinSocketRoom(session.appId, session.sessionId);
-    _sessionChangeCtrl.add(session.sessionId);
+    // Note: ``activeSession = session`` above already fires the
+    // onSessionChange stream through the setter — no manual add here.
     // Hydrate the daemon-side message queue so the panel above the
     // composer reflects any messages pending from a previous run —
     // refresh, daemon restart, or another tab that enqueued while we
     // were elsewhere.
     // ignore: discarded_futures
     QueueService().hydrate(session.appId, session.sessionId);
+    // Session state envelope — pulls the authoritative UI state so
+    // the send-button / queue / progress are correct even if the
+    // Socket.IO state:snapshot race-loses against the user's next
+    // tap. Also fetches any events we missed since our last visit.
+    try {
+      SessionStateController().onSessionEntered(
+        appId: session.appId, sessionId: session.sessionId,
+      );
+    } catch (_) {}
     // History is fetched by the chat panel via [loadFullHistory] — a
     // previous `_preloadHistory` call here was duplicated work (same
     // HTTP endpoint, lost data) and has been removed. The chat panel
@@ -621,21 +716,50 @@ class SessionService extends ChangeNotifier {
   /// the folder and the persistence backend is filesystem-based
   /// (no DB bloat). When null, the daemon picks an isolated
   /// ephemeral workspace under `~/.digitorn/workspaces/…`.
+  /// Reset the chat to the empty state for a "new conversation"
+  /// action — used by the New Session / Ctrl+N / + button / `/new`
+  /// command palette. With the atomic-create-with-first-message
+  /// contract, there's no longer a way to materialise an empty
+  /// session on the daemon: the session is born when the user sends
+  /// their first message via [createAndSetSession]. So all the
+  /// "new chat" entry points now just drop the active session, wipe
+  /// the per-session stores, and rely on [_send] to call
+  /// [createAndSetSession] when the user actually types something.
+  void clearActiveSession() {
+    _resetSessionScopedStores();
+    activeSession = null;
+  }
+
   Future<bool> createAndSetSession(
     String appId, {
+    required String message,
     String? workspacePath,
+    List<String>? imageRefs,
+    String? clientMessageId,
+    String? queueMode,
   }) async {
-    // Wipe session-scoped stores synchronously BEFORE the HTTP call —
-    // creating a new session must not leave the prior session's files
-    // visible during the round-trip. setActiveSession (called at the
-    // end) runs the same reset again as a belt-and-braces check.
+    // Atomic contract — the daemon refuses to create empty sessions:
+    // every new session is born with a first user message. The
+    // dispatch happens server-side inside the same POST, so we don't
+    // need a follow-up enqueueMessage call for the first turn.
+    if (message.trim().isEmpty) {
+      debugPrint('createSession: refusing empty message (first turn requires content)');
+      return false;
+    }
     _resetSessionScopedStores();
     try {
       final resp = await _dio.post(
         '$_base/api/apps/$appId/sessions',
         data: {
+          'message': message,
           if (workspacePath != null && workspacePath.isNotEmpty)
             'workspace_path': workspacePath,
+          if (imageRefs != null && imageRefs.isNotEmpty)
+            'images': imageRefs,
+          if (clientMessageId != null && clientMessageId.isNotEmpty)
+            'client_message_id': clientMessageId,
+          if (queueMode != null && queueMode.isNotEmpty)
+            'queue_mode': queueMode,
         },
         options: Options(
           headers: {'Content-Type': 'application/json'},
@@ -661,15 +785,21 @@ class SessionService extends ChangeNotifier {
               ?? (workspacePath?.isNotEmpty == true ? workspacePath : null),
           createdAt: DateTime.now(),
           lastActive: DateTime.now(),
-          // Commit-on-first-success: the server does NOT persist this
-          // session until the first turn ends with `message_done`. Flag
-          // it as a draft so the sidebar shows a spinner / "draft"
-          // badge, and so a `loadSessions()` refetch before that first
-          // success doesn't wipe the entry (it simply won't be there).
+          // Commit-on-first-success: the daemon does NOT persist this
+          // session until the first turn ends with ``message_done``.
+          // It stays flagged as a draft in memory ONLY — it is
+          // deliberately absent from the sidebar list ``sessions``
+          // (per the product requirement "a session doesn't exist in
+          // history until it has a real message + reply"). The chat
+          // panel still renders it as the active conversation via
+          // ``activeSession``; it only materialises in the sidebar
+          // after the first ``message_done`` flips it from draft to
+          // committed and the next ``loadSessions()`` picks it up
+          // from the server.
           isDraft: true,
         );
-        sessions.insert(0, s);
         _draftSessionIds.add(sid);
+        _draftAppIdById[sid] = appId;
         _historyCache.remove(sid);
         setActiveSession(s);
         debugPrint('createSession: OK, sid=$sid (draft)');
@@ -1029,6 +1159,21 @@ class SessionService extends ChangeNotifier {
       }
       if (status == 200 || status == 202) {
         final data = (body is Map ? body['data'] : null) as Map?;
+        // The daemon now embeds a fresh state envelope in the POST
+        // response so the client doesn't have to wait for the first
+        // SSE event to know "a turn is running". Apply it immediately
+        // — this is what makes the animated send button reliable even
+        // when message_started is lost.
+        final stateJson = data?['state'];
+        if (stateJson is Map) {
+          try {
+            SessionStateController().applySnapshotJson(
+              Map<String, dynamic>.from(stateJson),
+            );
+          } catch (e) {
+            debugPrint('state envelope apply on POST failed: $e');
+          }
+        }
         final outerStatus = data?['status'] as String? ?? 'accepted';
         if (outerStatus == 'queued') {
           return EnqueueResult.queued(
@@ -1184,22 +1329,35 @@ class SessionService extends ChangeNotifier {
   /// [AppNotDeployedException]; the caller should return to the
   /// app picker because the app is no longer deployed.
   Future<Map<String, dynamic>?> loadFullHistory(
-      String appId, String sessionId) async {
+      String appId, String sessionId, {
+    int? sinceSeq,
+    int eventsLimit = 500,
+  }) async {
+    // Pagination — default to the last 500 events which covers ~50
+    // turns with full token-level granularity. The daemon used to
+    // send 50 000 (essentially unlimited) by default which meant a
+    // 2 Mo JSON + a multi-second parse on every cold open. Callers
+    // who need the full log (exports, debug) can opt back in by
+    // passing ``eventsLimit: 50000``.
+    //
+    // ``sinceSeq`` narrows even further when the client already has
+    // cached data — "just give me what changed since my cached
+    // snapshot" → typically a handful of events.
+    final params = <String, dynamic>{
+      'events_limit': eventsLimit,
+      if (sinceSeq != null && sinceSeq > 0) 'since_seq': sinceSeq,
+    };
+    final qs = params.entries.map((e) => '${e.key}=${e.value}').join('&');
+    final url = '$_base/api/apps/$appId/sessions/$sessionId/history?$qs';
     try {
-      Response resp = await _dio.get(
-        '$_base/api/apps/$appId/sessions/$sessionId/history',
-        options: _opts,
-      );
+      Response resp = await _dio.get(url, options: _opts);
       if (resp.statusCode == 503) {
         final retryAfter = int.tryParse(
               resp.headers.value('retry-after') ?? '',
             ) ??
             2;
         await Future.delayed(Duration(seconds: retryAfter.clamp(1, 10)));
-        resp = await _dio.get(
-          '$_base/api/apps/$appId/sessions/$sessionId/history',
-          options: _opts,
-        );
+        resp = await _dio.get(url, options: _opts);
       }
       if (resp.statusCode == 404) {
         throw AppNotDeployedException(appId);
@@ -1331,6 +1489,11 @@ class SessionService extends ChangeNotifier {
       if (activeSession?.sessionId == sessionId) {
         activeSession = null;
       }
+      // The cached list is now stale (server's copy doesn't have this
+      // row any more). Invalidate so the next loadSessions hits the
+      // network and the sidebar stays truthful if another tab of the
+      // same user also deleted something.
+      invalidateSessionsCache(appId);
       notifyListeners();
     } catch (e) {
       debugPrint('deleteSession error: $e');

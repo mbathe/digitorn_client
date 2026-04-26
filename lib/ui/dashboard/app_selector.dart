@@ -23,6 +23,7 @@ class AppSelector extends StatefulWidget {
 class _AppSelectorState extends State<AppSelector> {
   List<AppSummary> apps = [];
   bool isLoading = true;
+  bool _launching = false;
   final _chatCtrl = TextEditingController();
   final _chatFocus = FocusNode();
   final _scrollCtrl = ScrollController();
@@ -30,7 +31,14 @@ class _AppSelectorState extends State<AppSelector> {
   @override
   void initState() {
     super.initState();
-    _fetchApps();
+    // Pre-populate from cache so the dashboard renders instantly.
+    final appState = context.read<AppState>();
+    final cached = appState.appsListCache;
+    if (cached.isNotEmpty) {
+      apps = cached;
+      isLoading = false;
+    }
+    _fetchApps(appState);
   }
 
   @override
@@ -41,18 +49,35 @@ class _AppSelectorState extends State<AppSelector> {
     super.dispose();
   }
 
-  Future<void> _fetchApps() async {
+  Future<void> _fetchApps([AppState? appState]) async {
+    final state = appState ?? context.read<AppState>();
+    // Skip if the cache is still fresh and we already have data.
+    if (state.appsListCacheValid && apps.isNotEmpty) return;
     final auth = AuthService();
     await auth.ensureValidToken();
     final client = DigitornApiClient()
       ..updateBaseUrl(auth.baseUrl, token: auth.accessToken);
     final fetched = await client.fetchApps();
-    if (mounted) setState(() { apps = fetched; isLoading = false; });
+    state.updateAppsCache(fetched);
+    if (!mounted) return;
+    if (isLoading) {
+      // Transitioning from the shimmer — must call setState.
+      setState(() { apps = fetched; isLoading = false; });
+    } else {
+      // Already showing content. Silently update the data so the next
+      // interaction (chip tap, send) uses fresh app status without
+      // triggering a visible rebuild that the user might see as a
+      // "refresh" just before they press Enter.
+      apps = fetched;
+    }
   }
 
   Future<void> _deployApp() async {
     final deployed = await runDeployFlow(context);
-    if (deployed != null && mounted) _fetchApps();
+    if (deployed != null && mounted) {
+      setState(() => isLoading = true);
+      _fetchApps();
+    }
   }
 
   /// Only deployed-and-healthy apps can serve a session. The daemon's
@@ -78,10 +103,12 @@ class _AppSelectorState extends State<AppSelector> {
   }
 
   void _onChatSubmit() {
+    if (_launching) return;
     final defaultApp = _defaultChatApp;
     debugPrint(
         '_onChatSubmit: defaultApp=${defaultApp?.appId} (${defaultApp?.name})');
     if (defaultApp != null) {
+      _launching = true;
       final text = _chatCtrl.text.trim();
       widget.onAppSelected(defaultApp,
           initialMessage: text.isNotEmpty ? text : null);
@@ -96,9 +123,11 @@ class _AppSelectorState extends State<AppSelector> {
   /// `runtime_status == "running"` are eligible — the others live in
   /// the Hub so the user can fix or delete them there.
   List<AppSummary> get _featuredApps {
+    final defaultApp = _defaultChatApp;
     final runnable = _launchableApps;
-    final convApps =
-        runnable.where((a) => a.mode != 'background').toList();
+    final convApps = runnable
+        .where((a) => a.mode != 'background' && a.appId != defaultApp?.appId)
+        .toList();
     final bgApps = runnable.where((a) => a.mode == 'background').toList();
     int rank(AppSummary a) {
       if (a.appId.startsWith('digitorn-') ||
@@ -453,9 +482,8 @@ class _DashboardChatInputState extends State<_DashboardChatInput> {
                 widget.compact ? 16 : 26,
               ),
               child: Shortcuts(
-                shortcuts: {
-                  LogicalKeySet(LogicalKeyboardKey.enter):
-                      const _SendIntent(),
+                shortcuts: const {
+                  SingleActivator(LogicalKeyboardKey.enter): _SendIntent(),
                 },
                 child: Actions(
                   actions: {

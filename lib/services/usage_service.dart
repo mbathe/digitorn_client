@@ -29,6 +29,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 import 'auth_service.dart';
+import 'cache/swr_cache.dart';
 
 /// One bucket in the token time series. `ts` is populated for the
 /// 24h series (hourly), `day` for the 30d series (daily).
@@ -140,31 +141,65 @@ class UsageService extends ChangeNotifier {
   String? _error;
   String? get error => _error;
 
-  Future<UsageSnapshot?> load() async {
-    if (_loading) return _snapshot;
-    _loading = true;
+  /// Stale-while-revalidate for the usage / quota endpoint. The data
+  /// moves slowly (token totals tick up over a month), so a 1 min
+  /// TTL is plenty — user can reopen the quota panel any number of
+  /// times without hitting the daemon, and the number still ticks
+  /// within 60 s of any real change.
+  final SwrCache<String, UsageSnapshot?> _cache = SwrCache(
+    ttl: const Duration(minutes: 1),
+    name: 'usage',
+  );
+
+  Future<UsageSnapshot?> load({bool force = false}) async {
     _error = null;
-    notifyListeners();
-    try {
-      final r = await _dio.get(
-        '${AuthService().baseUrl}/api/users/me/usage',
-      );
-      if (r.statusCode != 200 || r.data is! Map) {
-        _error = 'HTTP ${r.statusCode}';
-        _loading = false;
-        notifyListeners();
+    // Hot cache hit — instant, no flicker.
+    if (!force && _cache.isFresh('me')) {
+      final cached = _cache.peek('me');
+      if (cached != null) {
+        _snapshot = cached;
         return _snapshot;
       }
-      _snapshot = _parse(Map<String, dynamic>.from(r.data as Map));
-      _loading = false;
+    }
+    final hadCache = _cache.peek('me') != null;
+    if (!hadCache) {
+      _loading = true;
       notifyListeners();
+    }
+    try {
+      final fresh = await _cache.getOrFetch(
+        key: 'me',
+        force: force,
+        fetcher: () => _fetchOnce(),
+        onRevalidated: (s) {
+          if (s != null) {
+            _snapshot = s;
+            notifyListeners();
+          }
+        },
+      );
+      if (fresh != null) _snapshot = fresh;
       return _snapshot;
     } on DioException catch (e) {
       _error = e.message ?? e.toString();
-      _loading = false;
-      notifyListeners();
       return _snapshot;
+    } finally {
+      if (_loading) {
+        _loading = false;
+        notifyListeners();
+      }
     }
+  }
+
+  Future<UsageSnapshot?> _fetchOnce() async {
+    final r = await _dio.get(
+      '${AuthService().baseUrl}/api/users/me/usage',
+    );
+    if (r.statusCode != 200 || r.data is! Map) {
+      _error = 'HTTP ${r.statusCode}';
+      return null;
+    }
+    return _parse(Map<String, dynamic>.from(r.data as Map));
   }
 
   int _asInt(dynamic v) =>

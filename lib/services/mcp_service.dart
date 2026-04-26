@@ -25,6 +25,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/mcp_server.dart';
 import 'auth_service.dart';
+import 'cache/swr_cache.dart';
 
 class McpException implements Exception {
   final String message;
@@ -64,7 +65,23 @@ class McpService extends ChangeNotifier {
   // we try the new one first and fall back once so a client can
   // transparently work against both generations.
 
+  /// The MCP catalog is static for the lifetime of the daemon build
+  /// (new MCP servers only appear on daemon upgrade). 10-minute SWR
+  /// is comfortable — any freshness issues resolve on the next tick.
+  final SwrCache<String, List<McpCatalogueEntry>> _catalogCache = SwrCache(
+    ttl: const Duration(minutes: 10),
+    name: 'mcp_catalog',
+  );
+
   Future<List<McpCatalogueEntry>> listCatalog() async {
+    return _catalogCache.getOrFetch(
+      key: 'catalog',
+      fetcher: _fetchCatalogOnce,
+      onRevalidated: (fresh) => notifyListeners(),
+    );
+  }
+
+  Future<List<McpCatalogueEntry>> _fetchCatalogOnce() async {
     for (final path in ['/api/mcp/catalog', '/api/mcp/catalogue']) {
       try {
         final r = await _dio.get('$_base$path');

@@ -224,10 +224,27 @@ class EventReducer {
         break;
       case 'thinking_started':
         state.thinkingBuffer.clear();
+        // Ensure the bubble exists AND open a fresh thinking block.
+        // Without this, the first thinking_delta lands before any
+        // bubble exists (token events would create one, but they
+        // arrive AFTER the thinking burst), and the per-block counter
+        // for the very first thought never renders. `beginThinkingBlock`
+        // also gives multi-block turns (think → tool → think → ...) a
+        // distinct, independently-counted thinking section each time.
+        _ensureAssistant(ev).beginThinkingBlock();
         break;
       case 'thinking_delta':
         final d = ev.payload['delta'] as String? ?? '';
-        state.thinkingBuffer.write(d);
+        if (d.isNotEmpty) state.thinkingBuffer.write(d);
+        // Per-block live token count (litellm-tokenized server-side,
+        // scoped to THIS thinking block — does not include the text
+        // response that follows). Use _ensureAssistant so the count
+        // lands even when no `thinking_started` event preceded us
+        // (some providers stream thinking_delta directly).
+        final c = ev.payload['count'];
+        if (c is int && c > 0) {
+          _ensureAssistant(ev).setActiveThinkingTokens(c);
+        }
         break;
       case 'thinking':
         _applyThinkingFinal(ev);
@@ -445,10 +462,19 @@ class EventReducer {
   }
 
   void _applyToken(EventEnvelope ev) {
-    final chunk = ev.payload['content'] as String? ?? '';
-    if (chunk.isEmpty) return;
+    // Daemon payload: { delta: "chunk", count?: 142 }
+    // Compat fallback for older daemons that sent `content`.
+    final chunk =
+        (ev.payload['delta'] as String?) ??
+        (ev.payload['content'] as String?) ??
+        '';
+    final count = ev.payload['count'];
+    if (chunk.isEmpty && count == null) return;
     final bubble = _ensureAssistant(ev);
-    bubble.appendText(chunk);
+    if (chunk.isNotEmpty) bubble.appendText(chunk);
+    if (count is int && count > 0) {
+      bubble.setOutTokensCumulative(count);
+    }
   }
 
   void _applyStreamSnapshot(EventEnvelope ev) {
@@ -458,12 +484,22 @@ class EventReducer {
   }
 
   void _applyThinkingFinal(EventEnvelope ev) {
-    final content = ev.payload['content'] as String? ?? '';
-    final bubble = _assistantFor(ev.correlationId);
-    if (bubble != null) {
-      bubble.setThinkingText(content);
-      bubble.setThinkingState(false);
+    // Daemon now sends `text`; older builds used `content`. Final
+    // per-block token count lands here too if available.
+    final content = (ev.payload['text'] as String?) ??
+        (ev.payload['content'] as String?) ??
+        '';
+    // _ensureAssistant (not _assistantFor): a turn that thinks then
+    // tool-calls — with no visible text — would otherwise drop the
+    // thinking snapshot because no token event ever ran to create
+    // the bubble.
+    final bubble = _ensureAssistant(ev);
+    if (content.isNotEmpty) bubble.setThinkingText(content);
+    final c = ev.payload['count'];
+    if (c is int && c > 0) {
+      bubble.setActiveThinkingTokens(c);
     }
+    bubble.setThinkingState(false);
     state.thinkingBuffer.clear();
   }
 

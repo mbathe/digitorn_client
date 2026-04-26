@@ -299,6 +299,11 @@ class PreferencesService extends ChangeNotifier {
     ('de', 'Deutsch', '🇩🇪'),
     ('pt', 'Português', '🇵🇹'),
     ('it', 'Italiano', '🇮🇹'),
+    ('zh-CN', '简体中文', '🇨🇳'),
+    ('ja', '日本語', '🇯🇵'),
+    ('ko', '한국어', '🇰🇷'),
+    ('ru', 'Русский', '🇷🇺'),
+    ('ar', 'العربية', '🇸🇦'),
   ];
 
   /// Available accent palettes.

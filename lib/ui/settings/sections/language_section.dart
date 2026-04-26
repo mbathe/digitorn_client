@@ -36,7 +36,15 @@ class LanguageSection extends StatelessWidget {
                 onTap: () async {
                   await prefs.setLanguage(l.$1);
                   if (!context.mounted) return;
-                  await context.setLocale(Locale(l.$1));
+                  // zh-CN ships with a country code; the bare codes ship
+                  // language-only. Split before constructing the Locale
+                  // so easy_localization picks the right ARB.
+                  final parts = l.$1.split('-');
+                  await context.setLocale(
+                    parts.length == 2
+                        ? Locale(parts[0], parts[1])
+                        : Locale(l.$1),
+                  );
                 },
               ),
           ],

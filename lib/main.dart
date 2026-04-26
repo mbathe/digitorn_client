@@ -5,7 +5,6 @@ import 'package:split_view/split_view.dart';
 import 'package:provider/provider.dart';
 import 'ui/chat/chat_panel.dart';
 import 'ui/workspace/workspace_panel.dart';
-import 'ui/workspace/workspace_rail.dart';
 import 'ui/dashboard/app_selector.dart';
 import 'ui/auth/login_page.dart';
 import 'ui/sessions/session_drawer.dart';
@@ -64,14 +63,15 @@ import 'services/onboarding_service.dart';
 import 'services/notification_service.dart';
 import 'services/tool_display_defaults_service.dart';
 import 'services/session_prefs_service.dart';
+import 'services/user_prefs_sync.dart';
 import 'services/recent_attachments_service.dart';
-import 'ui/onboarding/setup_wizard_page.dart';
 import 'ui/onboarding/account_wizard_page.dart';
 import 'ui/builder/builder_drafts_page.dart';
 import 'models/workspace_state.dart';
 import 'models/session_metrics.dart';
 import 'ui/inbox/inbox_bell.dart';
 import 'ui/settings/settings_page.dart';
+import 'ui/shell/user_menu_button.dart';
 import 'theme/app_theme.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
@@ -148,6 +148,12 @@ Future<void> main() async {
     // Fire-and-forget discovery of the daemon's tool display
     // catalog — falls back to built-in defaults if unavailable.
     unawaited(ToolDisplayDefaultsService().load());
+    // Pull the user's server-persisted UI prefs (theme, palette,
+    // language, density) and onboarding attributes (role, avatar,
+    // preferred providers, starter apps) from the daemon and apply
+    // them locally. First-run / fresh device ends up with the same
+    // UI the user configured on another device.
+    unawaited(hydrateUserPrefsFromDaemon());
   }
   AuthService().addListener(() {
     // Defer to next frame — AuthService.notifyListeners() may fire
@@ -160,6 +166,10 @@ Future<void> main() async {
         unawaited(DevicesService().registerCurrentDevice());
         unawaited(ActivityInboxService().fetchUnreadCountFromServer());
         unawaited(ToolDisplayDefaultsService().reload());
+        // Re-hydrate on auth change too — covers the "user logs in
+        // on a fresh install" path where the local SharedPreferences
+        // are still at factory defaults.
+        unawaited(hydrateUserPrefsFromDaemon());
       } else {
         DigitornSocketService().disconnect();
         NotificationService().disposeSub();
@@ -182,6 +192,11 @@ Future<void> main() async {
         Locale('de'),
         Locale('pt'),
         Locale('it'),
+        Locale('zh', 'CN'),
+        Locale('ja'),
+        Locale('ko'),
+        Locale('ru'),
+        Locale('ar'),
       ],
       path: 'assets/translations',
       fallbackLocale: const Locale('en'),
@@ -203,6 +218,18 @@ Locale _localeFromLang(String? lang) {
       return const Locale('pt');
     case 'it':
       return const Locale('it');
+    case 'zh':
+    case 'zh-CN':
+    case 'zh_CN':
+      return const Locale('zh', 'CN');
+    case 'ja':
+      return const Locale('ja');
+    case 'ko':
+      return const Locale('ko');
+    case 'ru':
+      return const Locale('ru');
+    case 'ar':
+      return const Locale('ar');
     case 'en':
     default:
       return const Locale('en');
@@ -322,6 +349,27 @@ class AppState extends ChangeNotifier {
   /// swallow every snackbar / refresh call that came after.
   bool _appsPanelBlockClose = false;
 
+  // ── Apps list cache ───────────────────────────────────────────────────────
+  // The apps popover is destroyed and recreated on every open (conditional
+  // render). Without a cache, every open fires GET /api/apps. We keep the
+  // last fetched list here with a 60-second TTL: the popover shows the
+  // cached list instantly on open, then refreshes in background if stale.
+  List<AppSummary> _appsListCache = [];
+  DateTime? _appsListCachedAt;
+  static const _appsListCacheTtl = Duration(seconds: 60);
+
+  List<AppSummary> get appsListCache => _appsListCache;
+
+  bool get appsListCacheValid =>
+      _appsListCachedAt != null &&
+      DateTime.now().difference(_appsListCachedAt!) < _appsListCacheTtl;
+
+  void updateAppsCache(List<AppSummary> apps) {
+    _appsListCache = apps;
+    _appsListCachedAt = DateTime.now();
+    // No notifyListeners() — the popover owns its own setState.
+  }
+
   void toggleAppsPanel() {
     _appsHoverCloseTimer?.cancel();
     showAppsPanel = !showAppsPanel;
@@ -387,11 +435,20 @@ class AppState extends ChangeNotifier {
 
   void _onSessionChange(String? sessionId) {
     if (sessionId == null || sessionId.isEmpty) return;
-    final wasShown = _sessionWorkspaceShown[sessionId] ?? false;
-    // Only emit if the value actually flips to avoid gratuitous
-    // rebuilds on every session refresh.
-    if (isWorkspaceVisible != wasShown) {
-      isWorkspaceVisible = wasShown;
+    // Workspace starts CLOSED on every session entry. We deliberately
+    // do NOT restore the per-session "last shown" preference here —
+    // product rule: "open a chat → workspace is closed by default".
+    // If the user wants the workspace they click the rail/chip to
+    // pop it open; that action calls ``showWorkspace()`` which still
+    // writes to ``_sessionWorkspaceShown`` for within-session memory
+    // (re-entering the same session later is a fresh "opening the
+    // chat" → closed again).
+    //
+    // The one exception stays in ``_fetchManifest`` —
+    // ``WorkspaceMode.required`` apps (digitorn-builder etc.) can't
+    // function without the workspace, so they still force-open.
+    if (isWorkspaceVisible) {
+      isWorkspaceVisible = false;
       notifyListeners();
     }
     final appId = activeApp?.appId;
@@ -438,22 +495,6 @@ class AppState extends ChangeNotifier {
 
   Future<void> setApp(AppSummary app,
       {bool createNewSession = false, bool clearSession = true}) async {
-    // Pre-session credentials gate — ask the daemon which secrets
-    // the app needs, then walk the user through every missing one
-    // before we try to create a session. If the user cancels, abort
-    // the open entirely and go back to the dashboard.
-    final navCtx = rootNavigatorKey.currentContext;
-    if (navCtx != null) {
-      final ok = await CredentialsGateV2.ensureReady(
-        navCtx,
-        appId: app.appId,
-      );
-      if (!ok) {
-        // User bailed — don't touch activeApp / session state.
-        return;
-      }
-    }
-
     // Leave previous app room before joining the new one.
     final prevApp = activeApp;
     final appSwitched = prevApp != null && prevApp.appId != app.appId;
@@ -491,52 +532,48 @@ class AppState extends ChangeNotifier {
     if (clearSession || appSwitched) {
       SessionService().activeSession = null;
     }
-    // Publish the activeApp=new + workspace=hidden state immediately
-    // so the UI rebuilds before any later async work completes.
+    // Transition the UI immediately — the chat panel renders now so
+    // the user gets instant feedback. The credentials gate (below)
+    // runs as a dialog OVER the chat panel instead of blocking the
+    // transition. This eliminates the "click → nothing happens for
+    // N seconds" delay on first open.
     notifyListeners();
-    // **Session creation is lazy**: clicking an app no longer
-    // pre-creates a session. The chat panel opens in its empty
-    // state; the first call to ``_send()`` in the chat panel sees
-    // ``activeSession == null`` and creates the session on the fly
-    // via ``SessionService.createAndSetSession``. This matches the
-    // product spec ("on doit pouvoir avoir le chat qui s'ouvre
-    // lorsqu'on clique sur une application sans qu'une session ne
-    // soit créée; c'est quand on envoie un premier message que la
-    // session doit être créée") and eliminates the race where a
-    // pre-emptive throwaway session stole focus from the real one
-    // the caller wanted to open.
-    //
-    // ``createNewSession`` is kept as an opt-in escape hatch for
-    // callers that genuinely need a fresh session up front (e.g.
-    // scripted demos, dev tooling) — default is false.
+
+    // Fire all background fetches immediately — in parallel with the
+    // credentials gate — so manifest/widgets/preview are loading while
+    // the credentials HTTP call is in flight. Without this, a cold
+    // credentials cache (first open) would block the manifest fetch
+    // and leave the chat panel showing default values for 100–500ms.
+    PreviewAvailabilityService().probe(app.appId);
+    AppUiConfigService().ensure(app.appId);
+    _primeCodeSnapshot(app.appId);
+    _fetchWidgetsSpec(app.appId);
+    _fetchManifest(app);
+
+    // Pre-session credentials gate. Runs after the UI has transitioned
+    // so the spinner and panel are already visible. If the user cancels
+    // a missing-secret dialog, revert cleanly via goHome().
+    final navCtx = rootNavigatorKey.currentContext;
+    if (navCtx != null) {
+      final ok = await CredentialsGateV2.ensureReady(
+        navCtx,
+        appId: app.appId,
+      );
+      if (!ok) {
+        goHome();
+        return;
+      }
+    }
     if (createNewSession) {
-      await SessionService().createAndSetSession(app.appId);
+      // New atomic contract: a session can only be created together
+      // with its first user message. ``createNewSession`` here is
+      // really "show the empty welcome state" — the actual session
+      // will be born when the user sends their first message via
+      // ``_send`` in ``ChatPanel``.
+      SessionService().clearActiveSession();
     }
     ToolService().clearCache();
     notifyListeners();
-    // Probe whether the daemon serves a static preview for this app.
-    // `GET /api/apps/{appId}/preview/` returns 404 with
-    // `"No static preview available for this app"` on apps that
-    // don't embed a preview bundle — we use the answer to hide the
-    // preview pane / tab instead of rendering the JSON error.
-    PreviewAvailabilityService().probe(app.appId);
-    // Fetch the UI-safe config (auto_approve flag, render_mode,
-    // preview.enabled). Cached by AppUiConfigService so listeners
-    // rebuild once it lands — no extra work needed here.
-    AppUiConfigService().ensure(app.appId);
-    // Prime the file-tree metadata via the lightweight
-    // `/workspace/code-snapshot` endpoint so the explorer shows
-    // badges (+N / -M / validation / git_status) instantly on
-    // session load. Non-destructive — Socket.IO's `preview:snapshot`
-    // still replaces when it lands. Best-effort, fire-and-forget.
-    _primeCodeSnapshot(app.appId);
-    // Fetch the widget spec. The daemon compiles app.yaml and
-    // returns the full tree; our UI mounts Z2/Z3 dynamically based
-    // on what it declares.
-    _fetchWidgetsSpec(app.appId);
-    // Fetch the full app manifest (adapts chat UI: quick prompts,
-    // greeting, workspace mode, feature flags, …).
-    _fetchManifest(app);
   }
 
   Future<void> _fetchManifest(AppSummary app) async {
@@ -544,17 +581,15 @@ class AppState extends ChangeNotifier {
       final fetched = await _loadManifest(app);
       if (activeApp?.appId != app.appId) return;
       _manifest = fetched;
-      // Workspace visibility driven by manifest. `none` = force
-      // hidden, `required` = force visible, otherwise leave as-is.
-      switch (_manifest.workspaceMode) {
-        case WorkspaceMode.none:
-          isWorkspaceVisible = false;
-        case WorkspaceMode.required:
-          isWorkspaceVisible = true;
-        case WorkspaceMode.optional:
-        case WorkspaceMode.auto:
-          // Respect whatever `setApp` already decided.
-          break;
+      // Workspace visibility on app open: `none` forces hidden,
+      // every other mode (`required`, `optional`, `auto`) leaves
+      // whatever `setApp` already decided — which is `false` by
+      // default. Even apps that REQUIRE a workspace should land
+      // with the panel collapsed so the user enters the chat
+      // first; they (or a tool result) open the workspace on
+      // demand. Avoids the abrupt split-screen on every app open.
+      if (_manifest.workspaceMode == WorkspaceMode.none) {
+        isWorkspaceVisible = false;
       }
       notifyListeners();
     } catch (e, st) {
@@ -758,7 +793,12 @@ class DigitornClientApp extends StatelessWidget {
         builder: (ctx) {
           // Watch the whole service so a palette change rebuilds the
           // MaterialApp and the new AppColors extension propagates.
+          // Same goes for `PreferencesService` — flipping density
+          // must rebuild the MaterialApp so `visualDensity` lands.
           final theme = ctx.watch<ThemeService>();
+          final prefs = ctx.watch<PreferencesService>();
+          final density = prefs.density;
+          final textScale = ThemeService.textScaleFor(density);
           return MaterialApp(
             title: 'Digitorn Client',
             navigatorKey: rootNavigatorKey,
@@ -767,22 +807,49 @@ class DigitornClientApp extends StatelessWidget {
             supportedLocales: ctx.supportedLocales,
             locale: ctx.locale,
             themeMode: theme.mode,
-            theme: theme.buildTheme(Brightness.light).copyWith(
+            theme: theme.buildTheme(Brightness.light, density: density).copyWith(
               textTheme:
                   GoogleFonts.interTextTheme(ThemeData.light().textTheme),
             ),
-            darkTheme: theme.buildTheme(Brightness.dark).copyWith(
+            darkTheme: theme.buildTheme(Brightness.dark, density: density).copyWith(
               textTheme:
                   GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
             ),
             builder: (context, child) {
               // Custom frameless title bar on desktop. No-op on mobile
               // / web so the Column collapses to just the app child.
-              return Column(
-                children: [
-                  const DigitornTitleBar(),
-                  Expanded(child: child ?? const SizedBox.shrink()),
-                ],
+              // Wrap the whole subtree in a MediaQuery whose textScaler
+              // matches the chosen density — that way every Text widget
+              // (including ones not styled via Material's TextTheme)
+              // scales in unison with the web's rem base trick.
+              //
+              // The extra `Overlay` is required because the title bar's
+              // `MenuBar` lives ABOVE MaterialApp's Navigator (hence
+              // outside its built-in Overlay) and Material's MenuBar
+              // throws if it can't find an Overlay ancestor for its
+              // dropdowns. Wrapping here gives both the title bar and
+              // the Navigator (which still has its own Overlay further
+              // down) an ancestor — the MenuBar resolves to this one
+              // and dropdowns can render below the title bar into the
+              // main app area.
+              return MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  textScaler: TextScaler.linear(textScale),
+                ),
+                child: Overlay(
+                  initialEntries: [
+                    OverlayEntry(
+                      builder: (_) => Column(
+                        children: [
+                          const DigitornTitleBar(),
+                          Expanded(
+                            child: child ?? const SizedBox.shrink(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               );
             },
             home: const MainWindow(),
@@ -893,12 +960,13 @@ class _MainWindowState extends State<MainWindow> {
     final auth = context.watch<AuthService>();
     final onboarding = context.watch<OnboardingService>();
 
-    // First-launch machine setup — only blocks on a truly fresh
-    // install. Existing users who upgrade past this release already
-    // have a configured daemon URL, so the flag auto-resolves.
-    if (!onboarding.setupDone) {
-      return SetupWizardPage(onComplete: () => setState(() {}));
-    }
+    // First-launch machine setup was removed 2026-04: the daemon URL
+    // is build-stamped (``--dart-define=DIGITORN_DAEMON_URL=...``) on
+    // the hosted build, and self-hosters can still edit it from
+    // Settings → Daemon. Theme / language / accessibility also moved
+    // to Settings — forcing those choices before the user has even
+    // seen the product was a net loss. ``setupDone`` is left dormant
+    // in storage for back-compat, nothing gates on it any more.
 
     if (!auth.isAuthenticated) {
       return LoginPage(onAuthenticated: () {
@@ -910,9 +978,15 @@ class _MainWindowState extends State<MainWindow> {
     }
 
     // Authenticated but never ran the account wizard — fresh
-    // registration OR first login on this device.
+    // registration OR first login on this device. Still wrap the
+    // wizard in ``_GlobalShortcuts`` so Ctrl+K / Ctrl+P work during
+    // onboarding too (user may want to search-jump before finishing).
     if (!onboarding.accountSetupDone) {
-      return AccountWizardPage(onComplete: () => setState(() {}));
+      return Scaffold(
+        body: _GlobalShortcuts(
+          child: AccountWizardPage(onComplete: () => setState(() {})),
+        ),
+      );
     }
 
     final state = context.watch<AppState>();
@@ -921,13 +995,32 @@ class _MainWindowState extends State<MainWindow> {
     final isMobile = MediaQuery.of(context).size.width < 600;
 
     if (isMobile) {
+      // Mobile shell also needs the global shortcut handler — users
+      // with a physical keyboard (tablet / foldable / dock) expect
+      // Ctrl+K to work, and there's no reason for the handler to be
+      // desktop-only. ``_GlobalShortcuts`` is cheap (just a Focus +
+      // onKeyEvent) so keeping it on every platform is right.
       return Scaffold(
         backgroundColor: context.colors.bg,
-        body: Column(
-          children: [
-            const _ConnectivityBanner(),
-            Expanded(child: _ContentArea(state: state)),
-          ],
+        body: _GlobalShortcuts(
+          // Connectivity banner OVERLAYS the body (Positioned at top
+          // of the Stack) instead of pushing the chat panel down by
+          // ~30 px every time the connection drops. Mirror of the web
+          // `position: fixed` overlay rewrite.
+          child: Stack(
+            children: [
+              _ContentArea(state: state),
+              const Positioned(
+                top: 8,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                  ignoring: false,
+                  child: _ConnectivityBanner(),
+                ),
+              ),
+            ],
+          ),
         ),
         bottomNavigationBar: _MobileBottomBar(state: state, bg: bg),
       );
@@ -936,18 +1029,15 @@ class _MainWindowState extends State<MainWindow> {
     return Scaffold(
       backgroundColor: context.colors.bg,
       body: _GlobalShortcuts(
-        child: Column(children: [
-        const _ConnectivityBanner(),
-        Expanded(child: Stack(
-        children: [
-          // Main layout
-          Row(
+        child: Stack(children: [
+        Row(
             children: [
               _ActivityBar(state: state, bg: bg),
               Container(width: 1, color: context.colors.border),
-              Expanded(child: _ContentArea(state: state)),
-            ],
-          ),
+              Expanded(child: Stack(
+        children: [
+          // Main layout
+          _ContentArea(state: state),
           // Apps popover overlay — hover-driven.
           if (state.showAppsPanel) ...[
             // Invisible barrier: click anywhere outside the popover
@@ -1039,6 +1129,17 @@ class _MainWindowState extends State<MainWindow> {
           ],
         ],
       )),
+            ],
+          ),
+          // Overlay banner — sits on top of the layout without taking
+          // any vertical space. Mirror of the web `position: fixed`
+          // overlay rewrite.
+          const Positioned(
+            top: 8,
+            left: 0,
+            right: 0,
+            child: _ConnectivityBanner(),
+          ),
       ]),
       ),
     );
@@ -1060,18 +1161,86 @@ class _MainWindowState extends State<MainWindow> {
 //   * Ctrl+/       → Keyboard shortcuts cheat sheet
 //   * Ctrl+Shift+A → Admin console (when admin)
 
-class _GlobalShortcuts extends StatelessWidget {
+class _GlobalShortcuts extends StatefulWidget {
   final Widget child;
   const _GlobalShortcuts({required this.child});
 
   @override
+  State<_GlobalShortcuts> createState() => _GlobalShortcutsState();
+}
+
+class _GlobalShortcutsState extends State<_GlobalShortcuts> {
+  // Stashed so we can unregister on dispose and never leak the
+  // closure into another instance of the shell.
+  late final bool Function(KeyEvent) _hwHandler;
+  // Kept so we can call the palette from the hardware-keyboard
+  // callback, which fires outside a widget build phase.
+  late final BuildContext _stableContext;
+
+  @override
+  void initState() {
+    super.initState();
+    _stableContext = context;
+    _hwHandler = _onHardwareKey;
+    HardwareKeyboard.instance.addHandler(_hwHandler);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_hwHandler);
+    super.dispose();
+  }
+
+  /// App-level key handler. Runs BEFORE the focus tree, so it keeps
+  /// working even when a dialog just closed and no node has focus —
+  /// which is the most common reason ``Ctrl+K`` stops responding
+  /// mid-session. Returning ``true`` tells Flutter we've consumed
+  /// the event (so the focused TextField doesn't ALSO see the K).
+  bool _onHardwareKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final kb = HardwareKeyboard.instance;
+    final ctrl = kb.isControlPressed || kb.isMetaPressed;
+    if (!ctrl) return false;
+    final key = event.logicalKey;
+    if (!_stableContext.mounted) return false;
+    if (key == LogicalKeyboardKey.keyK) {
+      CommandPalette.show(_stableContext);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.keyP) {
+      GlobalSearch.show(_stableContext);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.keyT) {
+      GlobalSearch.show(_stableContext, mode: SearchMode.quickSwitcher);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.slash) {
+      KeyboardShortcutsSheet.show(_stableContext);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.keyA && kb.isShiftPressed) {
+      if (AuthService().currentUser?.isAdmin == true) {
+        Navigator.of(_stableContext).push(
+          MaterialPageRoute(
+            builder: (_) => const AdminConsolePage(),
+          ),
+        );
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    // Kept as a Focus + onKeyEvent too — belt-and-braces for the
+    // rare case where ``HardwareKeyboard.addHandler`` doesn't fire
+    // (seen on Flutter Web under certain iframe setups). The two
+    // handlers are idempotent because ``CommandPalette.show`` /
+    // friends are modal and gate themselves against re-entry.
     return Focus(
       autofocus: true,
-      // Use a key handler instead of CallbackShortcuts so the
-      // shortcuts work even when a TextField has focus deeper
-      // in the tree — CallbackShortcuts gets blocked by focus
-      // traversal in some flutter versions.
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent) return KeyEventResult.ignored;
         final ctrl = HardwareKeyboard.instance.isControlPressed ||
@@ -1107,7 +1276,7 @@ class _GlobalShortcuts extends StatelessWidget {
         }
         return KeyEventResult.ignored;
       },
-      child: child,
+      child: widget.child,
     );
   }
 }
@@ -1122,52 +1291,94 @@ class _GlobalShortcuts extends StatelessWidget {
 class _ConnectivityBanner extends StatelessWidget {
   const _ConnectivityBanner();
 
+  // Subtle disconnect banner — tinted bg (red @ 8% alpha) and red-on-
+  // transparent text instead of the previous solid red strip with white
+  // text. The user explicitly asked for "quelque chose d'un peu plus
+  // subtil et simple" with the same retry semantics.
+  //
+  // This is the SOLE disconnect indicator — the duplicate strip that
+  // used to render above the chat composer (`_buildDisconnectedBar` in
+  // chat_panel.dart) has been removed now this banner is authoritative.
   @override
   Widget build(BuildContext context) {
     final socket = context.watch<DigitornSocketService>();
     if (socket.isConnected) return const SizedBox.shrink();
     final c = context.colors;
-    final fg = c.contrastOn(c.red);
-    return Material(
-      color: c.red.withValues(alpha: 0.92),
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          child: Row(
-            children: [
-              Icon(Icons.cloud_off_rounded, size: 14, color: fg),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'errors.daemon_unreachable'.tr(),
-                  style: GoogleFonts.inter(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w700,
-                      color: fg),
+    // Capped to the composer rail (800 px on desktop, full-width on
+    // < 600 px) and rendered as a centered chip with a full border
+    // instead of an edge-to-edge strip. Strict mirror of the web
+    // `ConnectivityBanner` after the same redesign.
+    final isSmall = MediaQuery.of(context).size.width < 600;
+    return SafeArea(
+      bottom: false,
+      child: Center(
+        child: ConstrainedBox(
+          constraints:
+              BoxConstraints(maxWidth: isSmall ? double.infinity : 800),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Material(
+              color: c.red.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(6),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: c.red.withValues(alpha: 0.22),
+                    width: 1,
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 3),
+                  child: Row(
+                    children: [
+                      Icon(Icons.cloud_off_rounded, size: 11, color: c.red),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'errors.daemon_unreachable'.tr(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                              color: c.red),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      TextButton.icon(
+                        onPressed: () => DigitornSocketService()
+                            .connect(AuthService().baseUrl),
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 1),
+                          minimumSize: const Size(0, 22),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          backgroundColor: Colors.transparent,
+                          foregroundColor: c.red,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(4),
+                            side: BorderSide(
+                              color: c.red.withValues(alpha: 0.35),
+                            ),
+                          ),
+                        ),
+                        icon: Icon(Icons.refresh_rounded,
+                            size: 10, color: c.red),
+                        label: Text(
+                          'common.retry'.tr(),
+                          style: GoogleFonts.inter(
+                              fontSize: 10.5,
+                              color: c.red,
+                              fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              const SizedBox(width: 8),
-              TextButton(
-                onPressed: () =>
-                    DigitornSocketService().connect(AuthService().baseUrl),
-                style: TextButton.styleFrom(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  minimumSize: const Size(0, 28),
-                  backgroundColor: fg.withValues(alpha: 0.15),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(4)),
-                ),
-                child: Text(
-                  'common.retry'.tr(),
-                  style: GoogleFonts.inter(
-                      fontSize: 11,
-                      color: fg,
-                      fontWeight: FontWeight.w600),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -1627,30 +1838,10 @@ class _ActivityBar extends StatelessWidget {
           const InboxBell(),
           const SizedBox(height: 6),
 
-          // Theme toggle
-          Consumer<ThemeService>(
-            builder: (_, theme, _) => _BarItem(
-              icon: theme.isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
-              tooltip: theme.isDark
-                  ? 'sidebar.light_mode'.tr()
-                  : 'sidebar.dark_mode'.tr(),
-              isActive: false,
-              onTap: () => theme.toggle(),
-            ),
-          ),
-          const SizedBox(height: 8),
-
-          // Settings
-          _BarItem(
-            icon: Icons.settings_outlined,
-            tooltip: 'sidebar.settings'.tr(),
-            isActive: state.panel == ActivePanel.settings,
-            onTap: () => state.setPanel(
-              state.panel == ActivePanel.settings
-                  ? ActivePanel.chat
-                  : ActivePanel.settings,
-            ),
-          ),
+          // Account avatar — opens UserMenu (Settings / Language / Theme /
+          // Help / Log out). Replaces the previous theme-toggle and
+          // settings _BarItems. Mirror of web `<UserMenuButton/>`.
+          const UserMenuButton(),
           const SizedBox(height: 10),
 
           // Connection dot
@@ -1811,31 +2002,52 @@ class _AppsPopoverState extends State<_AppsPopover> {
   @override
   void initState() {
     super.initState();
+    // Pre-populate from cache so the popover renders instantly.
+    final cache = widget.state.appsListCache;
+    if (cache.isNotEmpty) {
+      _apps = cache;
+      _loading = false;
+    }
     _load();
   }
 
   Future<void> _load() async {
-    final auth = AuthService();
-    await auth.ensureValidToken();
-    final client = DigitornApiClient()
-      ..updateBaseUrl(auth.baseUrl, token: auth.accessToken);
-    final fetched = await client.fetchApps();
-    // Only deployed-and-healthy apps belong in the quick-launch
-    // popover. Broken / not-deployed / disabled rows live in the
-    // Hub Installed tab where the user can fix them — offering a
-    // tap that would just fail here is worse UX than hiding them.
-    final runnable = fetched.where((a) => a.isRunning).toList();
-    if (mounted) setState(() { _apps = runnable; _loading = false; });
+    // Skip the network call if the cache is still fresh.
+    if (widget.state.appsListCacheValid) return;
+
+    // Cache stale or empty — fetch in background.
+    try {
+      final auth = AuthService();
+      await auth.ensureValidToken();
+      final client = DigitornApiClient()
+        ..updateBaseUrl(auth.baseUrl, token: auth.accessToken);
+      final fetched = await client.fetchApps();
+      // Only deployed-and-healthy apps belong in the quick-launch
+      // popover. Broken / not-deployed / disabled rows live in the
+      // Hub Installed tab where the user can fix them — offering a
+      // tap that would just fail here is worse UX than hiding them.
+      final runnable = fetched.where((a) => a.isRunning).toList();
+      widget.state.updateAppsCache(runnable);
+      if (mounted) setState(() { _apps = runnable; _loading = false; });
+    } catch (_) {
+      if (mounted) setState(() { _loading = false; });
+    }
   }
 
   void _openApp(AppSummary app) async {
+    // Close the popover SYNCHRONOUSLY first. ``setApp`` awaits a
+    // cascade (credentials gate, manifest fetch, widgets spec,
+    // workspace reset) that can take 300-2000 ms. Leaving the
+    // popover open during that wait used to look like "click did
+    // nothing" — the user would tap again, racing two ``setApp``
+    // calls and sometimes opening the wrong app.
+    widget.onClose();
     await widget.state.setApp(app);
     SessionService().loadSessions(app.appId);
     BackgroundService().startPolling(
       app.appId,
       SessionService().activeSession?.sessionId ?? 'default',
     );
-    widget.onClose();
   }
 
   @override
@@ -2596,11 +2808,14 @@ class _ContentArea extends StatefulWidget {
 class _ContentAreaState extends State<_ContentArea> {
   final GlobalKey _chatKey = GlobalKey();
   double _sessionDrawerWidth = 280;
+  // Default split: chat ~62%, workspace ~38%. Workspace is capped
+  // at half the viewport so it never out-shouts the conversation —
+  // the chat is the primary surface, the workspace is a sidekick.
   final SplitViewController _splitCtrl = SplitViewController(
-    weights: [0.5, 0.5],
+    weights: [0.62, 0.38],
     limits: [
-      WeightLimit(min: 0.2, max: 0.8),
-      WeightLimit(min: 0.2, max: 0.8),
+      WeightLimit(min: 0.5, max: 0.8),
+      WeightLimit(min: 0.2, max: 0.5),
     ],
   );
 
@@ -2608,24 +2823,48 @@ class _ContentAreaState extends State<_ContentArea> {
 
   @override
   Widget build(BuildContext context) {
-    // ── Settings — independent of active app ────────────────────────────
-    // Has to be checked first because the user can click the gear icon
-    // from the home screen (no app) or from inside a background dashboard,
-    // and Settings should always win regardless of context.
-    if (state.panel == ActivePanel.settings) {
-      return const SettingsPage();
-    }
+    // ── Settings and Hub are kept mounted at all times (Offstage) ──────────
+    // Previously these were conditional returns — every open destroyed the
+    // widget and recreated it, firing all initState() network calls.
+    // Offstage keeps the widget tree alive (state preserved, no refetch)
+    // and only skips layout/painting when not visible.
+    final inSettings = state.panel == ActivePanel.settings;
+    final inHub = state.panel == ActivePanel.hub;
+    final inOther = !inSettings && !inHub;
 
-    // ── Hub — same treatment: a top-level destination that the user
-    // can open from the sidebar regardless of whether an app is
-    // active. Renders inside the content area to the right of the
-    // activity bar so the bar stays visible (consistent with the
-    // way Chat / Sessions / Settings work).
-    if (state.panel == ActivePanel.hub) {
-      return const HubPage(embedded: true);
-    }
+    // Positioned.fill gives each child tight constraints matching the
+    // Stack's own size (which fills the parent Expanded). Without it,
+    // Stack gives non-positioned children *loose* constraints — the Row
+    // and AppSelector would collapse to zero height and be invisible.
+    return Stack(
+      children: [
+        // Settings — always mounted, hidden when not active
+        Positioned.fill(
+          child: Offstage(
+            offstage: !inSettings,
+            child: IgnorePointer(
+              ignoring: !inSettings,
+              child: const SettingsPage(),
+            ),
+          ),
+        ),
+        // Hub — always mounted, hidden when not active
+        Positioned.fill(
+          child: Offstage(
+            offstage: !inHub,
+            child: IgnorePointer(
+              ignoring: !inHub,
+              child: const HubPage(embedded: true),
+            ),
+          ),
+        ),
+        // Everything else (dashboard, chat, background, oneshot)
+        if (inOther) Positioned.fill(child: _buildMainContent(context)),
+      ],
+    );
+  }
 
-    // ── Dashboard (no app selected) ─────────────────────────────────────
+  Widget _buildMainContent(BuildContext context) {
     if (state.activeApp == null) {
       return AnimatedSwitcher(
         duration: const Duration(milliseconds: 300),
@@ -2670,11 +2909,26 @@ class _ContentAreaState extends State<_ContentArea> {
 
     // ── Conversation app: chat + optional panels ─────────────────────────
     final showSessions = state.panel == ActivePanel.sessions;
-    final showSettings = state.panel == ActivePanel.settings;
 
     final screenWidth = MediaQuery.of(context).size.width;
-    // Auto-hide sessions on narrow screens
-    final effectiveShowSessions = showSessions && screenWidth > 700;
+    // Auto-close sessions/workspace on narrow viewports — strict
+    // parity with web (`client.tsx` resize hook). Threshold 900 for
+    // the history drawer (320 + chat 580 = floor before the composer
+    // truncates), 700 for the workspace (which is the active surface
+    // and survives a tighter chat). We CLOSE the panel state via a
+    // post-frame callback so the next rebuild renders the chat
+    // full-width — identical to the web's `setDrawerOpen(false)`.
+    final shouldAutoCloseSessions = showSessions && screenWidth < 900;
+    final shouldAutoCloseWorkspace =
+        state.isWorkspaceVisible && screenWidth < 700;
+    if (shouldAutoCloseSessions || shouldAutoCloseWorkspace) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (shouldAutoCloseSessions) state.setPanel(ActivePanel.chat);
+        if (shouldAutoCloseWorkspace) state.closeWorkspace();
+      });
+    }
+    final effectiveShowSessions = showSessions && screenWidth >= 900;
 
     return Row(
       children: [
@@ -2709,9 +2963,7 @@ class _ContentAreaState extends State<_ContentArea> {
 
         // Main content area
         Expanded(
-          child: showSettings
-              ? const SettingsPage()
-              : _chatOrSplit(context, state),
+          child: _chatOrSplit(context, state),
         ),
       ],
     );
@@ -2820,9 +3072,14 @@ class _ContentAreaState extends State<_ContentArea> {
       return SplitView(
         key: const ValueKey('split'),
         viewMode: SplitViewMode.Horizontal,
+        // Visible 2px gripper in the theme border colour so the
+        // resize affordance is discoverable. Was 4px transparent — a
+        // hot-zone with no visual hint, so users couldn't see they
+        // could drag.
+        gripSize: 2,
+        gripColor: context.colors.border,
+        gripColorActive: context.colors.accentPrimary,
         indicator: const SizedBox.shrink(),
-        gripSize: 4,
-        gripColor: Colors.transparent,
         controller: _splitCtrl,
         children: [
           ClipRect(child: primary),
@@ -2831,19 +3088,10 @@ class _ContentAreaState extends State<_ContentArea> {
       );
     }
 
-    // Collapsed workspace — show a thin always-visible rail on the
-    // right so the user has a permanent affordance without the panel
-    // eating screen real-estate. Fully hidden for apps that opted out
-    // via `workspace_mode: none` (state.workspaceAvailable = false).
-    if (state.workspaceAvailable) {
-      return Row(
-        children: [
-          Expanded(child: primary),
-          WorkspaceRail(onExpand: state.showWorkspace),
-        ],
-      );
-    }
-
+    // Workspace rail removed — the compact "Workspace" toggle now
+    // lives in the top-right of the chat panel (see
+    // `_buildWorkspaceToggle` in chat_panel.dart). Avoids two
+    // affordances doing the same job.
     return primary;
   }
 }

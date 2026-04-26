@@ -26,6 +26,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'session_service.dart';
 import 'socket_service.dart';
 
 class PreviewStore extends ChangeNotifier {
@@ -63,6 +64,32 @@ class PreviewStore extends ChangeNotifier {
   void _onEvent(Map<String, dynamic> event) {
     final type = event['type'] as String? ?? '';
     final payload = event['payload'] as Map<String, dynamic>? ?? {};
+
+    // Hard per-session isolation. Without this guard, a late event
+    // for session A that races in after the user switched to session
+    // B would overwrite B's workspace with A's files (Monaco shows
+    // the wrong file tree, the wrong open tab, the wrong tool
+    // output). The daemon tags every envelope with ``session_id`` —
+    // we drop anything that doesn't match what the user is currently
+    // looking at. ``reset()`` + the new session's ``preview:snapshot``
+    // then rebuild the store cleanly on session entry.
+    //
+    // Events without a ``session_id`` (legacy / bootstrap) are let
+    // through so we don't regress on daemons that haven't been
+    // updated. Once the contract is enforced server-side this can
+    // become a strict filter.
+    final evSid = event['session_id'] as String?;
+    final activeSid = SessionService().activeSession?.sessionId;
+    if (evSid != null &&
+        evSid.isNotEmpty &&
+        activeSid != null &&
+        activeSid.isNotEmpty &&
+        evSid != activeSid) {
+      debugPrint(
+          'PreviewStore: drop $type for sid=$evSid (active=$activeSid)');
+      return;
+    }
+
     debugPrint('PreviewStore: $type (payload keys: ${payload.keys})');
     final pSeq = (payload['preview_seq'] as num?)?.toInt();
     if (pSeq != null && pSeq > seq) seq = pSeq;

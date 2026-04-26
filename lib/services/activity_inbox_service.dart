@@ -20,6 +20,7 @@ import 'package:flutter/foundation.dart';
 import 'apps_service.dart';
 import 'auth_service.dart';
 import 'background_app_service.dart';
+import 'cache/swr_cache.dart';
 import 'credential_service.dart';
 import 'user_events_service.dart';
 
@@ -153,12 +154,36 @@ class ActivityInboxService extends ChangeNotifier {
   /// that transition by falling back to the local derivation.
   int? _serverUnreadCount;
 
+  /// Short SWR cache for the bell's unread-count HTTP fallback.
+  /// Live Socket.IO events are the primary source; this is only hit
+  /// on cold open. 30 s TTL means rapid reopens of the bell don't
+  /// spam the daemon, and event-driven invalidation via the socket
+  /// keeps the number accurate when it matters.
+  final SwrCache<String, int?> _unreadCache = SwrCache(
+    ttl: const Duration(seconds: 30),
+    name: 'inbox_unread',
+  );
+
   /// Fetch the authoritative unread count from
   /// `GET /api/users/me/inbox/unread_count`. Cheaper than a full
   /// `refresh()` — the bell calls this on startup and on every
   /// `inbox.created` event so the badge stays in sync without
   /// re-hydrating the whole list.
-  Future<int?> fetchUnreadCountFromServer() async {
+  Future<int?> fetchUnreadCountFromServer({bool force = false}) async {
+    return _unreadCache.getOrFetch(
+      key: 'unread',
+      force: force,
+      fetcher: () => _fetchUnreadOnce(),
+      onRevalidated: (n) {
+        if (n != null) {
+          _serverUnreadCount = n;
+          notifyListeners();
+        }
+      },
+    );
+  }
+
+  Future<int?> _fetchUnreadOnce() async {
     try {
       final r = await _dio.get('$_base/api/users/me/inbox/unread_count');
       if (r.statusCode != 200) return null;
@@ -601,8 +626,11 @@ class ActivityInboxService extends ChangeNotifier {
       ));
       // Keep the bell badge in sync with the daemon rather than
       // trusting our local derivation — the server has the real
-      // count including items we don't have in memory.
-      unawaited(fetchUnreadCountFromServer());
+      // count including items we don't have in memory. Force past
+      // the SWR cache because ``inbox.created`` is literally "the
+      // count changed, ignore the 30 s stale window".
+      _unreadCache.invalidate('unread');
+      unawaited(fetchUnreadCountFromServer(force: true));
       return;
     }
   }

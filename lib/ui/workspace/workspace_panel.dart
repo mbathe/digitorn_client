@@ -62,31 +62,38 @@ class _WorkspacePanelInnerState extends State<_WorkspacePanelInner>
     final modules = app?.modules ?? [];
     final tabs = <(String, Widget, Widget)>[];
 
-    // Files — always present
-    tabs.add((
-      'files',
-      Tab(
-        height: 44,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.folder_open_outlined, size: 12, color: c.textMuted),
-            const SizedBox(width: 5),
-            Text('workspace.files'.tr()),
-            if (ws.buffers.isNotEmpty) ...[
-              const SizedBox(width: 4),
-              _TabBadge('${ws.buffers.length}', color: c.textDim),
-            ],
-            if (ws.errorCount > 0) ...[
-              const SizedBox(width: 4),
-              _TabBadge('${ws.errorCount}',
-                  color: c.red.withValues(alpha: 0.15), fg: c.red),
-            ],
-          ],
-        ),
-      ),
-      _FilesTab(ws: ws, searchFocus: _searchInputFocus),
-    ));
+    // Build the Files tab last (after we know how many siblings it has),
+    // so we only pass `onClose` when it's the SOLE tab — otherwise the
+    // 52px tab header carries the close button and we'd duplicate it.
+    (String, Widget, Widget) buildFilesTab(bool isSole) => (
+          'files',
+          Tab(
+            height: 44,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.folder_open_outlined,
+                    size: 12, color: c.textMuted),
+                const SizedBox(width: 5),
+                Text('workspace.files'.tr()),
+                if (ws.buffers.isNotEmpty) ...[
+                  const SizedBox(width: 4),
+                  _TabBadge('${ws.buffers.length}', color: c.textDim),
+                ],
+                if (ws.errorCount > 0) ...[
+                  const SizedBox(width: 4),
+                  _TabBadge('${ws.errorCount}',
+                      color: c.red.withValues(alpha: 0.15), fg: c.red),
+                ],
+              ],
+            ),
+          ),
+          _FilesTab(
+            ws: ws,
+            searchFocus: _searchInputFocus,
+            onClose: isSole ? () => appState.closeWorkspace() : null,
+          ),
+        );
 
     // Database — only if app has database module
     if (modules.contains('database')) {
@@ -145,6 +152,8 @@ class _WorkspacePanelInnerState extends State<_WorkspacePanelInner>
       ));
     }
 
+    // Insert Files first, with onClose only when it's the sole tab.
+    tabs.insert(0, buildFilesTab(tabs.isEmpty));
     return tabs;
   }
 
@@ -191,54 +200,57 @@ class _WorkspacePanelInnerState extends State<_WorkspacePanelInner>
           color: c.bg,
           child: Column(
             children: [
-              // ── Header ──────────────────────────────────────────────
-              // Height matches the chat header (52 px) so the two
-              // columns line up on the same horizontal baseline when
-              // the workspace is docked next to the chat.
-              Container(
-                height: 52,
-                decoration: BoxDecoration(
-                  color: c.surface,
-                  border: Border(bottom: BorderSide(color: c.border)),
-                ),
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TabBar(
-                        controller: _tabs,
-                        onTap: (i) => ws.setActiveTab(tabDefs[i].$1),
-                        isScrollable: true,
-                        tabAlignment: TabAlignment.start,
-                        labelStyle: GoogleFonts.inter(
-                            fontSize: 11, fontWeight: FontWeight.w500),
-                        unselectedLabelStyle: GoogleFonts.inter(fontSize: 11),
-                        labelColor: c.text,
-                        unselectedLabelColor: c.textMuted,
-                        indicatorColor: c.textMuted,
-                        indicatorWeight: 1,
-                        indicatorSize: TabBarIndicatorSize.tab,
-                        dividerColor: Colors.transparent,
-                        padding: EdgeInsets.zero,
-                        tabs: tabDefs.map((t) => t.$2).toList(),
-                      ),
-                    ),
-                    // Close button
-                    Tooltip(
-                      message: 'Close workspace',
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(4),
-                        onTap: () => appState.closeWorkspace(),
-                        child: Padding(
-                          padding: const EdgeInsets.all(6),
-                          child: Icon(Icons.close_rounded,
-                              size: 14, color: c.textMuted),
+              // ── Header (only when 2+ tabs) ──────────────────────────
+              // When there's a single tab (Files) the 52px tab header
+              // would just show one label — wasted real-estate. We
+              // hide it and let the inner ``_FilesTab`` toolbar carry
+              // the close button instead.
+              if (tabDefs.length > 1)
+                Container(
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: c.surface,
+                    border: Border(bottom: BorderSide(color: c.border)),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TabBar(
+                          controller: _tabs,
+                          onTap: (i) => ws.setActiveTab(tabDefs[i].$1),
+                          isScrollable: true,
+                          tabAlignment: TabAlignment.start,
+                          labelStyle: GoogleFonts.inter(
+                              fontSize: 11, fontWeight: FontWeight.w500),
+                          unselectedLabelStyle:
+                              GoogleFonts.inter(fontSize: 11),
+                          labelColor: c.text,
+                          unselectedLabelColor: c.textMuted,
+                          indicatorColor: c.textMuted,
+                          indicatorWeight: 1,
+                          indicatorSize: TabBarIndicatorSize.tab,
+                          dividerColor: Colors.transparent,
+                          padding: EdgeInsets.zero,
+                          tabs: tabDefs.map((t) => t.$2).toList(),
                         ),
                       ),
-                    ),
-                  ],
+                      // Close button
+                      Tooltip(
+                        message: 'Close workspace',
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(4),
+                          onTap: () => appState.closeWorkspace(),
+                          child: Padding(
+                            padding: const EdgeInsets.all(6),
+                            child: Icon(Icons.close_rounded,
+                                size: 14, color: c.textMuted),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
 
               // ── Content ─────────────────────────────────────────────
               Expanded(
@@ -282,7 +294,11 @@ class _TabBadge extends StatelessWidget {
 class _FilesTab extends StatefulWidget {
   final WorkspaceService ws;
   final FocusNode? searchFocus;
-  const _FilesTab({required this.ws, this.searchFocus});
+  /// When set, a small close-workspace button is rendered at the
+  /// right edge of the toolbar — used when this tab is the only one
+  /// (the outer 52px tab header is hidden in that case).
+  final VoidCallback? onClose;
+  const _FilesTab({required this.ws, this.searchFocus, this.onClose});
 
   @override
   State<_FilesTab> createState() => _FilesTabState();
@@ -309,41 +325,54 @@ class _FilesTabState extends State<_FilesTab> {
     }
     final showPreview = _showPreview && hasPreview;
 
-    if (!wsModule.hasFiles && !wsModule.hasMeta) {
-      return const _EmptyPane(
-        icon: Icons.folder_open_outlined,
-        title: 'No files yet',
-        subtitle: 'Send a message — the agent writes files here.',
-      );
-    }
+    // Empty state used to short-circuit before the toolbar — but the
+    // user wants the mode dropdown visible even before any file is
+    // written, so we let the unified render below handle it. The
+    // EmptyPane is rendered as the main content area when nothing
+    // is there.
+    final isEmpty = !wsModule.hasFiles && !wsModule.hasMeta;
 
     final c = context.colors;
 
     return Column(
       children: [
-        // ── Toolbar ──────────────────────────────────────────────────
+        // ── Toolbar (30px, NO border) ────────────────────────────────
+        // Mode dropdown at the LEFT, then Search + Refresh, spacer,
+        // summary, and Close at the right. No border-bottom — keeps
+        // the top visually clear.
         Container(
           height: 30,
           padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: c.surface,
-            border: Border(bottom: BorderSide(color: c.border)),
-          ),
+          color: c.bg,
           child: Row(
             children: [
-              _ToolbarButton(
-                icon: Icons.folder_open_rounded,
-                active: !showPreview && !_showChanges && !_showSearch,
-                onTap: () => setState(() {
-                  _showPreview = false;
-                  _showChanges = false;
-                  _showSearch = false;
+              _WorkspaceModeMenu(
+                mode: _showChanges
+                    ? _WsMode.changes
+                    : (showPreview ? _WsMode.preview : _WsMode.code),
+                hasPreview: hasPreview,
+                onSelect: (m) => setState(() {
+                  switch (m) {
+                    case _WsMode.code:
+                      _showChanges = false;
+                      _showPreview = false;
+                      _showSearch = false;
+                    case _WsMode.preview:
+                      _showChanges = false;
+                      _showSearch = false;
+                      _showPreview = true;
+                    case _WsMode.changes:
+                      _showPreview = false;
+                      _showSearch = false;
+                      _showChanges = true;
+                  }
                 }),
               ),
               const SizedBox(width: 4),
-              _ToolbarButton(
+              _WsToolbarBtn(
                 icon: Icons.search_rounded,
                 active: _showSearch && !showPreview,
+                tooltip: 'Search (Ctrl+Shift+F)',
                 onTap: () => setState(() {
                   _showPreview = false;
                   _showSearch = !_showSearch;
@@ -353,46 +382,47 @@ class _FilesTabState extends State<_FilesTab> {
                   }
                 }),
               ),
-              const SizedBox(width: 4),
-              _ToolbarButton(
-                icon: Icons.difference_rounded,
-                active: _showChanges && !showPreview,
-                badge: wsModule.pendingCount,
-                badgeColor: c.green,
-                onTap: () => setState(() {
-                  _showPreview = false;
-                  _showChanges = !_showChanges;
-                }),
-              ),
-              if (hasPreview) ...[
+              if (hasPreview && showPreview) ...[
                 const SizedBox(width: 4),
-                _ToolbarButton(
-                  icon: Icons.visibility_rounded,
-                  active: showPreview,
-                  onTap: () => setState(() => _showPreview = !showPreview),
+                _WsToolbarBtn(
+                  icon: Icons.refresh_rounded,
+                  tooltip: 'Refresh preview',
+                  onTap: () {
+                    final session = SessionService().activeSession;
+                    if (session != null) {
+                      SessionService().rejoinSessionRoom();
+                    }
+                    setState(() {});
+                  },
                 ),
-                if (showPreview) ...[
-                  const SizedBox(width: 4),
-                  _ToolbarButton(
-                    icon: Icons.refresh_rounded,
-                    onTap: () {
-                      final session = SessionService().activeSession;
-                      if (session != null) {
-                        SessionService().rejoinSessionRoom();
-                      }
-                      setState(() {});
-                    },
-                  ),
-                ],
               ],
-              const Spacer(),
-              if (wsModule.hasFiles)
+              // globalSummary placed BEFORE the Spacer so the close X
+              // stays pinned to the far right. With the previous order
+              // (Spacer → summary → close) the X visibly slid left every
+              // time the summary widened.
+              if (wsModule.hasFiles) ...[
+                const SizedBox(width: 8),
                 Flexible(
                   child: Text(wsModule.globalSummary,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.firaCode(
                           fontSize: 9.5, color: c.textDim)),
+                ),
+              ],
+              const Spacer(),
+              if (widget.onClose != null)
+                Tooltip(
+                  message: 'Close workspace',
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(4),
+                    onTap: widget.onClose,
+                    child: Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: Icon(Icons.close_rounded,
+                          size: 13, color: c.textMuted),
+                    ),
+                  ),
                 ),
             ],
           ),
@@ -402,15 +432,22 @@ class _FilesTabState extends State<_FilesTab> {
           SearchPanel(ws: ws, inputFocus: widget.searchFocus),
         // ── Main content ─────────────────────────────────────────────
         Expanded(
-          child: hasPreview
-              ? IndexedStack(
-                  index: showPreview ? 0 : 1,
-                  children: [
-                    const WsPreviewRouter(),
-                    _buildFilesContent(ws),
-                  ],
+          child: isEmpty
+              ? const _EmptyPane(
+                  icon: Icons.folder_open_outlined,
+                  title: 'No files yet',
+                  subtitle:
+                      'Send a message — the agent writes files here.',
                 )
-              : _buildFilesContent(ws),
+              : hasPreview
+                  ? IndexedStack(
+                      index: showPreview ? 0 : 1,
+                      children: [
+                        const WsPreviewRouter(),
+                        _buildFilesContent(ws),
+                      ],
+                    )
+                  : _buildFilesContent(ws),
         ),
       ],
     );
@@ -422,59 +459,6 @@ class _FilesTabState extends State<_FilesTab> {
     // editor (Monaco) + preview + problems panel, all listening to
     // [WorkspaceModule]. Legacy Row / tabs / tree have been removed.
     return const IdeLayout();
-  }
-}
-
-class _ToolbarButton extends StatelessWidget {
-  final IconData icon;
-  final bool active;
-  final int badge;
-  final Color? badgeColor;
-  final VoidCallback onTap;
-
-  const _ToolbarButton({
-    required this.icon,
-    this.active = false,
-    this.badge = 0,
-    this.badgeColor,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    return InkWell(
-      borderRadius: BorderRadius.circular(4),
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
-        decoration: BoxDecoration(
-          color: active ? c.green.withValues(alpha: 0.1) : null,
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 13, color: active ? c.green : c.textMuted),
-            if (badge > 0) ...[
-              const SizedBox(width: 3),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
-                decoration: BoxDecoration(
-                  color: (badgeColor ?? c.textMuted).withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(3),
-                ),
-                child: Text('$badge',
-                    style: GoogleFonts.firaCode(
-                        fontSize: 8.5,
-                        color: badgeColor ?? c.textMuted,
-                        fontWeight: FontWeight.w600)),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
   }
 }
 
@@ -666,4 +650,200 @@ class _WidgetsTab extends StatelessWidget {
           ),
         ),
       );
+}
+
+// ─── Toolbar icon button ─────────────────────────────────────────────────────
+
+class _WsToolbarBtn extends StatelessWidget {
+  final IconData icon;
+  final bool active;
+  final String? tooltip;
+  final VoidCallback onTap;
+  const _WsToolbarBtn({
+    required this.icon,
+    required this.onTap,
+    this.active = false,
+    this.tooltip,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final btn = InkWell(
+      borderRadius: BorderRadius.circular(4),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+        decoration: BoxDecoration(
+          color: active ? c.green.withValues(alpha: 0.1) : null,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Icon(icon, size: 13, color: active ? c.green : c.textMuted),
+      ),
+    );
+    if (tooltip == null) return btn;
+    return Tooltip(message: tooltip!, child: btn);
+  }
+}
+
+// ─── Workspace mode menu (right edge of toolbar) ─────────────────────────────
+
+enum _WsMode { code, preview, changes }
+
+/// "Code ▾" / "Preview ▾" / "Changes ▾" affordance — mirrors the
+/// app-name menu in the chat header.
+///
+/// Uses `MenuAnchor` (Material 3) instead of `PopupMenuButton` to
+/// keep the popup attached to the trigger AND aligned with its left
+/// edge — the legacy popup floated visually detached and could
+/// flip-anchor to the right which pushed it under the chat panel.
+class _WorkspaceModeMenu extends StatefulWidget {
+  final _WsMode mode;
+  final bool hasPreview;
+  final ValueChanged<_WsMode> onSelect;
+  const _WorkspaceModeMenu({
+    required this.mode,
+    required this.hasPreview,
+    required this.onSelect,
+  });
+
+  @override
+  State<_WorkspaceModeMenu> createState() => _WorkspaceModeMenuState();
+}
+
+class _WorkspaceModeMenuState extends State<_WorkspaceModeMenu> {
+  final MenuController _controller = MenuController();
+  bool _hover = false;
+
+  String _label(_WsMode m) => switch (m) {
+        _WsMode.code => 'Code',
+        _WsMode.preview => 'Preview',
+        _WsMode.changes => 'Changes',
+      };
+
+  IconData _icon(_WsMode m) => switch (m) {
+        _WsMode.code => Icons.folder_open_rounded,
+        _WsMode.preview => Icons.visibility_rounded,
+        _WsMode.changes => Icons.difference_rounded,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final modes = <_WsMode>[
+      _WsMode.code,
+      if (widget.hasPreview) _WsMode.preview,
+      _WsMode.changes,
+    ];
+
+    return MenuAnchor(
+      controller: _controller,
+      // Align under the trigger, anchored to its LEFT edge so the
+      // menu opens INTO the workspace (rightwards) — never under
+      // the chat panel.
+      alignmentOffset: const Offset(0, 4),
+      style: MenuStyle(
+        backgroundColor: WidgetStatePropertyAll(c.surface),
+        elevation: const WidgetStatePropertyAll(6),
+        side: WidgetStatePropertyAll(BorderSide(color: c.border)),
+        shape: WidgetStatePropertyAll(RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(6),
+        )),
+        padding: const WidgetStatePropertyAll(EdgeInsets.all(4)),
+      ),
+      menuChildren: [
+        for (final m in modes)
+          MenuItemButton(
+            onPressed: () => widget.onSelect(m),
+            style: ButtonStyle(
+              padding: const WidgetStatePropertyAll(
+                EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              ),
+              minimumSize: const WidgetStatePropertyAll(Size(140, 30)),
+              backgroundColor: WidgetStatePropertyAll(
+                m == widget.mode
+                    ? c.accentPrimary.withValues(alpha: 0.08)
+                    : Colors.transparent,
+              ),
+              shape: WidgetStatePropertyAll(RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(4),
+              )),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _icon(m),
+                  size: 13,
+                  color: m == widget.mode ? c.accentPrimary : c.textMuted,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _label(m),
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    fontWeight: m == widget.mode
+                        ? FontWeight.w600
+                        : FontWeight.w500,
+                    color: m == widget.mode ? c.accentPrimary : c.text,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+      builder: (context, controller, _) {
+        return MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
+            onTap: () {
+              if (controller.isOpen) {
+                controller.close();
+              } else {
+                controller.open();
+              }
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 140),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: _hover || controller.isOpen
+                    ? c.surfaceAlt
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _label(widget.mode),
+                    style: GoogleFonts.inter(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: c.textBright,
+                      letterSpacing: -0.1,
+                    ),
+                  ),
+                  const SizedBox(width: 3),
+                  AnimatedRotation(
+                    duration: const Duration(milliseconds: 140),
+                    turns: controller.isOpen ? 0.5 : 0,
+                    child: Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 14,
+                      color: c.textMuted
+                          .withValues(alpha: _hover ? 1.0 : 0.7),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }

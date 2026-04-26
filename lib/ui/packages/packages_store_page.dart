@@ -23,10 +23,13 @@ import '../../models/app_package.dart';
 import '../../models/app_summary.dart';
 import '../../services/apps_service.dart';
 import '../../services/auth_service.dart';
+import '../../services/hub_install_controller.dart';
 import '../../services/package_service.dart';
 import '../../services/session_service.dart';
 import '../../theme/app_theme.dart';
 import '../common/pill_tab_bar.dart';
+import '../hub/hub_discover_view.dart';
+import '../hub/hub_package_detail_page.dart';
 import 'disabled_apps_section.dart';
 import 'featured_catalogue.dart';
 import 'install_flow.dart';
@@ -104,8 +107,6 @@ class _PackagesStorePageState extends State<PackagesStorePage>
   bool _loading = true;
   String? _error;
   List<AppPackage> _installed = const [];
-  List<AppPackage> _available = const [];
-  bool _hubStubbed = false;
 
   @override
   void initState() {
@@ -130,15 +131,14 @@ class _PackagesStorePageState extends State<PackagesStorePage>
       // filter the installed list against it though — the daemon
       // doesn't uniformly populate `deployed_app_id` on every
       // package, and a strict filter hides legitimate apps.
-      final results = await Future.wait([
-        _svc.list().catchError((_) => <AppPackage>[]),
-        _loadAvailable(),
-        AppsService().refresh().catchError((_) {}),
-      ]);
+      final installed = await _svc.list().catchError((_) => <AppPackage>[]);
+      // Warm the AppsService cache in the background — the per-card
+      // admin menu fires lifecycle actions that rely on it.
+      // ignore: discarded_futures
+      AppsService().refresh().catchError((_) {});
       if (!mounted) return;
       setState(() {
-        _installed = results[0] as List<AppPackage>;
-        _available = results[1] as List<AppPackage>;
+        _installed = installed;
         _loading = false;
       });
       // Kick off the per-app update probe in the background. The
@@ -182,24 +182,6 @@ class _PackagesStorePageState extends State<PackagesStorePage>
     });
   }
 
-  /// Try the daemon's `available?source=hub` endpoint. On 501 we
-  /// flag `_hubStubbed = true` so the discover view shows a soft
-  /// banner explaining why the catalogue is curated.
-  Future<List<AppPackage>> _loadAvailable() async {
-    try {
-      final list = await _svc.listAvailable();
-      _hubStubbed = false;
-      return list;
-    } on PackageException catch (e) {
-      if (e.statusCode == 501) {
-        _hubStubbed = true;
-        return FeaturedCatalogue.all();
-      }
-      _hubStubbed = false;
-      return FeaturedCatalogue.all();
-    }
-  }
-
   bool _isInstalled(String packageId) =>
       _installed.any((p) => p.packageId == packageId);
 
@@ -213,16 +195,6 @@ class _PackagesStorePageState extends State<PackagesStorePage>
         installed: _isInstalled(pkg.packageId),
       ),
     ));
-  }
-
-  Future<void> _quickInstall(AppPackage pkg) async {
-    final installed = await PackageInstallFlow.install(
-      context,
-      sourceType: pkg.sourceType,
-      sourceUri: pkg.sourceUri ?? pkg.packageId,
-      version: pkg.version,
-    );
-    if (installed != null) _load();
   }
 
   Future<void> _quickUpgrade(AppPackage pkg) async {
@@ -534,15 +506,36 @@ class _PackagesStorePageState extends State<PackagesStorePage>
               child: TabBarView(
                 controller: _tabs,
                 children: [
-                  _DiscoverView(
-                    available: _available,
-                    isInstalled: _isInstalled,
-                    hubStubbed: _hubStubbed,
-                    loading: _loading,
-                    error: _error,
-                    onRetry: _load,
-                    onCardTap: _openDetail,
-                    onInstall: _quickInstall,
+                  HubDiscoverView(
+                    installed: _installed,
+                    onCardTap: (hit) {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => HubPackageDetailPage(
+                            publisher: hit.publisherSlug,
+                            packageId: hit.packageId,
+                            installed: _isInstalled(hit.packageId),
+                            onInstall: (pkg) => HubInstallController
+                                .instance
+                                .install(
+                              context: context,
+                              publisher: pkg.publisherSlug,
+                              packageId: pkg.packageId,
+                              packageName: pkg.name,
+                              onSuccess: _load,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                    onInstallHit: (hit) =>
+                        HubInstallController.instance.install(
+                      context: context,
+                      publisher: hit.publisherSlug,
+                      packageId: hit.packageId,
+                      packageName: hit.name,
+                      onSuccess: _load,
+                    ),
                   ),
                   _LibraryView(
                     packages: _installed,

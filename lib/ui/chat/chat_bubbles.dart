@@ -141,6 +141,14 @@ class _SystemMessage extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.colors;
     final isSmall = MediaQuery.sizeOf(context).width < 500;
+    // Empty-text markers carry no visual — they exist in the timeline
+    // as silent anchors for things like the inline approval banner
+    // (which is rendered upstream by the itemBuilder against the
+    // marker's id). Without this short-circuit we'd draw the divider
+    // lines around an invisible line of text.
+    if (message.text.isEmpty && !message.isStreaming) {
+      return const SizedBox.shrink();
+    }
     return Padding(
       padding: EdgeInsets.symmetric(vertical: 6, horizontal: isSmall ? 8 : 24),
       child: Row(
@@ -243,15 +251,13 @@ class _UserBubbleState extends State<_UserBubble> {
   Widget build(BuildContext context) {
     final message = widget.message;
     final c = context.colors;
-    final manifest = context.watch<AppState>().manifest;
-    final accent = manifest.accent ?? c.accentPrimary;
+    // `manifest`/`accent` removed — the toned-down user bubble no
+    // longer reads from the per-app accent for its bg/border.
     final screenWidth = MediaQuery.of(context).size.width;
     final isSmall = screenWidth < 600;
     final maxBubbleWidth = isSmall
         ? screenWidth * 0.85
         : (screenWidth * 0.72).clamp(320.0, 720.0);
-    final time =
-        '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}';
     // Grouping: when the previous message was also from the user,
     // collapse the vertical gap so consecutive turns read as a
     // single thread (à la Claude / ChatGPT / WhatsApp).
@@ -277,35 +283,18 @@ class _UserBubbleState extends State<_UserBubble> {
                 child: ConstrainedBox(
                   constraints:
                       BoxConstraints(maxWidth: maxBubbleWidth),
+                  // ChatGPT / Claude style — barely-tinted surface
+                  // panel, NO border, NO shadow. Right alignment +
+                  // slight bg tint is enough to identify the speaker;
+                  // the bordered "CTA" look made every message feel
+                  // like a button. Corners are uniform 18 px (no
+                  // tail) — both ChatGPT and Claude use equal-radius
+                  // bubbles. Matches the web `UserBubble`.
                   child: Container(
-                    padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
                     decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          c.userBubbleBg,
-                          Color.lerp(c.userBubbleBg, accent, 0.06) ??
-                              c.userBubbleBg,
-                        ],
-                      ),
-                      borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(20),
-                        topRight: Radius.circular(20),
-                        bottomLeft: Radius.circular(20),
-                        bottomRight: Radius.circular(6),
-                      ),
-                      border: Border.all(
-                        color: accent.withValues(alpha: 0.24),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: accent.withValues(alpha: 0.10),
-                          blurRadius: 18,
-                          spreadRadius: -6,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
+                      color: Color.lerp(c.surface, c.bg, 0.30) ?? c.surface,
+                      borderRadius: BorderRadius.circular(18),
                     ),
                     child: SelectableText(
                       message.text,
@@ -359,8 +348,8 @@ class _UserBubbleState extends State<_UserBubble> {
                     AnimatedOpacity(
                       duration: const Duration(milliseconds: 150),
                       opacity: _hovered ? 1.0 : 0.0,
-                      child: Padding(
-                        padding: const EdgeInsets.only(right: 4),
+                      child: IgnorePointer(
+                        ignoring: !_hovered,
                         child: _UserCopyButton(
                           onTap: () {
                             Clipboard.setData(
@@ -370,15 +359,6 @@ class _UserBubbleState extends State<_UserBubble> {
                             }
                           },
                         ),
-                      ),
-                    ),
-                    Text(
-                      time,
-                      style: GoogleFonts.jetBrainsMono(
-                        fontSize: 10.5,
-                        color: c.textMuted,
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: 0.1,
                       ),
                     ),
                   ],
@@ -530,30 +510,44 @@ class _AssistantBubbleState extends State<_AssistantBubble> {
               text: block.textContent,
               isActive: block.thinkingActive,
               collapsed: collapsed,
+              outTokens: block.thinkingTokens,
             ));
           }
           i++;
           break;
 
         case ContentBlockType.toolCall:
-          // Collect adjacent tool call blocks into a group
+        case ContentBlockType.toolCallStreaming:
+          // Collect adjacent tool blocks (real calls + the trailing
+          // streaming placeholder, if any) into a single group so the
+          // live chip for a call being composed sits in the same
+          // section as the calls already finished — no visual break
+          // between completed calls and the one being generated.
           final group = <ToolCall>[];
-          while (i < timeline.length &&
-              timeline[i].type == ContentBlockType.toolCall &&
-              timeline[i].toolCall != null) {
-            group.add(timeline[i].toolCall!);
-            i++;
-          }
-          if (group.isNotEmpty) {
-            if (children.isNotEmpty) {
-              children.add(const SizedBox(height: 10));
+          ContentBlock? trailer;
+          while (i < timeline.length) {
+            final b = timeline[i];
+            if (b.type == ContentBlockType.toolCall && b.toolCall != null) {
+              group.add(b.toolCall!);
+              i++;
+              continue;
             }
-            children.add(Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: _ToolCallSection(
-                toolCalls: group,
-                collapsed: collapsed,
-              ),
+            if (b.type == ContentBlockType.toolCallStreaming) {
+              if (trailer != null) break; // close on a second chip
+              trailer = b;
+              i++;
+              continue;
+            }
+            break;
+          }
+          if (group.isNotEmpty || trailer != null) {
+            if (children.isNotEmpty) {
+              children.add(const SizedBox(height: 5));
+            }
+            children.add(_ToolCallSection(
+              toolCalls: group,
+              streamingTrailer: trailer,
+              collapsed: collapsed,
             ));
           }
           break;
@@ -578,7 +572,7 @@ class _AssistantBubbleState extends State<_AssistantBubble> {
         case ContentBlockType.text:
           if (block.textContent.isNotEmpty) {
             if (children.isNotEmpty) {
-              children.add(const SizedBox(height: 10));
+              children.add(const SizedBox(height: 5));
             }
             children.add(ChatMarkdown(text: block.textContent));
           }
@@ -597,7 +591,7 @@ class _AssistantBubbleState extends State<_AssistantBubble> {
           final payload = block.widget;
           if (payload != null) {
             if (children.isNotEmpty) {
-              children.add(const SizedBox(height: 10));
+              children.add(const SizedBox(height: 5));
             }
             children.add(_InlineWidgetBlock(payload: payload));
           }
@@ -614,31 +608,25 @@ class _AssistantBubbleState extends State<_AssistantBubble> {
     // we added. One indicator, one owner, one flag — easier to keep
     // correct.
 
-    // ── Token footer (subtle badges with in/out counts) ────────────────
-    // Only when a turn is fully complete AND we have real counts, so
-    // streaming messages don't flicker a half-updated number.
-    if (!message.isStreaming &&
-        (message.inTokens > 0 || message.outTokens > 0)) {
-      children.add(Padding(
-        padding: const EdgeInsets.only(top: 6),
-        child: _TokenFooter(
-          inTokens: message.inTokens,
-          outTokens: message.outTokens,
-        ),
-      ));
-    }
+    // Token footer removed: the bottom-bar context indicator already
+    // shows cumulative session usage, repeating per-turn `↓N in ·
+    // ↑M out` on every assistant bubble adds chrome without
+    // information the user can't get more globally.
 
     // ── Action bar ─────────────────────────────────────────────────────
-    // Visible at a low opacity by default so the user discovers the
-    // affordance without the action row flashing in on every hover.
-    // Full opacity on hover. Hidden entirely while streaming (would
-    // read as noise on a still-typing response).
+    // Hidden by default, fades in on hover. Matches the user-bubble
+    // behaviour and keeps the transcript clean — the copy affordance
+    // is still discoverable via hover and via the right-click menu.
+    // ``IgnorePointer`` when hidden so ghost hits below the row
+    // don't block scroll / selection when the opacity is 0.
     if (message.text.isNotEmpty && !isActive) {
       children.add(
         AnimatedOpacity(
           duration: const Duration(milliseconds: 150),
-          opacity: _hovered ? 1.0 : 0.55,
-          child: Padding(
+          opacity: _hovered ? 1.0 : 0.0,
+          child: IgnorePointer(
+            ignoring: !_hovered,
+            child: Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -673,6 +661,7 @@ class _AssistantBubbleState extends State<_AssistantBubble> {
                 ],
               ],
             ),
+          ),
           ),
         ),
       );
@@ -749,17 +738,113 @@ class _AssistantBubbleState extends State<_AssistantBubble> {
   }
 }
 
+// ─── Tool-call-streaming placeholder ──────────────────────────────────────────
+
+/// Live chip shown while the LLM is composing a tool call's args
+/// JSON (between `tool_call_streaming` and the matching `tool_start`).
+/// Pulses + shows the per-call litellm token count climbing so the
+/// user knows the agent is working on a long Write/Edit instead of
+/// staring at an empty bubble during multi-second arg generation.
+class _ToolCallStreamingChip extends StatefulWidget {
+  final String name;
+  final int tokenCount;
+  const _ToolCallStreamingChip({
+    super.key,
+    required this.name,
+    required this.tokenCount,
+  });
+
+  @override
+  State<_ToolCallStreamingChip> createState() =>
+      _ToolCallStreamingChipState();
+}
+
+class _ToolCallStreamingChipState extends State<_ToolCallStreamingChip>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    // Mirror `_buildToolContent`'s row geometry (vertical=3 padding,
+    // 13-px leading icon, fontSize 12.5 bold label) so when the
+    // chip is swapped in-place for the real tool card by
+    // ChatMessage.addOrUpdateToolCall, the layout doesn't shift even
+    // by a pixel. The "still streaming" signal is colour-only —
+    // muted text + a faintly pulsing wrench icon. Once tool_start
+    // lands the same row position is occupied by the real card with
+    // full status colour (green check / red cross / blue spinner).
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          AnimatedBuilder(
+            animation: _pulse,
+            builder: (_, _) => Icon(
+              Icons.build_rounded,
+              size: 13,
+              color: c.textDim.withValues(alpha: 0.5 + 0.4 * _pulse.value),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            widget.name,
+            style: GoogleFonts.inter(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: c.textDim,
+            ),
+          ),
+          if (widget.tokenCount > 0) ...[
+            const SizedBox(width: 8),
+            Text(
+              '· ${widget.tokenCount} tokens',
+              style: GoogleFonts.firaCode(
+                fontSize: 11,
+                color: c.textDim.withValues(alpha: 0.7),
+                fontFeatures: const [FontFeature.tabularFigures()],
+                letterSpacing: 0.2,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 // ─── Thinking block ──────────────────────────────────────────────────────────
 
 class _ThinkingBlock extends StatefulWidget {
   final String text;
   final bool isActive;
   final bool collapsed;
-  const _ThinkingBlock(
-      {super.key,
-      required this.text,
-      required this.isActive,
-      required this.collapsed});
+  /// Live cumulative completion-token count for the assistant message
+  /// owning this block — fed by the SSE `token` event's `payload.count`
+  /// (litellm-tokenized). Shown next to the label as `· 142 tokens`.
+  final int outTokens;
+  const _ThinkingBlock({
+    super.key,
+    required this.text,
+    required this.isActive,
+    required this.collapsed,
+    required this.outTokens,
+  });
 
   @override
   State<_ThinkingBlock> createState() => _ThinkingBlockState();
@@ -767,19 +852,16 @@ class _ThinkingBlock extends StatefulWidget {
 
 class _ThinkingBlockState extends State<_ThinkingBlock>
     with SingleTickerProviderStateMixin {
-  // Collapsed by default. Live (actively streaming) thinking auto-
-  // expands so the user sees tokens land in real time; once it flips
-  // to inactive (stream_done / next iteration) we close it again —
-  // but not if the user has touched it (respected via `_userToggled`).
+  // Always collapsed by default — even during active streaming. The
+  // user gets progress feedback through the live token counter next
+  // to the label and the pulsing coral dot, and can expand on demand.
   bool _open = false;
-  bool _userToggled = false;
   bool _hover = false;
   late final AnimationController _pulse;
 
   @override
   void initState() {
     super.initState();
-    _open = widget.isActive;
     _pulse = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
@@ -790,16 +872,11 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
   @override
   void didUpdateWidget(_ThinkingBlock old) {
     super.didUpdateWidget(old);
-    // Auto-close when streaming stops — only if the user hasn't taken
-    // control of this block yet. The explicit `collapsed` prop from
-    // the parent still forces closure (session-wide collapse).
+    // Session-wide collapse still forces closure (e.g. on a new
+    // user turn). Otherwise we leave `_open` alone — the user is
+    // the only one who toggles the panel now.
     if (!old.collapsed && widget.collapsed) {
       setState(() => _open = false);
-    } else if (!_userToggled && old.isActive && !widget.isActive) {
-      setState(() => _open = false);
-    } else if (!_userToggled && !old.isActive && widget.isActive) {
-      // Block became live (new iteration resumed) → auto-open again.
-      setState(() => _open = true);
     }
     if (widget.isActive && !_pulse.isAnimating) {
       _pulse.repeat(reverse: true);
@@ -815,34 +892,24 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
     super.dispose();
   }
 
-  int get _wordCount => widget.text
-      .trim()
-      .split(RegExp(r'\s+'))
-      .where((w) => w.isNotEmpty)
-      .length;
-
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => setState(() {
-            _open = !_open;
-            _userToggled = true; // stop auto-reacting to isActive flips
-          }),
-          child: Padding(
-            // Minimal vertical rhythm — the block is now a plain text
-            // affordance ("▸ Thoughts · 42 words"), no container, no
-            // border, no background. Streaming state gets a subtle
-            // pulsing coral dot as the only differentiator.
-            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
-            child: Column(
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => setState(() {
+          _open = !_open;
+        }),
+        child: Padding(
+          // Minimal vertical rhythm — the block is a plain text
+          // affordance ("▸ Thoughts · 142 tokens"), no container,
+          // no border. Streaming gets a pulsing coral dot.
+          padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+          child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -881,11 +948,7 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
                       const SizedBox(width: 6),
                     ],
                     Text(
-                      widget.isActive
-                          ? 'Thinking…'
-                          : (_wordCount > 0
-                              ? 'Thoughts · $_wordCount words'
-                              : 'Thoughts'),
+                      widget.isActive ? 'Thinking…' : 'Thoughts',
                       style: GoogleFonts.inter(
                         fontSize: 11.5,
                         color: _hover ? c.textMuted : c.textDim,
@@ -893,6 +956,20 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
                         letterSpacing: 0.1,
                       ),
                     ),
+                    if (widget.outTokens > 0) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '· ${widget.outTokens} tokens',
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 10.5,
+                          color: c.textDim,
+                          fontFeatures: const [
+                            FontFeature.tabularFigures(),
+                          ],
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
                 AnimatedSize(
@@ -919,8 +996,7 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
             ),
           ),
         ),
-      ),
-    );
+      );
   }
 }
 
@@ -928,9 +1004,17 @@ class _ThinkingBlockState extends State<_ThinkingBlock>
 
 class _ToolCallSection extends StatefulWidget {
   final List<ToolCall> toolCalls;
+  /// Optional live placeholder for the trailing tool call whose
+  /// args are still being composed by the LLM. Slots in as the last
+  /// row of the section so the user sees a continuous sequence
+  /// (no visual break between completed calls and the live one).
+  final ContentBlock? streamingTrailer;
   final bool collapsed;
-  const _ToolCallSection(
-      {required this.toolCalls, required this.collapsed});
+  const _ToolCallSection({
+    required this.toolCalls,
+    required this.collapsed,
+    this.streamingTrailer,
+  });
 
   @override
   State<_ToolCallSection> createState() => _ToolCallSectionState();
@@ -971,12 +1055,36 @@ class _ToolCallSectionState extends State<_ToolCallSection> {
   Widget build(BuildContext context) {
     final c = context.colors;
     final tools = widget.toolCalls;
-    if (tools.isEmpty) return const SizedBox.shrink();
+    final hasTrailer = widget.streamingTrailer != null;
+    if (tools.isEmpty && !hasTrailer) return const SizedBox.shrink();
+
+    // When the section is JUST a trailing streaming chip (no real
+    // calls finished yet), skip the tree/gutter rendering and emit
+    // the chip alone — same paddingLeft logic as a single tool call.
+    if (tools.isEmpty && hasTrailer) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: _ToolCallStreamingChip(
+          key: ObjectKey(widget.streamingTrailer),
+          name: widget.streamingTrailer!.streamingToolName ?? 'Tool',
+          tokenCount: widget.streamingTrailer!.thinkingTokens,
+        ),
+      );
+    }
 
     final hasRunning = tools.any((t) => t.status == 'started');
     final hasFailed = tools.any((t) => t.status == 'failed');
-    final isDone = !hasRunning;
-    final isSingle = tools.length == 1;
+    // While the trailer chip is live the section is "still
+    // running" too — that signal is what unlocks the blue group
+    // colour + spinner so the eye doesn't see the section flip
+    // colour at the chip → real-card swap.
+    final isDone = !hasRunning && !hasTrailer;
+    // Count the trailer chip as another item — keeps tree-line
+    // rendering on (N tools + chip) pairs so when the chip is
+    // swapped in-place for a real call the layout stays in tree
+    // mode without re-flowing.
+    final totalItems = tools.length + (hasTrailer ? 1 : 0);
+    final isSingle = totalItems == 1;
 
     // Status color for the group tree line
     final groupColor = hasRunning
@@ -1042,7 +1150,9 @@ class _ToolCallSectionState extends State<_ToolCallSection> {
                     size: const Size(contentLeft, double.infinity),
                     painter: _TreeLinePainter(
                       isFirst: i == 0,
-                      isLast: i == visibleTools.length - 1 && hidden <= 0,
+                      isLast: i == visibleTools.length - 1 &&
+                          hidden <= 0 &&
+                          !hasTrailer,
                       lineX: lineX,
                       color: groupColor.withValues(alpha: 0.5),
                     ),
@@ -1060,7 +1170,7 @@ class _ToolCallSectionState extends State<_ToolCallSection> {
             ),
 
         // Single tool (no tree)
-        if (isSingle)
+        if (isSingle && tools.isNotEmpty)
           for (int i = 0; i < visibleTools.length; i++)
             _buildToolContent(context, tool: visibleTools[i], c: c),
 
@@ -1082,6 +1192,36 @@ class _ToolCallSectionState extends State<_ToolCallSection> {
                   ),
                 ),
               ),
+            ),
+          ),
+
+        // ── Streaming trailer (LLM still composing the next call) ──
+        // Rendered as another tree-line row so the chip → real-card
+        // swap (via ChatMessage.addOrUpdateToolCall) keeps the same
+        // gutter, padding, and overall row geometry. Zero layout shift
+        // when the swap happens.
+        if (hasTrailer)
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                CustomPaint(
+                  size: const Size(contentLeft, double.infinity),
+                  painter: _TreeLinePainter(
+                    isFirst: tools.isEmpty,
+                    isLast: true,
+                    lineX: lineX,
+                    color: groupColor.withValues(alpha: 0.5),
+                  ),
+                ),
+                Expanded(
+                  child: _ToolCallStreamingChip(
+                    key: ObjectKey(widget.streamingTrailer),
+                    name: widget.streamingTrailer!.streamingToolName ?? 'Tool',
+                    tokenCount: widget.streamingTrailer!.thinkingTokens,
+                  ),
+                ),
+              ],
             ),
           ),
       ],
@@ -1695,12 +1835,13 @@ class ChatMarkdown extends StatelessWidget {
       // it reads as "a word" not "a citation".
       styleSheet: MarkdownStyleSheet(
         p: GoogleFonts.inter(
-          fontSize: 15.5,
+          fontSize: 13.5,
           color: c.text,
-          height: 1.72,
-          letterSpacing: 0.01,
+          height: 1.55,
+          letterSpacing: -0.05,
+          fontWeight: FontWeight.w400,
         ),
-        pPadding: const EdgeInsets.symmetric(vertical: 2),
+        pPadding: const EdgeInsets.symmetric(vertical: 1),
         h1: GoogleFonts.fraunces(
           fontSize: 28,
           fontWeight: FontWeight.w600,
@@ -2623,10 +2764,13 @@ String messageToMarkdown(ChatMessage message) {
           buf.writeln('  - ${e.resultSummary}');
         }
       case ContentBlockType.thinking:
+      case ContentBlockType.toolCallStreaming:
       case ContentBlockType.hookEvent:
       case ContentBlockType.widget:
         // Skip — either already captured above (thinking) or not
-        // meaningful in a copy-paste context.
+        // meaningful in a copy-paste context (toolCallStreaming is
+        // an ephemeral live placeholder, swapped for the real
+        // toolCall block before serialization matters).
         break;
     }
   }
@@ -4524,88 +4668,6 @@ class _BulletDotState extends State<_BulletDot>
             color: widget.color,
             height: 1.4),
       ),
-    );
-  }
-}
-
-/// Subtle footer showing the token cost of a completed turn.
-/// Format mirrors Cursor / ChatGPT Pro: ↓ 1,234 · ↑ 5,678.
-class _TokenFooter extends StatelessWidget {
-  final int inTokens;
-  final int outTokens;
-  const _TokenFooter({required this.inTokens, required this.outTokens});
-
-  String _fmt(int n) {
-    if (n < 1000) return '$n';
-    if (n < 1000000) return '${(n / 1000).toStringAsFixed(n < 10000 ? 1 : 0)}k';
-    return '${(n / 1000000).toStringAsFixed(1)}M';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // Convention : ↑ = envoyé AU modèle (upload / prompt),
-        // ↓ = reçu DU modèle (download / completion). Plus un
-        // label "in" / "out" explicite pour lever toute ambiguïté
-        // sur lequel est lequel — 6.8k "in" étonne moins quand on
-        // se rappelle que c'est le contexte total (system + tools
-        // + history) envoyé au modèle à chaque turn.
-        if (inTokens > 0) ...[
-          Icon(Icons.arrow_upward_rounded, size: 12, color: c.textMuted),
-          const SizedBox(width: 3),
-          Text(
-            _fmt(inTokens),
-            style: GoogleFonts.jetBrainsMono(
-              fontSize: 11.5,
-              color: c.textMuted,
-              height: 1.2,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            'in',
-            style: GoogleFonts.inter(
-              fontSize: 10.5,
-              color: c.textDim,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.3,
-            ),
-          ),
-        ],
-        if (inTokens > 0 && outTokens > 0) ...[
-          const SizedBox(width: 10),
-          Text('·', style: GoogleFonts.jetBrainsMono(
-              fontSize: 11.5, color: c.textDim)),
-          const SizedBox(width: 10),
-        ],
-        if (outTokens > 0) ...[
-          Icon(Icons.arrow_downward_rounded, size: 12, color: c.textMuted),
-          const SizedBox(width: 3),
-          Text(
-            _fmt(outTokens),
-            style: GoogleFonts.jetBrainsMono(
-              fontSize: 11.5,
-              color: c.textMuted,
-              height: 1.2,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            'out',
-            style: GoogleFonts.inter(
-              fontSize: 10.5,
-              color: c.textDim,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.3,
-            ),
-          ),
-        ],
-      ],
     );
   }
 }

@@ -85,7 +85,13 @@ class _OneshotPanelState extends State<OneshotPanel> {
       _currentMsg!.setStreamingState(true);
     });
 
-    final created = await SessionService().createAndSetSession(appId);
+    // Atomic create + first message — oneshot mode reuses the same
+    // contract: one POST creates the session AND queues the prompt.
+    final created = await SessionService().createAndSetSession(
+      appId,
+      message: text,
+      queueMode: 'async',
+    );
     if (!created || !mounted) {
       setState(() {
         _running = false;
@@ -96,7 +102,10 @@ class _OneshotPanelState extends State<OneshotPanel> {
     final sessionId = SessionService().activeSession?.sessionId;
     if (sessionId == null) return;
 
-    final err = await SessionService().sendMessage(appId, sessionId, text);
+    // The first message was already dispatched as part of session
+    // creation — no need to re-send it. Tokens flow via Socket.IO
+    // events on the active-session room.
+    final err = null;
     if (!mounted) return;
     if (err != null) {
       setState(() {

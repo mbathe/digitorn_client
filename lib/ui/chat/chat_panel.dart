@@ -3,12 +3,14 @@ import 'dart:collection';
 import 'dart:convert';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show SchedulerPhase;
 import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
+import '../../models/approval_request.dart';
 import '../../models/chat_message.dart';
 import '../../models/app_manifest.dart';
 import '../../models/app_summary.dart';
@@ -16,11 +18,9 @@ import '../../models/queue_entry.dart';
 import '../../services/api_client.dart';
 import '../../services/queue_service.dart';
 import '../../services/session_service.dart';
-import '../../services/session_prefs_service.dart';
+import '../../services/session_state_controller.dart';
 import '../../services/recent_attachments_service.dart';
 import '../../services/background_service.dart';
-import '../../services/socket_service.dart';
-import '../../services/auth_service.dart';
 import '../../services/voice_input_service.dart';
 import '../../services/workspace_snapshot_service.dart';
 import '../../widgets_v1/models.dart' as widgets_models;
@@ -62,6 +62,14 @@ import 'attach/attachment_helpers.dart' as attach_helpers;
 // ─── Color tokens ────────────────────────────────────────────────────────────
 // All colors now come from context.colors (AppColors theme extension).
 
+// ─── Cached GoogleFonts styles ───────────────────────────────────────────────
+// GoogleFonts.x() allocates a new TextStyle on every call. These singletons
+// avoid GC pressure during AI streaming where the build() runs many times/sec.
+// Color-dependent variants are NOT cached here (use copyWith for color).
+final _kFiraCode11 = GoogleFonts.firaCode(fontSize: 11);
+final _kInter125 = GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w500);
+final _kInter11 = GoogleFonts.inter(fontSize: 11);
+
 class DaemonError {
   final String error;
   final String code;
@@ -86,44 +94,9 @@ class DaemonError {
   );
 }
 
-class ApprovalRequest {
-  final String id;
-  final String agentId;
-  final String toolName;
-  final Map<String, dynamic> params;
-  final String riskLevel;
-  final String description;
-  final double createdAt;
-
-  ApprovalRequest({
-    required this.id,
-    this.agentId = '',
-    required this.toolName,
-    required this.params,
-    this.riskLevel = 'medium',
-    this.description = '',
-    double? createdAt,
-  }) : createdAt = createdAt ?? DateTime.now().millisecondsSinceEpoch / 1000;
-
-  bool get isAskUser => toolName == 'ask_user';
-  String get question =>
-      isAskUser ? (params['question'] as String? ?? description) : description;
-  String? get content => isAskUser ? params['content'] as String? : null;
-  bool get hasLongContent => content != null && content!.length > 100;
-
-  // ── Enhanced ask_user mode detection ──────────────────────────────────
-  List<String>? get choices =>
-      isAskUser ? (params['choices'] as List?)?.cast<String>() : null;
-  bool get allowMultiple => params['allow_multiple'] as bool? ?? false;
-  List<Map<String, dynamic>>? get formFields =>
-      isAskUser ? (params['form'] as List?)?.cast<Map<String, dynamic>>() : null;
-  bool get isSimpleQuestion =>
-      isAskUser && choices == null && formFields == null && content == null;
-  bool get isChoices => choices != null && choices!.isNotEmpty;
-  bool get isForm => formFields != null && formFields!.isNotEmpty;
-  bool get isContentReview =>
-      isAskUser && content != null && content!.isNotEmpty && !isChoices && !isForm;
-}
+// ApprovalRequest moved to lib/models/approval_request.dart — imported
+// at the top of this file — so the chat bubble renderer can reference
+// it without a circular dep back into this panel.
 
 /// Buffered copy of a `user_message` event received with
 /// `pending: true` and no matching optimistic bubble. Held in
@@ -327,6 +300,15 @@ class _ChatPanelState extends State<ChatPanel> {
       _TimelineBackedMessageList(_timeline);
   final Map<String, GlobalKey> _messageKeys = {};
   final List<ApprovalRequest> _pendingApprovals = [];
+  // Message-id -> approval request-id mapping. Populated when an
+  // `approval_request` event creates its inline system marker so the
+  // list item builder can render the interactive ``_ApprovalBanner``
+  // in-flow (pinned to the marker's seq) instead of as a banner stuck
+  // to the bottom of the pane. On resolve/timeout the request drops
+  // out of ``_pendingApprovals`` and the builder falls back to the
+  // plain text marker — the "Approval requested: …" / "Approval
+  // granted|denied" pair reads naturally in history.
+  final Map<String, String> _approvalMarkerReqId = {};
 
   StreamSubscription? _eventSub;
   StreamSubscription? _sessionChangeSub;
@@ -347,6 +329,44 @@ class _ChatPanelState extends State<ChatPanel> {
   bool _awaitingAgentResponse = false;
   Timer? _responseTimeout;
   DaemonError? _activeError;
+
+  /// Strict spinner gate — used by the send-button ring instead of
+  /// `_isSending` alone. The flag was set optimistically on send and
+  /// cleared on the terminal event; an out-of-order `message_started`
+  /// (socket reconnect, late event) could re-flip it `true` AFTER
+  /// the terminal event landed and leave the ring spinning forever.
+  ///
+  /// The robust check: a turn is REALLY running iff
+  ///   1. `_isSending` is true (intent to be in-flight) AND
+  ///   2. either we're still waiting for the very first event
+  ///      (`_awaitingAgentResponse`), OR at least one assistant
+  ///      message is `isStreaming`, OR at least one tool call is in
+  ///      the `started` state.
+  ///
+  /// If `_isSending` is true but none of the in-flight conditions
+  /// hold, the spinner is OFF — the flag is ignored, period.
+  ///
+  /// Connection / error gates kill the spinner regardless of
+  /// `_isSending`. The flag stays true semantically (the intent to
+  /// be in-flight is preserved across a transient disconnect — the
+  /// daemon may still finish the turn and replay events on reconnect)
+  /// but the VISUAL spinner is off so the user doesn't see a UI
+  /// element animating against a dead connection. Mirror of the
+  /// typing-skeleton's gates on the trailing dots row.
+  bool get _turnReallyRunning {
+    if (!_isSending) return false;
+    if (_statusPhase == 'disconnected') return false;
+    if (_statusPhase == 'aborting') return false;
+    if (_isInterrupted) return false;
+    if (_activeError != null) return false;
+    if (_awaitingAgentResponse) return true;
+    for (final m in _messages) {
+      if (m.role != MessageRole.assistant) continue;
+      if (m.isStreaming) return true;
+      if (m.hasOpenToolStart) return true;
+    }
+    return false;
+  }
   String _lastUserText = '';
   int _credentialRetryCount = 0;
   String _credentialRetryKey = '';
@@ -378,6 +398,14 @@ class _ChatPanelState extends State<ChatPanel> {
 
   // Track current session to detect switches
   String? _currentSessionId;
+
+  /// Scrollbar is visible only while the user is actively engaging
+  /// with the chat (hovered mouse, pointer down, or recent wheel).
+  /// False during agent streaming if the user is looking elsewhere,
+  /// which avoids the distracting thumb flash on every auto-scroll.
+  /// Cleared to false 1.5 s after the last interaction.
+  bool _scrollbarEngaged = false;
+  Timer? _scrollbarIdleTimer;
 
   /// When non-null the next Send will overwrite the referenced tail
   /// queue entry via `queue_mode=replace_last` rather than enqueuing
@@ -429,14 +457,34 @@ class _ChatPanelState extends State<ChatPanel> {
   final Map<String, List<ChatMessage>> _sessionMessageCache = {};
   static const int _maxCachedSessions = 8;
 
+  /// Per-session "last known seq" companion to [_sessionMessageCache].
+  /// Populated every time we ``_cacheSessionMessages`` so the cache-hit
+  /// short-circuit in ``_tryRestoreAndConnectInner`` can ask the state
+  /// envelope "has anything moved on the server since we saved this?"
+  /// An equal (or lower) envelope seq = nothing new = skip the full
+  /// history fetch entirely. Keyed identically to ``_sessionMessageCache``
+  /// so LRU eviction stays in sync.
+  final Map<String, int> _sessionSeqCache = {};
+
+  /// IDs of messages that have already played their entrance animation.
+  /// Only messages NOT in this set get the TweenAnimationBuilder fade-in.
+  final Set<String> _animatedMessageIds = {};
+
   void _cacheSessionMessages(String sessionId, List<ChatMessage> messages) {
     // Touch: remove + re-insert so most-recent is at the end.
     _sessionMessageCache.remove(sessionId);
     _sessionMessageCache[sessionId] = List<ChatMessage>.from(messages);
+    // Stamp the seq the envelope controller currently reports so a
+    // later switch-back can compare. If no envelope (e.g. brand-new
+    // session never observed), stamp 0 — the cache-hit path requires
+    // seq > 0 so it'll fall through to the full fetch on next visit.
+    final env = SessionStateController().envelopeFor(sessionId);
+    _sessionSeqCache[sessionId] = env?.seq ?? 0;
     while (_sessionMessageCache.length > _maxCachedSessions) {
       // Drop the oldest entry (first key in insertion order).
       final oldest = _sessionMessageCache.keys.first;
       _sessionMessageCache.remove(oldest);
+      _sessionSeqCache.remove(oldest);
     }
   }
 
@@ -445,6 +493,13 @@ class _ChatPanelState extends State<ChatPanel> {
   /// Guards side effects in [_onEvent] (notifications, message queue)
   /// so they don't fire as if they were live.
   bool _isReplaying = false;
+  bool _isPreparingSession = false;
+  bool _highlightWorkspaceChip = false;
+  // True while _send() is in the middle of createAndSetSession — prevents
+  // the resulting _onSessionChange from doing its normal destructive reset
+  // (_messages.clear / _isSending=false / _tryRestoreAndConnect) since
+  // _send() owns all that state for the duration of the send flow.
+  bool _isCreatingSession = false;
   int _replayTotal = 0;
   int _replayDone = 0;
 
@@ -484,6 +539,11 @@ class _ChatPanelState extends State<ChatPanel> {
   final TextEditingController _findCtrl = TextEditingController();
   final FocusNode _findFocus = FocusNode();
 
+  /// Debounce timer for batching rapid setState calls from listeners
+  /// (QueueService + SessionStateController can both fire in the same
+  /// microtask; merging them into one frame avoids a double rebuild).
+  Timer? _debouncedSetStateTimer;
+
   // ── Long-running tool tracker ──────────────────────────────────
   /// Name of the currently executing tool (from a `tool_use:…` phase)
   /// and when it started. Drives the lean tool bar that only appears
@@ -512,9 +572,27 @@ class _ChatPanelState extends State<ChatPanel> {
     // where a `rekey` / direct `ChatMessage.notifyListeners` happens
     // outside an enclosing `setState` (e.g. from a service callback).
     _timeline.addListener(_onTimelineChanged);
+
+    // Check for a pending message from the dashboard BEFORE the first
+    // build so the first frame shows the preparing screen, not the empty
+    // state. Direct variable assignment is safe here — no setState needed
+    // since the widget hasn't built yet.
+    final pendingAppState = context.read<AppState>();
+    final _pendingToSend = pendingAppState.pendingMessage;
+    if (_pendingToSend != null && _pendingToSend.isNotEmpty) {
+      pendingAppState.pendingMessage = null;
+      _ctrl.text = _pendingToSend;
+      _isPreparingSession = true;
+    }
     // Rebuild when the daemon-persisted queue changes so the composer
     // badge + queue panel visibility stay in sync.
     QueueService().addListener(_onQueueChanged);
+    // Rebuild when the session state envelope changes — authoritative
+    // source for the animated send button + progress indicator. Keeps
+    // the UI accurate even when individual events are lost / reordered
+    // / delivered out of band (HTTP response state, reconnect snapshot,
+    // resync after watchdog timeout all flow through this controller).
+    SessionStateController().addListener(_onQueueChanged);
     // Expose _exportChat so the session drawer's ⋮ menu can trigger
     // an export of the currently-mounted conversation.
     ChatExportBridge().register(_exportChat);
@@ -534,13 +612,14 @@ class _ChatPanelState extends State<ChatPanel> {
         _currentSessionId = active.sessionId;
         _tryRestoreAndConnect(active.appId, active.sessionId);
       }
-      // Pending message from dashboard
+      // If a pending message was loaded in initState (pre-build), fire
+      // _send() now that all subscriptions are active so events from
+      // session creation are properly caught.
       final appState = context.read<AppState>();
-      final pending = appState.pendingMessage;
-      if (pending != null && pending.isNotEmpty) {
-        appState.pendingMessage = null;
-        _ctrl.text = pending;
-        _send();
+      if (_isPreparingSession && _ctrl.text.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _send();
+        });
       }
       _widgetChatSub = appState.widgetChatStream.listen((msg) {
         if (!mounted) return;
@@ -553,6 +632,41 @@ class _ChatPanelState extends State<ChatPanel> {
     });
   }
 
+  // Called when the widget is reinserted via GlobalKey reuse (e.g. user
+  // was on the dashboard, opens an app — the existing _ChatPanelState is
+  // reattached without calling initState() again). We must mirror the
+  // pendingMessage logic from initState() here so the bypass works on
+  // every app open, not just the very first one.
+  @override
+  void activate() {
+    super.activate();
+    // GlobalKey preservation — when the user goes home and comes
+    // back, this state object is reattached to the tree instead of
+    // being recreated, so ``_currentSessionId`` and ``_messages``
+    // still carry whatever session was open last time. Re-sync with
+    // the authoritative ``SessionService.activeSession`` that
+    // ``setApp`` may have cleared or swapped while we were off-tree
+    // — otherwise clicking an app from the home page shows that
+    // app's last session transcript instead of the empty welcome
+    // state.
+    final liveSessionId = SessionService().activeSession?.sessionId;
+    if (liveSessionId != _currentSessionId) {
+      _onSessionChange(liveSessionId);
+    }
+    final appState = context.read<AppState>();
+    final pending = appState.pendingMessage;
+    if (pending != null && pending.isNotEmpty) {
+      appState.pendingMessage = null;
+      _ctrl.text = pending;
+      _isPreparingSession = true;
+      // Subscriptions from initState() are still active — one frame is
+      // enough before _send() fires.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _send();
+      });
+    }
+  }
+
   @override
   void dispose() {
     _eventSub?.cancel();
@@ -562,7 +676,10 @@ class _ChatPanelState extends State<ChatPanel> {
     _responseTimeout?.cancel();
     _spinnerWatchdog?.cancel();
     _activeToolTicker?.cancel();
+    _debouncedSetStateTimer?.cancel();
+    _scrollbarIdleTimer?.cancel();
     QueueService().removeListener(_onQueueChanged);
+    SessionStateController().removeListener(_onQueueChanged);
     VoiceInputService().removeListener(_onVoiceStateChanged);
     ChatExportBridge().unregister(_exportChat);
     ChatAttachBridge().unregister(_addAttachmentExternal);
@@ -714,6 +831,16 @@ class _ChatPanelState extends State<ChatPanel> {
     _focus.requestFocus();
   }
 
+  void _markScrollbarEngaged() {
+    _scrollbarIdleTimer?.cancel();
+    if (!_scrollbarEngaged && mounted) {
+      setState(() => _scrollbarEngaged = true);
+    }
+    _scrollbarIdleTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _scrollbarEngaged = false);
+    });
+  }
+
   void _onQueueChanged() {
     if (!mounted) return;
     // One-shot toast on queue_full; consume so it doesn't re-fire.
@@ -729,7 +856,12 @@ class _ChatPanelState extends State<ChatPanel> {
         duration: const Duration(seconds: 4),
       ));
     }
-    setState(() {});
+    // Debounce: QueueService and SessionStateController can fire in the
+    // same microtask. Batch them into a single frame instead of two.
+    _debouncedSetStateTimer?.cancel();
+    _debouncedSetStateTimer = Timer(Duration.zero, () {
+      if (mounted) setState(() {});
+    });
   }
 
   // ─── Session switch ──────────────────────────────────────────────────────
@@ -742,6 +874,27 @@ class _ChatPanelState extends State<ChatPanel> {
       debugPrint('[SESSION_CHG] skip — same as current');
       return;
     }
+
+    // _send() is mid-flight creating this exact session. Let _send()
+    // own all the UI state — only update the session ID so events
+    // land in the right bucket. Skip the destructive reset and
+    // _tryRestoreAndConnect (new session has no history to fetch).
+    //
+    // The flag is cleared HERE, not in _send(): the session-change
+    // stream fires on a microtask AFTER ``await createAndSetSession``
+    // resolves, so if _send() had flipped it false before returning
+    // we'd race through the destructive branch below and wipe the
+    // optimistic user bubble — producing the "empty state flashes
+    // back" glitch. Clearing on the exact callback that the flag is
+    // meant to gate is race-free by construction.
+    if (_isCreatingSession) {
+      debugPrint('[SESSION_CHG] skip destructive reset — send in flight');
+      _isCreatingSession = false;
+      if (mounted) setState(() => _currentSessionId = newSessionId);
+      else _currentSessionId = newSessionId;
+      return;
+    }
+
     // Snapshot the outgoing session's messages so we can restore
     // them if the daemon's /history endpoint returns empty on the
     // way back in.
@@ -759,7 +912,9 @@ class _ChatPanelState extends State<ChatPanel> {
         _currentMsg = null;
         _messages.clear();
         _messageKeys.clear();
+        _animatedMessageIds.clear();
         _pendingApprovals.clear();
+        _approvalMarkerReqId.clear();
         _liveBuffer.clear();
         _isSending = false;
         _hadTokens = false;
@@ -859,12 +1014,81 @@ class _ChatPanelState extends State<ChatPanel> {
       String appId, String sessionId) async {
     final cached = _sessionMessageCache[sessionId];
     final hadCached = cached != null && cached.isNotEmpty;
+
+    // ── Cache-first: show cached messages immediately ─────────────────────
+    // If we already have messages for this session in memory, render them
+    // now so the user sees content instantly instead of a loading spinner.
+    // We still fetch from the server below to pick up any new events, but
+    // the visible delay goes from "blank screen → data" to "instant → maybe
+    // a few new bubbles appear".
+    if (hadCached && mounted) {
+      setState(() {
+        _messages.clear();
+        _messageKeys.clear();
+        _messages.addAll(cached);
+        // Keep _isReplaying = true so live socket events stay buffered
+        // during the HTTP fetch below. Setting it to false here would
+        // let live events bypass the buffer and then get wiped when
+        // _replayEventLog runs its initial _messages.clear() — that is
+        // the exact sequence that produces the "flash to empty state" bug.
+      });
+      // Mark all cached messages as already animated so they don't fade in.
+      for (final m in cached) {
+        _animatedMessageIds.add(m.id);
+      }
+    }
+
+    // ── Cache-hit short-circuit ───────────────────────────────────────────
+    // When we have cached messages AND the session envelope from the
+    // authoritative state controller says "no turn running, no queue
+    // pending, seq matches ours", we KNOW nothing has changed since we
+    // last looked. Skip the expensive ``/history`` HTTP fetch + event
+    // replay — live Socket.IO events will catch us up from here.
+    //
+    // This is the main fix for "switching between recent sessions is
+    // slow": previously we always paid the full fetch + replay even for
+    // a session we looked at 2 seconds ago. Now it's literally one
+    // frame: the cached widgets render, done.
+    final envelope = SessionStateController().envelopeFor(sessionId);
+    final cachedSeq = _sessionSeqCache[sessionId] ?? 0;
+    final canSkipHistoryFetch = hadCached
+        && envelope != null
+        && !envelope.isTurnActive
+        && envelope.queue.depth == 0
+        && cachedSeq > 0
+        && envelope.seq <= cachedSeq;
+    if (canSkipHistoryFetch && mounted) {
+      debugPrint('[RESTORE] cache-hit short-circuit '
+          'sid=$sessionId cached_seq=$cachedSeq envelope_seq=${envelope.seq} '
+          '— skipping loadFullHistory');
+      setState(() {
+        // Do NOT flip ``_isReplaying`` here — the outer
+        // ``_tryRestoreAndConnect.finally`` block owns that transition
+        // and drains ``_liveBuffer`` in order. Flipping it in two
+        // places races with the drain and drops events.
+        _turnInProgress = false;
+        _isSending = false;
+        _statusPhase = '';
+      });
+      _reconnectSession(appId, sessionId);
+      return;
+    }
+
     SessionService().markLoadingHistory(true);
+    // Pagination — default 500 events, tightens to the seq-delta when
+    // we have a cached view to revalidate on top of. This is the big
+    // cold-start win: on a session with 5 000 events the old code
+    // pulled 2+ Mo of JSON; the new code pulls ~20 Ko of the tail.
     final full = await SessionService()
-        .loadFullHistory(appId, sessionId)
+        .loadFullHistory(
+          appId, sessionId,
+          // Never pass a since_seq when we don't have cached bubbles —
+          // the daemon would skip early events and the chat panel
+          // would render with missing turns at the top.
+          sinceSeq: hadCached ? cachedSeq : null,
+          eventsLimit: 500,
+        )
         .whenComplete(() {
-      // Only clear if we're still on the same session — avoids
-      // wiping the flag mid-switch for an orphan response.
       if (SessionService().activeSession?.sessionId == sessionId) {
         SessionService().markLoadingHistory(false);
       }
@@ -1195,6 +1419,9 @@ class _ChatPanelState extends State<ChatPanel> {
       _messageKeys.clear();
         _messages.addAll(restored);
       });
+      for (final m in restored) {
+        _animatedMessageIds.add(m.id);
+      }
       _scrollToBottom();
     }
   }
@@ -1237,16 +1464,20 @@ class _ChatPanelState extends State<ChatPanel> {
       });
 
     if (!mounted) return;
-    setState(() {
-      _messages.clear();
-      _messageKeys.clear();
-      _currentMsg = null;
-      _isSending = false;
-      _statusPhase = '';
-      _isReplaying = true;
-      _replayTotal = sorted.length;
-      _replayDone = 0;
-    });
+    // Mutate fields directly — no setState — so we don't trigger a rebuild
+    // that shows an empty chat before the first replay events are processed.
+    // Any cached messages that were already visible will stay on screen until
+    // _onEvent's own setStates repopulate _messages during the replay loop.
+    // Live socket events are gated by _isReplaying = true below, so they
+    // stay buffered until the final drain at the end of this method.
+    _messages.clear();
+    _messageKeys.clear();
+    _currentMsg = null;
+    _isSending = false;
+    _statusPhase = '';
+    _isReplaying = true;
+    _replayTotal = sorted.length;
+    _replayDone = 0;
 
     int lastSeq = 0;
     int openTurn = -1;
@@ -1400,6 +1631,10 @@ class _ChatPanelState extends State<ChatPanel> {
       // When the turn is genuinely running, the very next live token
       // re-opens a fresh streaming bubble via ``_ensureBubble``.
       _finalizeOrphanStreamingBubbles();
+      // All replayed messages are already "seen" — no entrance animation.
+      for (final m in _messages) {
+        _animatedMessageIds.add(m.id);
+      }
     });
     _spinnerWatchdog?.cancel();
     _spinnerWatchdog = null;
@@ -1632,9 +1867,13 @@ class _ChatPanelState extends State<ChatPanel> {
           'ChatPanel: dropping untagged session-scoped event type=$type');
       return;
     }
+    // When no session is active (freshly opened app, welcome state),
+    // drop every session-scoped event unconditionally — otherwise a
+    // turn still finishing on a previous session (even one belonging
+    // to the same app) injects bubbles into the empty welcome pane
+    // and the user lands in what looks like that old transcript.
     if (eventSessionId.isNotEmpty &&
-        liveSessionId != null &&
-        eventSessionId != liveSessionId) {
+        (liveSessionId == null || eventSessionId != liveSessionId)) {
       return;
     }
     // And if the chat-panel's cached current session id doesn't match
@@ -1787,6 +2026,13 @@ class _ChatPanelState extends State<ChatPanel> {
           // Clear pending approvals — they can't be sent while offline.
           // The daemon will re-emit them on reconnect if still pending.
           _pendingApprovals.clear();
+          // Hide the trailing typing-dots row instantly — no point
+          // pretending the agent is "thinking" while we're offline.
+          // `_isSending` and `_turnInProgress` are kept on purpose
+          // (the daemon may still finish the turn and replay events
+          // on reconnect); `_turnReallyRunning` will gate the input
+          // spinner via the `disconnected` phase check.
+          _awaitingAgentResponse = false;
         });
       }
       return;
@@ -2128,7 +2374,11 @@ class _ChatPanelState extends State<ChatPanel> {
       // ── Thinking ───────────────────────────────────────────────────
       case 'thinking_started':
         _ensureBubble();
-        _currentMsg?.setThinkingState(true);
+        // Open a fresh thinking block. `setThinkingState(true)` only
+        // reactivates the LAST thinking block — wrong for multi-block
+        // turns where each `thinking_started` should start a NEW one
+        // with its own per-block token counter.
+        _currentMsg?.beginThinkingBlock();
         if (mounted) setState(() => _statusPhase = 'thinking');
         _scrollToBottom();
         break;
@@ -2138,6 +2388,15 @@ class _ChatPanelState extends State<ChatPanel> {
           _ensureBubble();
           _currentMsg?.appendThinking(delta);
         }
+        // Per-block live token count from daemon (litellm-tokenized,
+        // scoped to THIS thinking block — does not include the text
+        // response). Lands on whichever thinking block is currently
+        // active so each section keeps its own counter.
+        final c = data['count'];
+        if (c is int && c > 0) {
+          _ensureBubble();
+          _currentMsg?.setActiveThinkingTokens(c);
+        }
         _scrollToBottom();
         break;
       case 'thinking':
@@ -2146,11 +2405,39 @@ class _ChatPanelState extends State<ChatPanel> {
           _ensureBubble();
           _currentMsg?.setThinkingText(text);
         }
+        // Final per-block count from the snapshot event. Pin it on
+        // the block before the snapshot freezes it.
+        final fc = data['count'];
+        if (fc is int && fc > 0) {
+          _ensureBubble();
+          _currentMsg?.setActiveThinkingTokens(fc);
+        }
+        _scrollToBottom();
+        break;
+
+      // ── Tool call streaming (LLM is composing args, pre-execution)
+      case 'tool_call_streaming':
+        final callId = data['call_id'] as String? ?? '';
+        final tName = data['name'] as String? ?? '';
+        final c = data['count'];
+        final cnt = (c is int) ? c : 0;
+        if (callId.isNotEmpty) {
+          _ensureBubble();
+          _currentMsg?.upsertToolCallStreaming(
+            callId: callId,
+            toolName: tName,
+            tokenCount: cnt,
+          );
+          if (mounted) setState(() => _statusPhase = 'executing');
+        }
         _scrollToBottom();
         break;
 
       // ── Tool start ─────────────────────────────────────────────────
       case 'tool_start':
+        // The streaming placeholder (if any) is swapped in-place by
+        // ChatMessage.addOrUpdateToolCall — same timeline index, no
+        // UI shift between the chip and the full card.
         final toolName = data['name'] as String? ?? 'tool';
         final display = data['display'] as Map<String, dynamic>?;
         final verb = display?['verb'] as String? ??
@@ -2505,6 +2792,14 @@ class _ChatPanelState extends State<ChatPanel> {
         _currentMsg = null;
         _hadTokens = false;
         _finalizeOrphanStreamingBubbles();
+        // FULL SWEEP — same rationale as `message_done`. An error mid-
+        // tool / mid-thinking can leave zombie active states unless we
+        // clean them up here too. Mirror of the web full sweep.
+        for (final m in _messages) {
+          if (m.role != MessageRole.assistant) continue;
+          if (m.isStreaming) m.setStreamingState(false);
+          if (m.hasOpenToolStart) m.markToolStartsInterrupted();
+        }
         WorkspaceState().finishAllAgents();
         // Persistent inline marker in the history so the error is
         // visible when the user scrolls back — the top banner is
@@ -2524,6 +2819,11 @@ class _ChatPanelState extends State<ChatPanel> {
           setState(() {
             _isSending = false;
             _statusPhase = '';
+            // Stop the typing-dots row in lockstep — `_awaitingAgentResponse`
+            // outliving the error frame would have left the dots
+            // bouncing under the red banner until the next user action.
+            _awaitingAgentResponse = false;
+            _turnInProgress = false;
             // Banner only for LIVE errors, not replay — replay would
             // pop a stale red banner on every session reopen.
             if (!fromReplay) _activeError = daemonErr;
@@ -2744,9 +3044,27 @@ class _ChatPanelState extends State<ChatPanel> {
         }
         break;
       case 'message_done':
+      // Alternative terminal event names some daemon variants emit —
+      // route them through the same cleanup so an unknown name can't
+      // leave the spinner zombieing.
+      case 'agent_done':
+      case 'message_complete':
+      case 'chat_complete':
         final sid =
             event['session_id'] as String? ?? _currentSessionId ?? '';
         if (sid.isNotEmpty) QueueService().onMessageDone(sid, data);
+        // FULL SWEEP — every assistant bubble's `isStreaming` is
+        // forced false and every tool call still in `started` state
+        // is force-completed. Strict mirror of the web full sweep.
+        // Without this, a stale `isStreaming` flag (event lost on
+        // reconnect / out-of-order delivery / unknown event name)
+        // could keep `_turnReallyRunning` true forever and zombie
+        // the send-button ring.
+        for (final m in _messages) {
+          if (m.role != MessageRole.assistant) continue;
+          if (m.isStreaming) m.setStreamingState(false);
+          if (m.hasOpenToolStart) m.markToolStartsInterrupted();
+        }
         // Safety net: after the queue prunes the finished entry, if
         // the session is truly idle (no running turn, no queued
         // follow-up, no in-flight streaming bubble) and the spinner
@@ -2837,14 +3155,22 @@ class _ChatPanelState extends State<ChatPanel> {
           if (req.isAskUser && req.hasLongContent) {
             _openAskUserContent(req);
           }
-          // Persistent marker — visible at replay too, so scrolling
-          // history shows that an approval was asked for.
+          // Silent anchor marker — empty text, rendered as a zero-sized
+          // SizedBox by ``_SystemMessage``. Exists solely so the item
+          // builder can match its id against ``_approvalMarkerReqId``
+          // and upgrade the row to the interactive banner while the
+          // request is pending. Once resolved the row disappears from
+          // the timeline (see ``approval_resolved`` below) — the user
+          // asked for no "Approval requested / granted" text trail.
           final apprEnvSeq = (event['seq'] as num?)?.toInt();
-          _addSystemMarker(
+          final markerId = _addSystemMarker(
             idPrefix: 'approval-req',
-            text: 'Approval requested: ${req.toolName}',
+            text: '',
             envelopeSeq: apprEnvSeq,
           );
+          if (markerId != null) {
+            _approvalMarkerReqId[markerId] = reqId;
+          }
         }
         break;
 
@@ -2853,34 +3179,24 @@ class _ChatPanelState extends State<ChatPanel> {
       case 'approval_progress':
         final reqId = data['request_id'] as String? ??
             data['approval_id'] as String? ?? '';
-        final approved = data['approved'] == true;
-        final reason = (data['reason'] as String? ?? '').trim();
         // Drop the resolved request from the pending list so the
-        // inline card disappears (both live and at replay).
+        // inline card disappears (both live and at replay). Also
+        // clean the silent marker row + its lookup entry so no
+        // zero-height ghost stays in the timeline. No verdict text
+        // marker is appended — the tool_call event that follows
+        // carries the outcome already.
         if (reqId.isNotEmpty) {
           setState(() {
             _pendingApprovals.removeWhere((a) => a.id == reqId);
+            final markerIds = _approvalMarkerReqId.entries
+                .where((e) => e.value == reqId)
+                .map((e) => e.key)
+                .toList();
+            for (final mid in markerIds) {
+              _approvalMarkerReqId.remove(mid);
+              _messages.removeWhere((m) => m.id == mid);
+            }
           });
-        }
-        // Only the terminal ``approval_resolved`` leaves a history
-        // marker — ``approval_progress`` is a heartbeat-keepalive and
-        // shouldn't clutter the timeline.
-        if (type == 'approval_resolved') {
-          final apprEnvSeq = (event['seq'] as num?)?.toInt();
-          final tool = data['tool_name'] as String?
-              ?? data['tool'] as String? ?? '';
-          final toolSuffix = tool.isNotEmpty ? ' — $tool' : '';
-          final verdict = approved
-              ? 'Approval granted$toolSuffix'
-              : (reason.toLowerCase().contains('time') &&
-                      reason.toLowerCase().contains('out')
-                  ? 'Approval timed out$toolSuffix'
-                  : 'Approval denied$toolSuffix${reason.isEmpty ? '' : ' ($reason)'}');
-          _addSystemMarker(
-            idPrefix: 'approval-res',
-            text: verdict,
-            envelopeSeq: apprEnvSeq,
-          );
         }
         break;
 
@@ -3259,28 +3575,135 @@ class _ChatPanelState extends State<ChatPanel> {
     final activeApp = appState.activeApp;
     final workspace = appState.workspace;
 
+    // Capture before any async work — determines whether we came from
+    // the empty state (no messages yet) or from within an active chat.
+    final wasEmpty = _messages.isEmpty;
+
     if (activeApp?.workspaceMode == 'required' && workspace.isEmpty) {
+      // Same UX as web (sendMessage in stores/chat.ts): silently
+      // bail and pulse the chip — flip the flag true now to trigger
+      // `_WorkspaceChip.didUpdateWidget`'s shake, then back to false
+      // after the 500ms animation so a second click can re-trigger.
+      if (mounted) setState(() => _highlightWorkspaceChip = true);
+      Future.delayed(const Duration(milliseconds: 600), () {
+        if (mounted) setState(() => _highlightWorkspaceChip = false);
+      });
       return;
     }
 
     var session = SessionService().activeSession;
     final appId = activeApp?.appId ?? DigitornApiClient().appId;
 
+    // True when we're about to create a brand-new session — either
+    // because the panel is empty OR because no session is active (e.g.
+    // GlobalKey-preserved state from a previous visit still holds old
+    // messages, but that session is gone). In both cases we want the
+    // same optimistic path: clear any stale content and show the new
+    // user bubble immediately.
+    final startingFresh = wasEmpty || session == null;
+
+    // ── Optimistic UI (new-session path) ─────────────────────────────
+    // Add the user bubble and flip to active-chat layout immediately,
+    // before the credentials + session-create round trips (2–5s total).
+    // On any subsequent failure the bubble is removed and the input is
+    // restored so the user can retry without losing their text.
+    final String clientMessageId = QueueService.newCorrelationId();
+    final String optimisticCid = QueueService.newCorrelationId();
+    ChatMessage? optimisticUserMsg;
+    if (startingFresh) {
+      final userMsg = ChatMessage(
+        id: _nextMsgId('u'),
+        role: MessageRole.user,
+        initialText: text,
+        correlationId: optimisticCid,
+        clientMessageId: clientMessageId,
+        anchorSeq: _anchorForNewLocalBubble(),
+      );
+      _hadTokens = false;
+      _lastUserText = text;
+      setState(() {
+        _messages.clear();
+        _messageKeys.clear();
+        _animatedMessageIds.clear();
+        _messages.add(userMsg);
+        _isPreparingSession = false;
+        _ctrl.clear();
+        _statusPhase = 'requesting';
+        _activeError = null;
+        _isSending = true;
+        _awaitingAgentResponse = true;
+      });
+      _armSpinnerWatchdog();
+      _scrollToBottom();
+      _focus.requestFocus();
+      optimisticUserMsg = userMsg;
+
+      // Wait for the paint — NOT just a microtask. On Flutter Web +
+      // mobile, ``setState`` schedules a rebuild but the next HTTP
+      // await (ensureCredentials, createAndSetSession) can eat the
+      // microtask queue before the frame ships to the raster thread,
+      // leaving ``_buildEmptyState`` on screen for several frames
+      // after the user pressed Enter. ``endOfFrame`` resolves AFTER
+      // the browser/engine has actually painted the new bubble, so
+      // the user sees the optimistic message before any network
+      // traffic starts. Guarded on ``mounted`` because the user can
+      // navigate away during the one-frame wait.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+    }
+
     if (!await ensureCredentials(
       context,
       appId: appId,
       appName: activeApp?.name ?? appId,
     )) {
+      if (startingFresh && mounted) {
+        setState(() {
+          _messages.remove(optimisticUserMsg);
+          _isSending = false;
+          _statusPhase = '';
+          _awaitingAgentResponse = false;
+          _ctrl.text = text;
+        });
+      }
       return;
     }
     if (!mounted) return;
 
-    if (session == null) {
-      final ok = await SessionService().createAndSetSession(appId);
+    // Starting fresh always requires a new session — guaranteed new
+    // conversation. From an active chat, reuse the existing session.
+    // New atomic contract: ``POST /sessions`` requires the first
+    // ``message`` in the body, and the daemon dispatches it as part
+    // of session creation. So we call ``createAndSetSession`` with
+    // the message text and SKIP the standalone ``enqueueMessage``
+    // call below for this first turn — the daemon already queued it.
+    if (startingFresh) {
+      _isCreatingSession = true;
+      final ok = await SessionService().createAndSetSession(
+        appId,
+        message: text,
+        workspacePath: workspace.isEmpty ? null : workspace,
+        clientMessageId: clientMessageId,
+        queueMode: 'async',
+      );
+      // NOTE: ``_isCreatingSession`` is deliberately NOT reset here.
+      // The session-change stream fires on a microtask that runs
+      // AFTER this await resolves, so clearing the flag on this
+      // line re-opens the exact race it was meant to close. The
+      // flag is cleared inside ``_onSessionChange`` itself — the
+      // one callback that needs to observe it as true. A safety
+      // reset below covers the ``ok=false`` failure path where no
+      // session-change event will ever fire.
       session = SessionService().activeSession;
       if (!ok || session == null) {
+        _isCreatingSession = false;
         if (mounted) {
           setState(() {
+            _messages.remove(optimisticUserMsg);
+            _isSending = false;
+            _statusPhase = '';
+            _awaitingAgentResponse = false;
+            _ctrl.text = text;
             _messages.add(ChatMessage(
               id: _nextMsgId('err'),
               role: MessageRole.assistant,
@@ -3336,8 +3759,9 @@ class _ChatPanelState extends State<ChatPanel> {
     );
     final replacing = _pendingReplaceLast;
     final String cid;
-    final String clientMessageId = QueueService.newCorrelationId();
-    if (replacing != null) {
+    if (startingFresh) {
+      cid = optimisticCid;
+    } else if (replacing != null) {
       cid = replacing.correlationId;
     } else if (busy) {
       final entry = qsvc.addOptimistic(sid, text);
@@ -3352,15 +3776,17 @@ class _ChatPanelState extends State<ChatPanel> {
     // the chat bubble at its authoritative seq — that way the user
     // never sees the same message in two places.
     if (replacing == null && !busy) {
-      final userMsg = ChatMessage(
-        id: _nextMsgId('u'),
-        role: MessageRole.user,
-        initialText: text,
-        correlationId: cid,
-        clientMessageId: clientMessageId,
-        anchorSeq: _anchorForNewLocalBubble(),
-      );
-      setState(() => _messages.add(userMsg));
+      if (!startingFresh) {
+        final userMsg = ChatMessage(
+          id: _nextMsgId('u'),
+          role: MessageRole.user,
+          initialText: text,
+          correlationId: cid,
+          clientMessageId: clientMessageId,
+          anchorSeq: _anchorForNewLocalBubble(),
+        );
+        setState(() => _messages.add(userMsg));
+      }
 
       final firstUser =
           _messages.where((m) => m.role == MessageRole.user).length == 1;
@@ -3370,15 +3796,18 @@ class _ChatPanelState extends State<ChatPanel> {
       }
     }
 
-    _hadTokens = false;
-    _lastUserText = text;
-    setState(() {
-      _ctrl.clear();
-      _statusPhase = 'requesting';
-      _activeError = null;
-      _isSending = true;
-    });
-    _armSpinnerWatchdog();
+    if (!startingFresh) {
+      _hadTokens = false;
+      _lastUserText = text;
+      setState(() {
+        _isPreparingSession = false;
+        _ctrl.clear();
+        _statusPhase = 'requesting';
+        _activeError = null;
+        _isSending = true;
+      });
+      _armSpinnerWatchdog();
+    }
 
     // Product rule: dedicated "agent is thinking" indicator.
     // Activates the moment a non-queued message leaves — rendered as
@@ -3386,7 +3815,7 @@ class _ChatPanelState extends State<ChatPanel> {
     // of any ChatMessage bubble; flipped off by the first response
     // signal in ``_onEvent`` (token / thinking / tool_start / result
     // / error / message_done / turn_complete).
-    if (!busy && replacing == null) {
+    if (!busy && replacing == null && !startingFresh) {
       setState(() => _awaitingAgentResponse = true);
     }
 
@@ -3403,46 +3832,63 @@ class _ChatPanelState extends State<ChatPanel> {
     // composer with no way to retry without re-selecting each one.
     final attachmentsSnapshot = List.of(_attachments);
     setState(() => _attachments.clear());
-    _scrollToBottom();
-    _focus.requestFocus();
+    if (!startingFresh) {
+      _scrollToBottom();
+      _focus.requestFocus();
+    }
 
     SessionService().invalidateHistory(session.sessionId);
     SessionService().rejoinSessionRoom();
     SessionMetrics().startPolling(appId, session.sessionId);
 
-    var result = await SessionService().enqueueMessage(
-      appId,
-      session.sessionId,
-      text,
-      workspace: workspace.isEmpty ? null : workspace,
-      images: images.isNotEmpty ? images : null,
-      files: files.isNotEmpty ? files : null,
-      correlationId: cid,
-      clientMessageId: clientMessageId,
-      queueMode: replacing != null ? 'replace_last' : 'async',
-    );
+    // First-turn fast-path: ``createAndSetSession`` above already
+    // posted the message atomically with the session creation, so
+    // the daemon has it queued and is dispatching. Skip the
+    // standalone ``enqueueMessage`` here — duplicating it would
+    // either land a second user bubble or 422 on the
+    // ``client_message_id`` collision. The expected events
+    // (``user_message`` → ``message_started`` → tokens → …) flow
+    // from the same correlation_id the daemon minted in the
+    // creation response.
+    var result = startingFresh
+        ? EnqueueResult.accepted(correlationId: cid)
+        : await SessionService().enqueueMessage(
+            appId,
+            session.sessionId,
+            text,
+            workspace: workspace.isEmpty ? null : workspace,
+            images: images.isNotEmpty ? images : null,
+            files: files.isNotEmpty ? files : null,
+            correlationId: cid,
+            clientMessageId: clientMessageId,
+            queueMode: replacing != null ? 'replace_last' : 'async',
+          );
     // Consume the replace-last intent whether the call succeeded or
     // failed — the user's action has been applied or rejected once.
     if (replacing != null) {
       setState(() => _pendingReplaceLast = null);
     }
 
-    // Session not found → create new session and retry once.
+    // Session not found → recreate session AND dispatch the message
+    // atomically. The new contract folds both into one POST.
     if (!result.isOk &&
         (result.error ?? '').contains('Session not found')) {
-      await SessionService().createAndSetSession(appId);
+      final ok = await SessionService().createAndSetSession(
+        appId,
+        message: text,
+        workspacePath: workspace.isEmpty ? null : workspace,
+        clientMessageId: clientMessageId,
+        queueMode: 'async',
+      );
       final newSession = SessionService().activeSession;
-      if (newSession != null) {
+      if (ok && newSession != null) {
         _currentSessionId = newSession.sessionId;
         SessionService().rejoinSessionRoom();
         SessionMetrics().startPolling(appId, newSession.sessionId);
-        result = await SessionService().enqueueMessage(
-          appId,
-          newSession.sessionId,
-          text,
-          workspace: workspace.isEmpty ? null : workspace,
-          correlationId: cid,
-        );
+        // The first message was dispatched as part of session
+        // creation — synthesize an "accepted" result so the rest of
+        // ``_send`` reuses the standard success branch.
+        result = EnqueueResult.accepted(correlationId: cid);
         if (result.isOk) {
           _messages.add(ChatMessage(
             id: _nextMsgId('sys'),
@@ -3781,21 +4227,21 @@ class _ChatPanelState extends State<ChatPanel> {
   /// The id is keyed on the daemon envelope's ``seq`` so replay is
   /// idempotent — seeing the same event twice never duplicates the
   /// marker in the list.
-  void _addSystemMarker({
+  String? _addSystemMarker({
     required String idPrefix,
     required String text,
     int? envelopeSeq,
   }) {
     if (!mounted) {
       debugPrint('[MARKER] SKIP (not mounted) $idPrefix: $text');
-      return;
+      return null;
     }
     final id = envelopeSeq != null && envelopeSeq > 0
         ? '$idPrefix-$envelopeSeq'
         : '$idPrefix-${DateTime.now().microsecondsSinceEpoch}';
     if (_messages.any((m) => m.id == id)) {
       debugPrint('[MARKER] DEDUP $id (already present)');
-      return;
+      return id;
     }
     debugPrint('[MARKER] ADD id=$id seq=$envelopeSeq text="$text"');
     setState(() {
@@ -3806,6 +4252,7 @@ class _ChatPanelState extends State<ChatPanel> {
         daemonSeq: envelopeSeq,
       ));
     });
+    return id;
   }
 
   /// Phase=start of ``compact_context``. Drops an in-progress system
@@ -4097,7 +4544,8 @@ class _ChatPanelState extends State<ChatPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final activeApp = context.watch<AppState>().activeApp;
+    final appState = context.watch<AppState>();
+    final activeApp = appState.activeApp;
     final session = context.watch<SessionService>().activeSession;
 
     return DropTarget(
@@ -4174,8 +4622,11 @@ class _ChatPanelState extends State<ChatPanel> {
         const SingleActivator(LogicalKeyboardKey.keyN, control: true): () async {
           final app = context.read<AppState>().activeApp;
           if (app != null) {
-            await SessionService().createAndSetSession(app.appId);
-            if (context.mounted) showToast(context, 'New session created');
+            // New session = clear the active one and let the user
+            // type the first message — the daemon creates the row
+            // atomically via ``createAndSetSession`` from ``_send``.
+            SessionService().clearActiveSession();
+            if (context.mounted) showToast(context, 'New session — type your first message');
           }
         },
         const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
@@ -4227,7 +4678,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 Expanded(
                   child: Stack(
                     children: [
-                      _buildChatStack(activeApp, session),
+                      _buildChatStack(activeApp, session, appState),
                       _ArtifactsFloatingChip(),
                     ],
                   ),
@@ -4262,36 +4713,22 @@ class _ChatPanelState extends State<ChatPanel> {
   /// The chat column itself — extracted so the layout above can wrap
   /// it in a Row without drowning in indentation. Everything between
   /// the header and the composer lives in here.
-  Widget _buildChatStack(AppSummary? activeApp, AppSession? session) {
-    final appState = context.watch<AppState>();
+  Widget _buildChatStack(AppSummary? activeApp, AppSession? session, AppState appState) {
     final workspace = appState.workspace;
     final workspaceRequired =
         appState.manifest.workspaceMode == WorkspaceMode.required &&
             workspace.isEmpty;
     return Container(
       color: context.colors.bg,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Stack(
         children: [
-          // ── Header (full width) ──────────────────────────────────────────
-          _buildHeader(activeApp, session),
-
-          // ── Replay / status strip ───────────────────────────────────────
-          _buildStatusStrip(),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ── Replay / status strip ─────────────────────────────────
+              _buildStatusStrip(),
           // ── Find bar (Ctrl+F) ───────────────────────────────────────────
           if (_showFind) _buildFindBar(),
-
-          // ── Workspace warning banner ──────────────────────────────────────
-          if (workspaceRequired)
-            Center(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width < 600
-                      ? double.infinity : 720,
-                ),
-                child: _WorkspaceBanner(appName: activeApp?.name ?? ''),
-              ),
-            ),
 
           // ── Messages, empty state, or history skeleton ──────────────────
           // Keyed by session id so Flutter treats a session switch as
@@ -4305,13 +4742,15 @@ class _ChatPanelState extends State<ChatPanel> {
               child: KeyedSubtree(
                 key: ValueKey(_currentSessionId ?? '__no_session__'),
                 child: _messages.isEmpty
-                    ? (_isReplaying &&
-                            (SessionService().activeSession?.messageCount ??
-                                    0) >
-                                0
-                        ? _buildHistoryLoading()
-                        : _buildEmptyState(
-                            activeApp, workspace, workspaceRequired))
+                    ? ((_isPreparingSession || _isSending)
+                        ? _buildPreparingSession()
+                        : (_isReplaying &&
+                                (SessionService().activeSession?.messageCount ??
+                                        0) >
+                                    0
+                            ? _buildHistoryLoading()
+                            : _buildEmptyState(
+                                activeApp, workspace, workspaceRequired)))
                     : _buildMessageArea(
                         activeApp: activeApp,
                         workspace: workspace,
@@ -4333,7 +4772,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
+                        ? double.infinity : 800,
                   ),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -4356,7 +4795,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
+                        ? double.infinity : 800,
                   ),
                   child: _ErrorBanner(
                     error: _activeError!,
@@ -4379,29 +4818,16 @@ class _ChatPanelState extends State<ChatPanel> {
                   ),
                 ),
               ),
-            // ── Approval banner (above input) ───────────────────────────
-            if (_activeError == null && _pendingApprovals.isNotEmpty)
-              Center(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
-                  ),
-                  child: _ApprovalBanner(
-                    request: _pendingApprovals.first,
-                    onApprove: (msg) => _handleApproval(_pendingApprovals.first, true, msg),
-                    onDeny: (msg) => _handleApproval(_pendingApprovals.first, false, msg),
-                    onDismiss: () => setState(() => _pendingApprovals.removeAt(0)),
-                  ),
-                ),
-              ),
+            // Approval card is rendered inline in the message list —
+            // see the itemBuilder branch that upgrades the
+            // ``approval-req-…`` marker to the interactive banner.
             // ── Inline panels (above input, mutually exclusive) ────────
             if (_showContextPanel)
               Center(
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
+                        ? double.infinity : 800,
                   ),
                   child: ContextPanel(
                     onClose: () => setState(() => _showContextPanel = false),
@@ -4413,7 +4839,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
+                        ? double.infinity : 800,
                   ),
                   child: ToolsPanel(
                     appId: context.read<AppState>().activeApp?.appId ?? '',
@@ -4426,7 +4852,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
+                        ? double.infinity : 800,
                   ),
                   child: TasksPanel(
                     onClose: () => setState(() => _showTasksPanel = false),
@@ -4438,7 +4864,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
+                        ? double.infinity : 800,
                   ),
                   child: SnippetsPanel(
                     onClose: () =>
@@ -4465,7 +4891,7 @@ class _ChatPanelState extends State<ChatPanel> {
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
-                        ? double.infinity : 720,
+                        ? double.infinity : 800,
                   ),
                   child: attach_bar.AttachmentsBar(
                     attachments: _attachments,
@@ -4480,7 +4906,7 @@ class _ChatPanelState extends State<ChatPanel> {
                   constraints: BoxConstraints(
                     maxWidth: MediaQuery.of(context).size.width < 600
                         ? double.infinity
-                        : 720,
+                        : 800,
                   ),
                   child: _QueuePanel(
                     appId: context.read<AppState>().activeApp?.appId ??
@@ -4505,13 +4931,16 @@ class _ChatPanelState extends State<ChatPanel> {
               child: ConstrainedBox(
                 constraints: BoxConstraints(
                   maxWidth: MediaQuery.of(context).size.width < 600
-                      ? double.infinity : 720,
+                      ? double.infinity : 800,
                 ),
                 child: _ChatInput(
                   controller: _ctrl,
                   focusNode: _focus,
-                  isActive: _isSending && _activeError == null,
-                  disabled: workspaceRequired,
+                  // `_turnReallyRunning` (derived from messages) instead
+                  // of `_isSending` so a stale event can't keep the
+                  // ring spinning after the turn actually ended.
+                  isActive: _turnReallyRunning && _activeError == null,
+                  disabled: false,
                   queuedCount: SessionService().activeSession == null
                       ? 0
                       : QueueService().pendingCountFor(
@@ -4552,16 +4981,41 @@ class _ChatPanelState extends State<ChatPanel> {
               ),
             ),
             // ── Status line (workspace path + model) ────────────────────
-            _buildStatusLine(),
+            _buildStatusLine(appState.workspace),
           ],
+            ],
+          ),
+          // ── Compact app-name dropdown (ChatGPT pattern) ──────────────
+          // Replaces the previous full top header. Sits absolute over
+          // the conversation in the top-left so it never consumes
+          // layout space; click opens the session drawer. Hidden when
+          // the drawer IS open — the drawer's header already carries
+          // the app identity and the menu would be redundant chrome.
+          if (appState.panel != ActivePanel.sessions)
+            Positioned(
+              top: 8,
+              left: 12,
+              child: _buildAppMenu(activeApp),
+            ),
+          // ── Compact workspace toggle (top-right) ──────────────────────
+          // Same pattern as the app-name menu but on the right edge.
+          // Visible only when the manifest allows a workspace AND the
+          // workspace panel is currently CLOSED — once it's open the
+          // panel's own close button takes over (parity with how the
+          // app-name menu hides when the session drawer opens).
+          if (appState.workspaceAvailable && !appState.isWorkspaceVisible)
+            Positioned(
+              top: 8,
+              right: 12,
+              child: _buildWorkspaceToggle(appState),
+            ),
         ],
       ),
     );
   }
 
-  Widget _buildStatusLine() {
+  Widget _buildStatusLine(String workspace) {
     final m = context.watch<SessionMetrics>();
-    final workspace = context.watch<AppState>().workspace;
     final isSmall = MediaQuery.of(context).size.width < 600;
 
     if (workspace.isEmpty && m.model.isEmpty) return const SizedBox.shrink();
@@ -4579,7 +5033,7 @@ class _ChatPanelState extends State<ChatPanel> {
     return Center(
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: isSmall ? double.infinity : 720,
+          maxWidth: isSmall ? double.infinity : 800,
         ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(18, 6, 18, 14),
@@ -4594,10 +5048,7 @@ class _ChatPanelState extends State<ChatPanel> {
                     shortPath,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.firaCode(
-                      fontSize: 11,
-                      color: c.textMuted,
-                    ),
+                    style: _kFiraCode11.copyWith(color: c.textMuted),
                   ),
                 ),
               ] else
@@ -4606,15 +5057,50 @@ class _ChatPanelState extends State<ChatPanel> {
                 const SizedBox(width: 12),
                 Text(
                   m.model,
-                  style: GoogleFonts.firaCode(
-                    fontSize: 11,
-                    color: c.textMuted,
-                  ),
+                  style: _kFiraCode11.copyWith(color: c.textMuted),
                 ),
               ],
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildPreparingSession() {
+    final c = context.colors;
+    final appState = context.read<AppState>();
+    final appName = appState.manifest.name.isNotEmpty
+        ? appState.manifest.name
+        : (appState.activeApp?.name ?? '');
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: c.textMuted,
+              backgroundColor: c.border,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            'Starting session…',
+            style: _kInter125.copyWith(color: c.textMuted),
+          ),
+          if (appName.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              appName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: _kInter11.copyWith(color: c.textDim),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -4642,11 +5128,7 @@ class _ChatPanelState extends State<ChatPanel> {
           const SizedBox(height: 14),
           Text(
             'Loading conversation…',
-            style: GoogleFonts.inter(
-              fontSize: 12.5,
-              color: c.textMuted,
-              fontWeight: FontWeight.w500,
-            ),
+            style: _kInter125.copyWith(color: c.textMuted),
           ),
           if (session?.title.isNotEmpty ?? false) ...[
             const SizedBox(height: 6),
@@ -4654,7 +5136,7 @@ class _ChatPanelState extends State<ChatPanel> {
               session!.title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.inter(fontSize: 11, color: c.textDim),
+              style: _kInter11.copyWith(color: c.textDim),
             ),
           ],
           if (total > 0) ...[
@@ -4718,26 +5200,7 @@ class _ChatPanelState extends State<ChatPanel> {
                   ],
                 ),
               ],
-              if (!workspaceRequired && workspace.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.folder_outlined,
-                        size: 11, color: c.textMuted),
-                    const SizedBox(width: 5),
-                    Flexible(
-                      child: Text(
-                        workspace,
-                        style: GoogleFonts.firaCode(
-                            fontSize: 11, color: c.textMuted),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-              const SizedBox(height: 36),
+              const SizedBox(height: 16),
               // Slash command menu (also in empty state)
               if (_slashCommands.isNotEmpty)
                 Padding(
@@ -4794,48 +5257,80 @@ class _ChatPanelState extends State<ChatPanel> {
                     _focus.requestFocus();
                   },
                 ),
-              // Input bar — centered in the middle.
-              _ChatInput(
-                controller: _ctrl,
-                focusNode: _focus,
-                isActive: _isSending,
-                disabled: workspaceRequired,
-                queuedCount: SessionService().activeSession == null
-                      ? 0
-                      : QueueService().pendingCountFor(
-                          SessionService().activeSession!.sessionId),
-                onSend: _send,
-                onAbort: _abort,
-                onContextTap: () => setState(() {
-                    _showContextPanel = !_showContextPanel;
-                    _showToolsPanel = false;
-                    _showTasksPanel = false;
-                    _showSnippetsPanel = false;
-                  }),
-                onToolsTap: () => setState(() {
-                    _showToolsPanel = !_showToolsPanel;
-                    _showContextPanel = false;
-                    _showTasksPanel = false;
-                    _showSnippetsPanel = false;
-                  }),
-                onTasksTap: () => setState(() {
-                    _showTasksPanel = !_showTasksPanel;
-                    _showContextPanel = false;
-                    _showToolsPanel = false;
-                    _showSnippetsPanel = false;
-                  }),
-                onSnippetsTap: () => setState(() {
-                    _showSnippetsPanel = !_showSnippetsPanel;
-                    _showContextPanel = false;
-                    _showToolsPanel = false;
-                    _showTasksPanel = false;
-                  }),
-                onAttach: (name, path, isImage) => setState(() {
-                    _attachments.add((name: name, path: path, isImage: isImage));
-                  }),
-                onImagePaste: (name, path, isImage) => setState(() {
-                    _attachments.add((name: name, path: path, isImage: isImage));
-                  }),
+              // Workspace chip — shown when app requires a workspace folder.
+              // Centered horizontally so it sits in the same vertical stack as
+              // the hero / tags / quick prompts / composer (web parity).
+              // Chip only while the workspace is REQUIRED but still
+              // EMPTY — once the user picks a folder, the path lives
+              // in the StatusLine under the composer and the chip
+              // would just duplicate it. Mirror of the web fix.
+              if (manifest.workspaceMode == WorkspaceMode.required &&
+                  workspace.isEmpty) ...[
+                _WorkspaceChip(
+                  workspace: workspace,
+                  highlighted: _highlightWorkspaceChip,
+                  onTap: () async {
+                    final dir = await pickWorkspace(context);
+                    if (dir != null && mounted) {
+                      context.read<AppState>().setWorkspace(dir);
+                    }
+                  },
+                ),
+                const SizedBox(height: 4),
+              ],
+              // Input bar — wrapped in maxWidth(720) so the empty-state
+              // composer ends up the SAME visible width as the active-
+              // state composer (chat_panel.dart:4856 also uses 720).
+              // Without this cap the column's 760-28*2=704 width would
+              // stretch the input wider than in active mode, which the
+              // user reads as "ce n'est pas la même boîte".
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 800),
+                child: _ChatInput(
+                  controller: _ctrl,
+                  focusNode: _focus,
+                  // Derived spinner state — see `_turnReallyRunning`
+                  // doc for the rationale (stale events can't zombie
+                  // the ring).
+                  isActive: _turnReallyRunning,
+                  disabled: workspaceRequired,
+                  queuedCount: SessionService().activeSession == null
+                        ? 0
+                        : QueueService().pendingCountFor(
+                            SessionService().activeSession!.sessionId),
+                  onSend: _send,
+                  onAbort: _abort,
+                  onContextTap: () => setState(() {
+                      _showContextPanel = !_showContextPanel;
+                      _showToolsPanel = false;
+                      _showTasksPanel = false;
+                      _showSnippetsPanel = false;
+                    }),
+                  onToolsTap: () => setState(() {
+                      _showToolsPanel = !_showToolsPanel;
+                      _showContextPanel = false;
+                      _showTasksPanel = false;
+                      _showSnippetsPanel = false;
+                    }),
+                  onTasksTap: () => setState(() {
+                      _showTasksPanel = !_showTasksPanel;
+                      _showContextPanel = false;
+                      _showToolsPanel = false;
+                      _showSnippetsPanel = false;
+                    }),
+                  onSnippetsTap: () => setState(() {
+                      _showSnippetsPanel = !_showSnippetsPanel;
+                      _showContextPanel = false;
+                      _showToolsPanel = false;
+                      _showTasksPanel = false;
+                    }),
+                  onAttach: (name, path, isImage) => setState(() {
+                      _attachments.add((name: name, path: path, isImage: isImage));
+                    }),
+                  onImagePaste: (name, path, isImage) => setState(() {
+                      _attachments.add((name: name, path: path, isImage: isImage));
+                    }),
+                ),
               ),
               const Spacer(flex: 2),
             ],
@@ -4851,7 +5346,7 @@ class _ChatPanelState extends State<ChatPanel> {
     required bool workspaceRequired,
   }) {
     final isSmall = MediaQuery.of(context).size.width < 600;
-    final maxW = isSmall ? double.infinity : 720.0;
+    final maxW = isSmall ? double.infinity : 800.0;
     final hPad = isSmall ? 8.0 : 0.0;
 
     // History loading indicator lives in the session drawer now —
@@ -4870,22 +5365,60 @@ class _ChatPanelState extends State<ChatPanel> {
                     Clipboard.setData(ClipboardData(text: content.plainText));
                   }
                 },
-                child: Scrollbar(
-                  controller: _scroll,
-                  thumbVisibility: false,
-                  interactive: true,
-                  thickness: 8,
-                  radius: const Radius.circular(4),
+                child: MouseRegion(
+                  onEnter: (_) => _markScrollbarEngaged(),
+                  onHover: (_) => _markScrollbarEngaged(),
+                  onExit: (_) {
+                    _scrollbarIdleTimer?.cancel();
+                    _scrollbarIdleTimer = Timer(
+                      const Duration(milliseconds: 400), () {
+                        if (mounted) setState(() => _scrollbarEngaged = false);
+                      },
+                    );
+                  },
+                  child: Listener(
+                    onPointerDown: (_) => _markScrollbarEngaged(),
+                    onPointerSignal: (e) {
+                      if (e is PointerScrollEvent) _markScrollbarEngaged();
+                    },
+                    child: Scrollbar(
+                      controller: _scroll,
+                      thumbVisibility: _scrollbarEngaged,
+                      interactive: true,
+                      thickness: 8,
+                      radius: const Radius.circular(4),
+                      // Gate scroll notifications so programmatic
+                      // auto-scroll (agent streaming) doesn't trigger
+                      // the thumb's default fade-in. When the user is
+                      // not engaged we swallow every notification —
+                      // the scrollbar stays invisible. Hovering /
+                      // pointer-down / wheel events flip the gate
+                      // open via [_markScrollbarEngaged].
+                      notificationPredicate: (_) => _scrollbarEngaged,
                   child: ListView.builder(
         controller: _scroll,
         padding: EdgeInsets.only(top: 20, bottom: 24, left: hPad, right: hPad),
+        // Strict gates on the typing-dots row — strict mirror of the
+        // web (`chat-panel.tsx`). The flag alone wasn't enough: if a
+        // request errored or the socket dropped, `_awaitingAgentResponse`
+        // could linger and the dots stayed bouncing forever. Three
+        // additional guards now hide it on:
+        //   1. Lost connection (`_statusPhase == 'disconnected'`)
+        //   2. Recorded daemon error (`_activeError != null`)
+        //   3. Aborted / interrupted session
         itemCount: _messages.length +
-            (_awaitingAgentResponse ? 1 : 0),
+            ((_awaitingAgentResponse &&
+                    _statusPhase != 'disconnected' &&
+                    _statusPhase != 'aborting' &&
+                    !_isInterrupted &&
+                    _activeError == null)
+                ? 1
+                : 0),
         itemBuilder: (_, i) {
           // Trailing "agent is thinking" row — shown only when the
           // user just sent a non-queued message and the first
-          // response signal hasn't landed yet. Rendered as a plain
-          // 3-bar typing skeleton so it matches the in-bubble style.
+          // response signal hasn't landed yet. Rendered as the dots
+          // typing skeleton so it matches the in-bubble style.
           if (i == _messages.length) {
             return Center(
               child: SizedBox(
@@ -4899,6 +5432,44 @@ class _ChatPanelState extends State<ChatPanel> {
             );
           }
           final msg = _messages[i];
+
+          // Inline approval card — if this row is an approval marker
+          // whose request is still in ``_pendingApprovals``, replace
+          // the text bubble with the interactive banner so the approve
+          // / deny controls flow at their seq position instead of
+          // sticking to the bottom of the pane. Once the request is
+          // resolved (or timed out) it drops out of the pending list
+          // and this same row falls back to the plain text marker.
+          final approvalReqId = _approvalMarkerReqId[msg.id];
+          if (approvalReqId != null) {
+            ApprovalRequest? pendingReq;
+            for (final p in _pendingApprovals) {
+              if (p.id == approvalReqId) {
+                pendingReq = p;
+                break;
+              }
+            }
+            if (pendingReq != null) {
+              _messageKeys.putIfAbsent(msg.id, () => GlobalKey());
+              final mKey = _messageKeys[msg.id]!;
+              final req = pendingReq;
+              return Center(
+                key: mKey,
+                child: SizedBox(
+                  width: maxW,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: _ApprovalBanner(
+                      request: req,
+                      onApprove: (m) => _handleApproval(req, true, m),
+                      onDeny: (m) => _handleApproval(req, false, m),
+                    ),
+                  ),
+                ),
+              );
+            }
+          }
+
           // Retry: find the user message before this assistant error message
           VoidCallback? onRetry;
           if (msg.role == MessageRole.assistant &&
@@ -4920,32 +5491,49 @@ class _ChatPanelState extends State<ChatPanel> {
           _messageKeys.putIfAbsent(msg.id, () => GlobalKey());
           final mKey = _messageKeys[msg.id]!;
 
-          return TweenAnimationBuilder<double>(
-            key: ValueKey(msg.id),
-            tween: Tween(begin: 0, end: 1),
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOut,
-            builder: (_, v, child) => Opacity(
-              opacity: v,
-              child: Transform.translate(
-                offset: Offset(0, 8 * (1 - v)),
-                child: child,
-              ),
-            ),
-            child: Center(
-              key: mKey,
-              child: SizedBox(
-                width: maxW,
-                child: ChatBubble(
-                  message: msg,
-                  onRetry: onRetry,
-                  isGroupedWithPrev: isGroupedWithPrev,
-                ),
+          final bubble = Center(
+            key: mKey,
+            child: SizedBox(
+              width: maxW,
+              child: ChatBubble(
+                message: msg,
+                onRetry: onRetry,
+                isGroupedWithPrev: isGroupedWithPrev,
               ),
             ),
           );
+
+          // Only animate the very first time a message appears.
+          // Messages already seen (history replay, session switch) render
+          // directly — no per-frame Opacity for the whole list.
+          //
+          // The previous version also added a +6 px Y translate that
+          // settled to 0. Looked nice in isolation, but the trailing
+          // typing-skeleton row (which has NO transform) appeared to
+          // "descend" relative to the bubble during the 200 ms slide:
+          // the bubble visually overlapped the skeleton's top by 6 px
+          // at frame 0 then released as it slid up, which the eye read
+          // as the skeleton sliding DOWN. Fade-only keeps both rows
+          // anchored on screen — no perceived drift between them.
+          final isNew = _animatedMessageIds.add(msg.id);
+          if (!isNew) {
+            return bubble;
+          }
+          return TweenAnimationBuilder<double>(
+            key: ValueKey(msg.id),
+            tween: Tween(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+            builder: (_, v, child) => Opacity(
+              opacity: v,
+              child: child,
+            ),
+            child: bubble,
+          );
         },
       ),
+                    ),
+                  ),
                 ),
     ),
             ),
@@ -4983,81 +5571,57 @@ class _ChatPanelState extends State<ChatPanel> {
     );
   }
 
-  Widget _buildHeader(AppSummary? app, AppSession? session) {
+  /// Compact workspace toggle in the top-right of the chat panel.
+  /// Mirror of [ChatWorkspaceToggle] on the web. Shows the current
+  /// state with the icon (panel-open vs panel-close) and an accent
+  /// colour when the workspace is open.
+  Widget _buildWorkspaceToggle(AppState state) {
+    final c = context.colors;
+    return _AppMenuButton(
+      name: 'Workspace',
+      muted: c.textMuted,
+      bright: state.isWorkspaceVisible ? c.accentPrimary : c.textBright,
+      surfaceAlt: c.surfaceAlt,
+      onTap: state.isWorkspaceVisible
+          ? state.closeWorkspace
+          : state.showWorkspace,
+      leading: Icon(
+        state.isWorkspaceVisible
+            ? Icons.chevron_right_rounded
+            : Icons.chevron_left_rounded,
+        size: 16,
+        color: state.isWorkspaceVisible ? c.accentPrimary : c.textMuted,
+      ),
+      hideChevron: true,
+    );
+  }
+
+  /// Compact app-name dropdown shown absolute in the top-left of the
+  /// chat panel. Replaces the previous full top header — a single
+  /// "AppName ▾" affordance that opens the session drawer on tap,
+  /// like ChatGPT. Doesn't consume any layout space; the conversation
+  /// flows underneath.
+  Widget _buildAppMenu(AppSummary? app) {
     final c = context.colors;
     final manifest = context.watch<AppState>().manifest;
-    context.watch<SessionPrefsService>();
-    final appName =
-        manifest.name.isNotEmpty ? manifest.name : (app?.name ?? 'Chat');
-    final accent = manifest.accent ?? c.accentPrimary;
-    final localTitle = session == null
-        ? null
-        : SessionPrefsService().localTitle(session.sessionId);
-    final daemonTitle = (session?.title ?? '').trim();
-    final sessionTitle = (localTitle != null && localTitle.isNotEmpty)
-        ? localTitle
-        : (daemonTitle.isNotEmpty ? daemonTitle : 'New conversation');
+    final name = manifest.name.isNotEmpty
+        ? manifest.name
+        : (app?.name ?? '');
+    if (name.isEmpty) return const SizedBox.shrink();
 
-    return Container(
-      height: 52,
-      padding: const EdgeInsets.fromLTRB(18, 0, 18, 0),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            c.surface,
-            Color.lerp(c.surface, accent, 0.03) ?? c.surface,
-          ],
-        ),
-        border: Border(bottom: BorderSide(color: c.border)),
-      ),
-      child: Row(
-        children: [
-          Flexible(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  sessionTitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    color: c.textBright,
-                    letterSpacing: -0.2,
-                    height: 1.15,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Flexible(
-                      child: Text(
-                        appName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.inter(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w500,
-                          color: c.textMuted,
-                          letterSpacing: 0.1,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    _ModeBadge(mode: manifest.mode, accent: accent),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+    return _AppMenuButton(
+      name: name,
+      muted: c.textMuted,
+      bright: c.textBright,
+      surfaceAlt: c.surfaceAlt,
+      onTap: () {
+        final state = context.read<AppState>();
+        state.setPanel(
+          state.panel == ActivePanel.sessions
+              ? ActivePanel.chat
+              : ActivePanel.sessions,
+        );
+      },
     );
   }
 
@@ -5172,7 +5736,7 @@ class _ChatPanelState extends State<ChatPanel> {
 
     return Center(
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: isSmall ? double.infinity : 720),
+        constraints: BoxConstraints(maxWidth: isSmall ? double.infinity : 800),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
           child: Column(
@@ -5217,32 +5781,24 @@ class _ChatPanelState extends State<ChatPanel> {
   Widget _buildDiffStatsBar() {
     final ws = context.watch<WorkspaceService>();
 
-    // Prefer daemon-provided stats if available
-    final daemonStats = ws.fileStats;
     final edited = ws.buffers.where((b) =>
         b.isEdited && !b.path.startsWith('_approval/') && !b.path.startsWith('_ask_user/')).toList();
-    final useDaemon = daemonStats.isNotEmpty;
 
-    if (!useDaemon && edited.isEmpty) return const SizedBox.shrink();
+    if (edited.isEmpty) return const SizedBox.shrink();
 
     final c = context.colors;
     final isSmall = MediaQuery.of(context).size.width < 600;
 
-    // Calculate total insertions/deletions
+    // Totals use PENDING counters (delta vs last-approved baseline) so
+    // the "+X -Y in N files" summary reflects every write since approve,
+    // not the per-op delta of the last edit nor the session-wide total
+    // which double-counts compensated changes.
     int totalIns = 0, totalDel = 0;
-    int fileCount = 0;
-    if (useDaemon) {
-      totalIns = daemonStats.totalInsertions;
-      totalDel = daemonStats.totalDeletions;
-      fileCount = daemonStats.modifiedFiles;
-    } else {
-      for (final b in edited) {
-        final stats = b.diffStats;
-        totalIns += stats.insertions;
-        totalDel += stats.deletions;
-      }
-      fileCount = edited.length;
+    for (final b in edited) {
+      totalIns += b.pendingInsertions;
+      totalDel += b.pendingDeletions;
     }
+    final fileCount = edited.length;
 
     if (fileCount == 0 && totalIns == 0 && totalDel == 0) {
       return const SizedBox.shrink();
@@ -5250,7 +5806,7 @@ class _ChatPanelState extends State<ChatPanel> {
 
     return Center(
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: isSmall ? double.infinity : 720),
+        constraints: BoxConstraints(maxWidth: isSmall ? double.infinity : 800),
         child: GestureDetector(
           onTap: () {
             final appState = context.read<AppState>();
@@ -5288,49 +5844,24 @@ class _ChatPanelState extends State<ChatPanel> {
                     style: GoogleFonts.firaCode(
                       fontSize: 11, fontWeight: FontWeight.w600, color: c.red)),
                 const Spacer(),
-                // File names (compact) — use daemon tracked files or buffer list
-                if (useDaemon) ...[
-                  ...ws.trackedFiles
-                      .where((f) => !f.isDir && f.badge.isNotEmpty)
-                      .take(3)
-                      .map((f) => Padding(
-                    padding: const EdgeInsets.only(left: 6),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(f.filename,
-                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
+                ...edited.take(3).map((b) => Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: c.surfaceAlt,
+                      borderRadius: BorderRadius.circular(4),
                     ),
-                  )),
-                  if (fileCount > 3)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 4),
-                      child: Text('+${fileCount - 3}',
-                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                    ),
-                ] else ...[
-                  ...edited.take(3).map((b) => Padding(
-                    padding: const EdgeInsets.only(left: 6),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(b.filename,
-                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                    ),
-                  )),
-                  if (edited.length > 3)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 4),
-                      child: Text('+${edited.length - 3}',
-                        style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
-                    ),
-                ],
+                    child: Text(b.filename,
+                      style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
+                  ),
+                )),
+                if (edited.length > 3)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Text('+${edited.length - 3}',
+                      style: GoogleFonts.firaCode(fontSize: 10, color: c.textMuted)),
+                  ),
                 const SizedBox(width: 8),
                 // Open workspace arrow
                 Icon(Icons.open_in_new_rounded, size: 12, color: c.textMuted),
@@ -5425,32 +5956,10 @@ class _ChatPanelState extends State<ChatPanel> {
     // (_buildDisconnectedBar) under the header — adding a pill here
     // too would duplicate the info without adding value.
 
-    // Context pressure bar — thin, always visible once we have data.
-    // `displayPressure` is `raw / threshold`; 1.0 means "compaction
-    // imminent" (the actionable mark). Colors: < 0.67 calm, 0.67–0.85
-    // watching, ≥ 0.85 close to trigger.
-    final cs = context.watch<ContextState>();
-    Widget? pressureBar;
-    if (cs.hasData && cs.pressure > 0) {
-      final d = cs.displayPressure.clamp(0.0, 1.2);
-      final color = d >= 0.85
-          ? c.red
-          : d >= 0.67
-              ? c.orange
-              : accent;
-      final thrPct = (cs.threshold * 100).round();
-      pressureBar = Tooltip(
-        message:
-            '${(d * 100).round()}% of compaction (fires at $thrPct%) '
-            '· ${cs.totalEstimatedTokens}/${cs.effectiveMax} tokens',
-        child: LinearProgressIndicator(
-          value: d.clamp(0.0, 1.0),
-          minHeight: 2,
-          backgroundColor: c.surfaceAlt.withValues(alpha: 0.6),
-          valueColor: AlwaysStoppedAnimation(color),
-        ),
-      );
-    }
+    // Context pressure bar removed from the status strip — the same
+    // signal is already shown by ``_ContextRing`` in the composer
+    // toolbar, which is more visible and offers click-to-details.
+    // Displaying both duplicated chrome without adding information.
 
     // Tool activity bar — live view of what the agent is doing right now.
     Widget? toolBar;
@@ -5465,14 +5974,13 @@ class _ChatPanelState extends State<ChatPanel> {
       );
     }
 
-    if (pills.isEmpty && pressureBar == null && toolBar == null) {
+    if (pills.isEmpty && toolBar == null) {
       return const SizedBox.shrink();
     }
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        ?pressureBar,
         ?toolBar,
         if (pills.isNotEmpty)
           Container(
@@ -5504,13 +6012,24 @@ class _ChatPanelState extends State<ChatPanel> {
         if (m.text.toLowerCase().contains(q)) hits++;
       }
     }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(bottom: BorderSide(color: c.border)),
-      ),
-      child: Row(
+    final isSmall = MediaQuery.of(context).size.width < 600;
+    // Capped to the composer rail (800 px on desktop, full-width on
+    // < 600 px) — was a full-width strip with `border-bottom` across
+    // the screen. Now a centered chip with a full border for visual
+    // cohesion with the rest of the chat. Mirror of the web fix.
+    return Center(
+      child: ConstrainedBox(
+        constraints:
+            BoxConstraints(maxWidth: isSmall ? double.infinity : 800),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: c.border),
+          ),
+          child: Row(
         children: [
           Icon(Icons.search_rounded, size: 14, color: c.textMuted),
           const SizedBox(width: 8),
@@ -5550,6 +6069,8 @@ class _ChatPanelState extends State<ChatPanel> {
           ),
         ],
       ),
+        ),
+      ),
     );
   }
 
@@ -5581,12 +6102,10 @@ class _ChatPanelState extends State<ChatPanel> {
       }
     }
 
-    // ── 2. Disconnected — rendered with a Retry action, not the
-    //       plain phase bar, so the user can force a manual attempt
-    //       if the 5 auto-retries have been exhausted.
-    if (_statusPhase == 'disconnected') {
-      return _buildDisconnectedBar(c);
-    }
+    // ── 2. Disconnected — intentionally NOT shown here anymore.
+    //       The top `_ConnectivityBanner` (main.dart) is the sole
+    //       indicator now; doubling up above the composer was the
+    //       loud strip the user asked us to remove.
 
     // ── 3. Actionable phases ─────────────────────────────────────
     if (_statusPhase.isNotEmpty) {
@@ -5599,46 +6118,6 @@ class _ChatPanelState extends State<ChatPanel> {
     // Nothing worth showing — stay invisible so the composer sits
     // flush against the messages.
     return const SizedBox.shrink();
-  }
-
-  Widget _buildDisconnectedBar(AppColors c) {
-    return Center(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width < 600
-              ? double.infinity
-              : 720,
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
-            decoration: BoxDecoration(
-              color: c.red.withValues(alpha: 0.06),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: c.red.withValues(alpha: 0.25)),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.cloud_off_rounded, size: 12, color: c.red),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text('chat.daemon_offline_reconnecting'.tr(),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.inter(
-                          fontSize: 11.5,
-                          color: c.red,
-                          fontWeight: FontWeight.w500)),
-                ),
-                const SizedBox(width: 8),
-                _RetrySocketButton(),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
   }
 
   /// Convert a status phase into UI intent, or return (null, '', …)
@@ -5672,7 +6151,7 @@ class _ChatPanelState extends State<ChatPanel> {
       child: ConstrainedBox(
         constraints: BoxConstraints(
           maxWidth: MediaQuery.of(context).size.width < 600
-              ? double.infinity : 720,
+              ? double.infinity : 800,
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
@@ -5720,7 +6199,7 @@ class _ChatPanelState extends State<ChatPanel> {
       child: ConstrainedBox(
         constraints: BoxConstraints(
           maxWidth: MediaQuery.of(context).size.width < 600
-              ? double.infinity : 720,
+              ? double.infinity : 800,
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
@@ -5809,55 +6288,150 @@ class _ChatPanelState extends State<ChatPanel> {
 
 }
 
-// ─── Workspace missing banner ─────────────────────────────────────────────────
+// ─── Workspace chip (empty-state, above composer) ────────────────────────────
 
-class _WorkspaceBanner extends StatelessWidget {
-  final String appName;
-  const _WorkspaceBanner({required this.appName});
+/// Compact chip rendered above the composer when an app requires a workspace
+/// folder. Orange-tinted when no workspace is set (clickable to pick one),
+/// neutral when a folder is already active (clickable to change it).
+/// When [highlighted] flips to true, plays a horizontal shake + glow to
+/// draw attention after the user pressed Send without picking a folder.
+class _WorkspaceChip extends StatefulWidget {
+  final String workspace;
+  final bool highlighted;
+  final VoidCallback onTap;
+  const _WorkspaceChip({
+    required this.workspace,
+    required this.highlighted,
+    required this.onTap,
+  });
+
+  @override
+  State<_WorkspaceChip> createState() => _WorkspaceChipState();
+}
+
+class _WorkspaceChipState extends State<_WorkspaceChip>
+    with SingleTickerProviderStateMixin {
+  bool _h = false;
+  late final AnimationController _shake;
+  late final Animation<double> _shakeAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _shake = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
+    _shakeAnim = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 0, end: -6), weight: 1),
+      TweenSequenceItem(tween: Tween(begin: -6, end: 6), weight: 2),
+      TweenSequenceItem(tween: Tween(begin: 6, end: -5), weight: 2),
+      TweenSequenceItem(tween: Tween(begin: -5, end: 4), weight: 2),
+      TweenSequenceItem(tween: Tween(begin: 4, end: -2), weight: 2),
+      TweenSequenceItem(tween: Tween(begin: -2, end: 0), weight: 1),
+    ]).animate(CurvedAnimation(parent: _shake, curve: Curves.easeInOut));
+  }
+
+  @override
+  void didUpdateWidget(_WorkspaceChip old) {
+    super.didUpdateWidget(old);
+    if (widget.highlighted && !old.highlighted) {
+      _shake.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _shake.dispose();
+    super.dispose();
+  }
+
+  String _basename(String p) {
+    final n = p.replaceAll('\\', '/');
+    final i = n.lastIndexOf('/');
+    return (i < 0 || i == n.length - 1) ? n : n.substring(i + 1);
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      color: c.surfaceAlt,
-      child: Row(
-        children: [
-          Icon(Icons.folder_off_outlined, size: 14, color: c.red),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'chat.workspace_banner_message'
-                  .tr(namedArgs: {'appName': appName}),
-              style: GoogleFonts.inter(fontSize: 12, color: c.red),
-            ),
-          ),
-          MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: GestureDetector(
-              onTap: () async {
-                final dir = await pickWorkspace(context);
-                if (dir != null && context.mounted) {
-                  context.read<AppState>().setWorkspace(dir);
-                }
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: c.surface,
-                  borderRadius: BorderRadius.circular(5),
-                  border: Border.all(color: c.red.withValues(alpha: 0.3)),
+    final empty = widget.workspace.isEmpty;
+    final label = empty ? 'Pick workspace' : _basename(widget.workspace);
+    final chipColor = empty ? c.orange : c.textMuted;
+    final isLit = widget.highlighted && empty;
+    return AnimatedBuilder(
+      animation: _shakeAnim,
+      builder: (_, child) => Transform.translate(
+        offset: Offset(_shakeAnim.value, 0),
+        child: child,
+      ),
+      child: Align(
+        alignment: Alignment.center,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _h = true),
+          onExit: (_) => setState(() => _h = false),
+          child: GestureDetector(
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: empty
+                    ? c.orange.withValues(alpha: isLit ? 0.22 : (_h ? 0.14 : 0.08))
+                    : (_h ? c.surfaceAlt : Colors.transparent),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: empty
+                      ? c.orange.withValues(alpha: isLit ? 0.8 : (_h ? 0.5 : 0.3))
+                      : (_h ? c.borderHover : c.border),
+                  width: isLit ? 1.5 : 1.0,
                 ),
-                child: Text('chat.select_short'.tr(),
-                    style: GoogleFonts.inter(fontSize: 11, color: c.red)),
+                boxShadow: isLit
+                    ? [
+                        BoxShadow(
+                          color: c.orange.withValues(alpha: 0.35),
+                          blurRadius: 10,
+                          spreadRadius: -2,
+                        )
+                      ]
+                    : null,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    empty ? Icons.folder_open_outlined : Icons.folder_outlined,
+                    size: 12,
+                    color: chipColor,
+                  ),
+                  const SizedBox(width: 5),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 220),
+                    child: Text(
+                      label,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.inter(
+                        fontSize: 11.5,
+                        color: chipColor,
+                        fontWeight: empty ? FontWeight.w500 : FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                  if (!empty) ...[
+                    const SizedBox(width: 4),
+                    Icon(Icons.edit_outlined, size: 10, color: c.textDim),
+                  ],
+                ],
               ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }
 }
+
 
 // ─── Approval banner ──────────────────────────────────────────────────────────
 
@@ -5865,9 +6439,8 @@ class _ApprovalBanner extends StatefulWidget {
   final ApprovalRequest request;
   final void Function(String message) onApprove;
   final void Function(String message) onDeny;
-  final VoidCallback? onDismiss;
   const _ApprovalBanner(
-      {required this.request, required this.onApprove, required this.onDeny, this.onDismiss});
+      {required this.request, required this.onApprove, required this.onDeny});
 
   @override
   State<_ApprovalBanner> createState() => _ApprovalBannerState();
@@ -6140,18 +6713,6 @@ class _ApprovalBannerState extends State<_ApprovalBanner>
         ),
         const Spacer(),
         _timerBadge(ac),
-        if (widget.onDismiss != null) ...[
-          const SizedBox(width: 6),
-          InkWell(
-            borderRadius: BorderRadius.circular(6),
-            onTap: widget.onDismiss,
-            child: Padding(
-              padding: const EdgeInsets.all(5),
-              child:
-                  Icon(Icons.close_rounded, size: 15, color: ac.textDim),
-            ),
-          ),
-        ],
       ],
     );
   }
@@ -7534,7 +8095,7 @@ class _ChatInputState extends State<_ChatInput> {
                           : 'chat.placeholder'.tr(),
                       hintStyle: GoogleFonts.inter(
                           fontSize: 14,
-                          color: c.textMuted),
+                          color: c.textDim),
                       border: InputBorder.none,
                       counterText: '',
                       contentPadding: EdgeInsets.zero,
@@ -7903,19 +8464,20 @@ class _ContextRingState extends State<_ContextRing>
   Widget build(BuildContext context) {
     final cs = context.watch<ContextState>();
     final cc = context.colors;
-    // `displayPressure` normalises raw pressure by the YAML-defined
-    // compaction threshold — 1.0 means "about to compact", which is
-    // the actionable frontier for the user. Clamp at 1.2 so an
-    // overdue state (pressure > threshold, daemon hasn't compacted
-    // yet) still renders but doesn't blow the ring out.
-    final ratio = cs.displayPressure.clamp(0.0, 1.2);
+    // Ring shows raw context usage (``used / limit``) — the
+    // percentage a user intuitively reads as "how full is my
+    // context". Threshold proximity still drives color / alert so
+    // the ring goes orange / red / pulse before compaction triggers
+    // even though the number itself never exceeds 100 %.
+    final ratio = cs.pressure.clamp(0.0, 1.0);
     final pct = (ratio * 100).round();
-    final color = ratio < 0.67
+    final proximity = cs.displayPressure;
+    final color = proximity < 0.67
         ? cc.green
-        : ratio < 0.85
+        : proximity < 0.85
             ? cc.orange
             : cc.red;
-    final alert = ratio >= 0.90;
+    final alert = proximity >= 0.90;
     _shownColor ??= color;
     final thrPct = (cs.threshold * 100).round();
     // Tween-animated ratio & color so a jump from 40% → 75% glides
@@ -8311,14 +8873,18 @@ class _SendButtonState extends State<_SendButton>
     //   turn running + text   → ↑ (queue)
     //   idle + text           → ↑ (send) — or ▶ for oneshot
     //   idle + empty          → ↑ (disabled)
+    // Use the SHARP (non-rounded) variants so the icon weight visually
+    // matches the web Lucide `ArrowUp size={16} strokeWidth={2}` — the
+    // rounded Material glyphs were heavier and read as "different
+    // button" against the gradient.
     final showAbort = widget.isActive && !widget.hasText;
     final IconData icon;
     if (showAbort) {
-      icon = Icons.close_rounded;
+      icon = Icons.close;
     } else if (widget.isOneshot && !widget.isActive) {
-      icon = Icons.play_arrow_rounded;
+      icon = Icons.play_arrow;
     } else {
-      icon = Icons.arrow_upward_rounded;
+      icon = Icons.arrow_upward;
     }
 
     final tooltip = showAbort
@@ -8340,6 +8906,15 @@ class _SendButtonState extends State<_SendButton>
     final Gradient? gradient;
     final Color bg;
     final Color fg;
+    // Web parity (chat-composer.tsx:489 — `SendButton`):
+    //   disabled  →  bg surface, fg textDim, 1px border
+    //   abort     →  bg red @ 14% (22% on hover), fg red
+    //   default   →  gradient 135° accentPrimary → mix(45/55) secondary,
+    //                fg onAccent, soft accent halo
+    // Same tones, just expressed via `Color.lerp` (linear RGB) instead
+    // of CSS `color-mix(in oklab, …)`. Visually identical at the
+    // default purple/blue palette; both stay close on coral / cyan
+    // themes too.
     if (effectivelyDisabled) {
       bg = c.surface;
       fg = c.textDim;
@@ -8412,6 +8987,11 @@ class _SendButtonState extends State<_SendButton>
                     border: effectivelyDisabled
                         ? Border.all(color: c.border)
                         : null,
+                    // Web: `0 4px 20px -2px / 0 2px 12px -2px` accent halo.
+                    // Use the same blur/spread/offset and keep the alpha
+                    // mild (0.35 / 0.6) so the button doesn't drag a
+                    // dark "puddle" under itself like the previous
+                    // 12-blur halo did.
                     boxShadow: gradient != null
                         ? [
                             BoxShadow(
@@ -8419,12 +8999,13 @@ class _SendButtonState extends State<_SendButton>
                                   .withValues(alpha: _h ? 0.6 : 0.35),
                               blurRadius: _h ? 20 : 12,
                               spreadRadius: -2,
-                              offset: const Offset(0, 4),
+                              offset: Offset(0, _h ? 4 : 2),
                             ),
                           ]
                         : null,
                   ),
-                  child: Icon(icon, size: 18, color: fg),
+                  // Icon 16px to match web `<ArrowUp size={16} strokeWidth={2}>`.
+                  child: Icon(icon, size: 16, color: fg),
                 ),
                 if (widget.queuedCount > 0)
                   Positioned(
@@ -9111,73 +9692,6 @@ class _QueuePanelState extends State<_QueuePanel> {
   }
 }
 
-// ─── Retry button used by the offline bar ─────────────────────────────────
-
-class _RetrySocketButton extends StatefulWidget {
-  @override
-  State<_RetrySocketButton> createState() => _RetrySocketButtonState();
-}
-
-class _RetrySocketButtonState extends State<_RetrySocketButton> {
-  bool _h = false;
-  bool _busy = false;
-
-  Future<void> _retry() async {
-    if (_busy) return;
-    setState(() => _busy = true);
-    try {
-      await DigitornSocketService().connect(AuthService().baseUrl);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _h = true),
-      onExit: (_) => setState(() => _h = false),
-      child: GestureDetector(
-        onTap: _retry,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-          decoration: BoxDecoration(
-            color: _h ? c.red.withValues(alpha: 0.18) : c.red.withValues(alpha: 0.10),
-            borderRadius: BorderRadius.circular(4),
-            border: Border.all(color: c.red.withValues(alpha: 0.3)),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (_busy)
-                SizedBox(
-                  width: 10,
-                  height: 10,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 1.4,
-                    valueColor: AlwaysStoppedAnimation(c.red),
-                  ),
-                )
-              else
-                Icon(Icons.refresh_rounded, size: 11, color: c.red),
-              const SizedBox(width: 5),
-              Text('chat.retry'.tr(),
-                  style: GoogleFonts.inter(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: c.red,
-                  )),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 // ─── Status pill (Reconnecting / Interrupted / Turn in progress) ───
 
 class _StatusPill extends StatefulWidget {
@@ -9280,38 +9794,6 @@ class _StatusPillState extends State<_StatusPill>
 
 // ─── Header pieces ──────────────────────────────────────────────────────────
 
-class _ModeBadge extends StatelessWidget {
-  final ExecutionMode mode;
-  final Color accent;
-  const _ModeBadge({required this.mode, required this.accent});
-
-  @override
-  Widget build(BuildContext context) {
-    final label = switch (mode) {
-      ExecutionMode.background => 'BG',
-      ExecutionMode.oneshot => 'ONE',
-      ExecutionMode.conversation => 'CHAT',
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: accent.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: accent.withValues(alpha: 0.3)),
-      ),
-      child: Text(
-        label,
-        style: GoogleFonts.firaCode(
-          fontSize: 9,
-          fontWeight: FontWeight.w800,
-          color: accent,
-          letterSpacing: 0.6,
-        ),
-      ),
-    );
-  }
-}
-
 class _ToolActivityBar extends StatefulWidget {
   final String toolName;
   final int elapsedMs;
@@ -9365,17 +9847,27 @@ class _ToolActivityBarState extends State<_ToolActivityBar>
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    return Container(
-      decoration: BoxDecoration(
-        color: Color.lerp(c.surface, widget.accent, 0.04) ?? c.surface,
-        border: Border(
-          bottom:
-              BorderSide(color: widget.accent.withValues(alpha: 0.2)),
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
+    final isSmall = MediaQuery.of(context).size.width < 600;
+    // Capped to the composer rail (800 px on desktop, full-width on
+    // < 600 px) and rendered as a centered card with a full border
+    // instead of an edge-to-edge strip with `border-bottom`.
+    return Center(
+      child: ConstrainedBox(
+        constraints:
+            BoxConstraints(maxWidth: isSmall ? double.infinity : 800),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: Color.lerp(c.surface, widget.accent, 0.04) ?? c.surface,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: widget.accent.withValues(alpha: 0.22),
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
           AnimatedBuilder(
             animation: _shimmer,
             builder: (_, _) {
@@ -9507,6 +9999,8 @@ class _ToolActivityBarState extends State<_ToolActivityBar>
           ),
         ],
       ),
+        ),
+      ),
     );
   }
 }
@@ -9596,6 +10090,15 @@ class _ArtifactsFloatingChip extends StatelessWidget {
 /// bottom of the chat list while we wait for the first response
 /// signal. Independent of any ChatMessage — driven purely by
 /// ``_awaitingAgentResponse``.
+/// iMessage-style typing dots — three tiny circles that wave in
+/// sequence while the agent is thinking. Mirror of the web
+/// `ChatTypingSkeleton` in components/chat/chat-typing-skeleton.tsx.
+///
+/// Wave spec (intentionally low-key — "barely there" feel):
+///   - 3 dots, 5 px Ø, gap 4 px
+///   - Each dot pulses opacity 0.18 → 0.55 and translates Y -1.5 → 0
+///   - Colour `c.textDim` (one step softer than textMuted)
+///   - 1.2 s loop, 0.18 s stagger between dots
 class _ChatTypingSkeleton extends StatefulWidget {
   const _ChatTypingSkeleton();
 
@@ -9612,7 +10115,7 @@ class _ChatTypingSkeletonState extends State<_ChatTypingSkeleton>
     super.initState();
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(milliseconds: 1200),
     )..repeat();
   }
 
@@ -9626,34 +10129,30 @@ class _ChatTypingSkeletonState extends State<_ChatTypingSkeleton>
   Widget build(BuildContext context) {
     final c = context.colors;
     return SizedBox(
-      width: 180,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      height: 24,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _ChatSkeletonBar(
-              ctrl: _ctrl, delayFraction: 0.00, widthFactor: 0.55, c: c),
-          const SizedBox(height: 6),
-          _ChatSkeletonBar(
-              ctrl: _ctrl, delayFraction: 0.15, widthFactor: 0.85, c: c),
-          const SizedBox(height: 6),
-          _ChatSkeletonBar(
-              ctrl: _ctrl, delayFraction: 0.30, widthFactor: 0.70, c: c),
+          _TypingDot(ctrl: _ctrl, delayFraction: 0.00, color: c.textDim),
+          const SizedBox(width: 4),
+          _TypingDot(ctrl: _ctrl, delayFraction: 0.15, color: c.textDim),
+          const SizedBox(width: 4),
+          _TypingDot(ctrl: _ctrl, delayFraction: 0.30, color: c.textDim),
         ],
       ),
     );
   }
 }
 
-class _ChatSkeletonBar extends StatelessWidget {
+class _TypingDot extends StatelessWidget {
   final AnimationController ctrl;
   final double delayFraction;
-  final double widthFactor;
-  final AppColors c;
-  const _ChatSkeletonBar({
+  final Color color;
+  const _TypingDot({
     required this.ctrl,
     required this.delayFraction,
-    required this.widthFactor,
-    required this.c,
+    required this.color,
   });
 
   @override
@@ -9661,26 +10160,101 @@ class _ChatSkeletonBar extends StatelessWidget {
     return AnimatedBuilder(
       animation: ctrl,
       builder: (_, _) {
-        // Triangular wave with the leading edge offset by ``delayFraction``
-        // so the three bars ripple one after another.
+        // Triangular wave matching the web `easeInOut` keyframes
+        // [0.18 → 0.55 → 0.18] over the loop, with a phase offset per
+        // dot so the three pulse one after another.
         double t = (ctrl.value - delayFraction) % 1.0;
         if (t < 0) t += 1.0;
         final pulse = t < 0.5 ? t * 2 : (1 - t) * 2;
-        final opacity = 0.25 + 0.55 * pulse;
-        return Align(
-          alignment: Alignment.centerLeft,
-          child: FractionallySizedBox(
-            widthFactor: widthFactor,
-            child: Container(
-              height: 10,
-              decoration: BoxDecoration(
-                color: c.textMuted.withValues(alpha: opacity),
-                borderRadius: BorderRadius.circular(4),
-              ),
+        final opacity = 0.18 + 0.37 * pulse;
+        final dy = -1.5 * pulse;
+        return Transform.translate(
+          offset: Offset(0, dy),
+          child: Container(
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: opacity),
+              shape: BoxShape.circle,
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// Compact pill button with optional leading icon and optional
+/// trailing chevron — hover reveals a soft surface bg. Used by both
+/// the top-left app-name menu and the top-right workspace toggle.
+class _AppMenuButton extends StatefulWidget {
+  final String name;
+  final Color muted;
+  final Color bright;
+  final Color surfaceAlt;
+  final VoidCallback onTap;
+  final Widget? leading;
+  final bool hideChevron;
+  const _AppMenuButton({
+    required this.name,
+    required this.muted,
+    required this.bright,
+    required this.surfaceAlt,
+    required this.onTap,
+    this.leading,
+    this.hideChevron = false,
+  });
+
+  @override
+  State<_AppMenuButton> createState() => _AppMenuButtonState();
+}
+
+class _AppMenuButtonState extends State<_AppMenuButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: _hover ? widget.surfaceAlt : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.leading != null) ...[
+                widget.leading!,
+                const SizedBox(width: 5),
+              ],
+              Text(
+                widget.name,
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: widget.bright,
+                  letterSpacing: -0.2,
+                ),
+              ),
+              if (!widget.hideChevron) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  size: 16,
+                  color: widget.muted.withValues(alpha: _hover ? 1.0 : 0.7),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

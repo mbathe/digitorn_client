@@ -219,13 +219,34 @@ class _PaletteGrid extends StatelessWidget {
       AppPalette.nord,
       AppPalette.solarized,
     ];
+    // Wrap children must have a BOUNDED width — ``double.infinity``
+    // inside a Wrap becomes "give me all the space", which at best
+    // forces one-card-per-row and at worst RenderFlex-overflows when
+    // the parent's own width hasn't been settled yet. On compact
+    // viewports we switch to a Column so each card stretches to the
+    // full (bounded) column width cleanly.
+    if (compact) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final p in ordered) ...[
+            _PaletteCard(
+              palette: p,
+              selected: selected == p,
+              onTap: () => onChanged(p),
+            ),
+            SizedBox(height: DsSpacing.x3),
+          ],
+        ],
+      );
+    }
     return Wrap(
       spacing: DsSpacing.x3,
       runSpacing: DsSpacing.x3,
       children: [
         for (final p in ordered)
           SizedBox(
-            width: compact ? double.infinity : 168,
+            width: 168,
             child: _PaletteCard(
               palette: p,
               selected: selected == p,
@@ -312,19 +333,26 @@ class _Swatches extends StatelessWidget {
       preview.accentPrimary,
       preview.accentSecondary,
     ];
+    // Negative margin on Container is a Flutter assertion violation
+    // (``container.dart:271`` — margin.isNonNegative). The swatches
+    // need a -4 px overlap to look like a chip stack, so we express
+    // the overlap through ``Transform.translate`` instead: same
+    // visual effect, no Container constraint check triggered.
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         for (int i = 0; i < colors.length; i++)
-          Container(
-            width: 18,
-            height: 18,
-            margin: EdgeInsets.only(left: i == 0 ? 0 : -4),
-            decoration: BoxDecoration(
-              color: colors[i],
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: Colors.black.withValues(alpha: 0.15),
+          Transform.translate(
+            offset: Offset(i == 0 ? 0 : -4.0 * i, 0),
+            child: Container(
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                color: colors[i],
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Colors.black.withValues(alpha: 0.15),
+                ),
               ),
             ),
           ),

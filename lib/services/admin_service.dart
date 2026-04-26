@@ -9,7 +9,7 @@
 ///   * `PUT /api/admin/users/{id}`         — update roles / display name
 ///   * `GET /api/admin/users/{id}/sessions`— per-user sessions for revoke
 ///   * `DELETE /api/admin/sessions/{sid}`  — revoke a session
-///   * `GET /api/admin/audit`              — recent admin actions log
+///   * `GET /api/admin/audit-log`          — recent admin actions log
 ///   * `GET /api/admin/stats`              — workspace overview tile counts
 ///
 /// All routes degrade gracefully — when the daemon hasn't shipped a
@@ -331,19 +331,34 @@ class AdminAuditEntry {
     this.details = const {},
   });
 
-  factory AdminAuditEntry.fromJson(Map<String, dynamic> j) => AdminAuditEntry(
-        id: (j['id'] ?? '') as String,
-        actorId: (j['actor_id'] ?? j['user_id'] ?? '') as String,
-        actorLabel: j['actor_label'] as String? ??
-            j['actor_email'] as String?,
-        action: (j['action'] ?? 'unknown') as String,
-        targetType: j['target_type'] as String?,
-        targetId: j['target_id'] as String?,
-        details: j['details'] is Map
-            ? (j['details'] as Map).cast<String, dynamic>()
-            : <String, dynamic>{},
-        when: _parseDate(j['ts'] ?? j['created_at']) ?? DateTime.now(),
-      );
+  factory AdminAuditEntry.fromJson(Map<String, dynamic> j) {
+    // Daemon ships unified-ledger shape (history_log): `actor_user_id`,
+    // `event_type`, `target_user_id`+`target_app_id`, `before`/`after`.
+    // Older / generic shapes (`actor_id`, `action`, `target_id`,
+    // `details`) stay supported as fallbacks.
+    final targetApp = j['target_app_id'] as String?;
+    final targetUser = j['target_user_id'] as String?;
+    final detailsMap = j['details'] is Map
+        ? (j['details'] as Map).cast<String, dynamic>()
+        : (j['after'] is Map
+            ? (j['after'] as Map).cast<String, dynamic>()
+            : <String, dynamic>{});
+    return AdminAuditEntry(
+      id: (j['id']?.toString() ?? ''),
+      actorId: (j['actor_user_id'] ?? j['actor_id'] ?? j['user_id'] ?? '')
+          as String,
+      actorLabel: j['actor_label'] as String? ?? j['actor_email'] as String?,
+      action: (j['event_type'] ?? j['action'] ?? j['type'] ?? 'unknown')
+          as String,
+      targetType: j['target_type'] as String? ??
+          (targetApp != null && targetApp.isNotEmpty
+              ? 'app'
+              : (targetUser != null && targetUser.isNotEmpty ? 'user' : null)),
+      targetId: (j['target_id'] ?? targetApp ?? targetUser) as String?,
+      details: detailsMap,
+      when: _parseDate(j['ts'] ?? j['created_at']) ?? DateTime.now(),
+    );
+  }
 }
 
 class AdminStats {
@@ -725,7 +740,7 @@ class AdminService extends ChangeNotifier {
   Future<List<AdminAuditEntry>> loadAudit({int limit = 100}) async {
     try {
       final r = await _dio.get(
-        '$_base/api/admin/audit',
+        '$_base/api/admin/audit-log',
         queryParameters: {'limit': limit},
       );
       if (r.statusCode != 200) return const [];
